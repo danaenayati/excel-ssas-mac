@@ -1,0 +1,216 @@
+// The four areas (Filters, Columns, Rows, Values) and the chips in them. Each chip is
+// a button that opens a menu: move to another area, move up or down, filter members,
+// remove. Dragging a chip or a field onto an area does the same moves faster, but
+// nothing depends on it.
+
+import { useState, type DragEvent } from "react";
+import {
+  AREA_LABELS,
+  FIELD_AREAS,
+  locate,
+  type Area,
+  type FieldArea,
+  type LayoutAction,
+} from "../state/layout";
+import type { Layout, PlacedField } from "../types";
+import { cx } from "../util";
+import { Icon } from "./common";
+import { dragged, endDrag, startDrag } from "./drag";
+import { Menu, type MenuEntry } from "./Menu";
+
+interface Props {
+  layout: Layout;
+  dispatch: (action: LayoutAction) => void;
+  /** Open the member picker for a placed hierarchy. */
+  onFilter: (hierarchy: string) => void;
+}
+
+interface ChipInfo {
+  name: string;
+  caption: string;
+  field: PlacedField | null;
+}
+
+const ORDER: Area[] = ["filters", "columns", "rows", "values"];
+
+function chipsOf(layout: Layout, area: Area): ChipInfo[] {
+  if (area === "values") {
+    return layout.values.map((v) => ({ name: v.measure, caption: v.caption, field: null }));
+  }
+  return layout[area].map((f) => ({ name: f.hierarchy, caption: f.caption, field: f }));
+}
+
+function filterText(field: PlacedField | null): string | null {
+  if (!field || field.members.length === 0) return null;
+  if (field.members.length === 1) return field.memberCaptions[0] ?? "1 item";
+  return `${field.members.length} items`;
+}
+
+export function Areas({ layout, dispatch, onFilter }: Props) {
+  const [menu, setMenu] = useState<{ area: Area; name: string; anchor: HTMLElement } | null>(null);
+  const [hover, setHover] = useState<{ area: Area; index: number | null } | null>(null);
+
+  const accepts = (area: Area): boolean => {
+    const item = dragged();
+    return item !== null && (item.kind === "measure") === (area === "values");
+  };
+
+  const over = (event: DragEvent, area: Area, index: number | null) => {
+    if (!accepts(area)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      event.dataTransfer.dropEffect = "move";
+    } catch {
+      // not settable in every web view
+    }
+    if (!hover || hover.area !== area || hover.index !== index) setHover({ area, index });
+  };
+
+  const drop = (event: DragEvent, area: Area, index: number | null) => {
+    const item = dragged();
+    setHover(null);
+    if (!item || !accepts(area)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    endDrag();
+    const place = locate(layout, item.name);
+    // `index` counts the chips as drawn; the reducer wants the position after the
+    // dragged chip has been taken out of its old place.
+    let at = index === null ? undefined : index;
+    if (at !== undefined && place && place.area === area && place.index < at) at -= 1;
+    if (place) {
+      dispatch({ type: "move", name: item.name, area, index: at });
+    } else if (item.kind === "measure") {
+      dispatch({ type: "addMeasure", measure: { uniqueName: item.name, caption: item.caption }, index: at });
+    } else {
+      dispatch({
+        type: "addHierarchy",
+        hierarchy: { uniqueName: item.name, caption: item.caption, allMember: item.allMember },
+        area: area as FieldArea,
+        index: at,
+      });
+    }
+  };
+
+  const menuItems = (area: Area, name: string): MenuEntry[] => {
+    const list = chipsOf(layout, area);
+    const index = list.findIndex((c) => c.name === name);
+    if (index < 0) return [];
+    const chip = list[index];
+    const items: MenuEntry[] = [
+      { label: "Move up", run: () => dispatch({ type: "shift", name, delta: -1 }), disabled: index === 0 },
+      {
+        label: "Move down",
+        run: () => dispatch({ type: "shift", name, delta: 1 }),
+        disabled: index === list.length - 1,
+      },
+    ];
+    if (area !== "values") {
+      items.push("separator");
+      for (const target of FIELD_AREAS) {
+        if (target === area) continue;
+        items.push({
+          label: `Move to ${AREA_LABELS[target]}`,
+          run: () => dispatch({ type: "move", name, area: target }),
+        });
+      }
+      items.push("separator", { label: "Filter members…", run: () => onFilter(name) });
+      if (chip.field && chip.field.members.length > 0) {
+        items.push({
+          label: "Clear filter",
+          run: () => dispatch({ type: "setMembers", hierarchy: name, members: [], captions: [] }),
+        });
+      }
+    }
+    items.push("separator", {
+      label: "Remove",
+      run: () => dispatch({ type: "remove", name }),
+      danger: true,
+    });
+    return items;
+  };
+
+  return (
+    <section className="areas" aria-label="Layout">
+      {ORDER.map((area) => {
+        const chips = chipsOf(layout, area);
+        const target = hover !== null && hover.area === area;
+        return (
+          <div
+            key={area}
+            className={cx("area", target && hover.index === null && "drop-end")}
+            onDragOver={(event) => over(event, area, null)}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setHover(null);
+            }}
+            onDrop={(event) => drop(event, area, null)}
+          >
+            <h3 className="area-title" id={`area-${area}`}>
+              {AREA_LABELS[area]}
+            </h3>
+            <ul className="chips" aria-labelledby={`area-${area}`}>
+              {chips.map((chip, index) => {
+                const filter = filterText(chip.field);
+                const open = menu !== null && menu.area === area && menu.name === chip.name;
+                return (
+                  <li
+                    key={chip.name}
+                    className={cx("chip", target && hover.index === index && "drop-before")}
+                    draggable
+                    onDragStart={(event) =>
+                      startDrag(event, {
+                        kind: area === "values" ? "measure" : "hierarchy",
+                        name: chip.name,
+                        caption: chip.caption,
+                        allMember: chip.field ? chip.field.allMember : null,
+                      })
+                    }
+                    onDragEnd={() => {
+                      endDrag();
+                      setHover(null);
+                    }}
+                    onDragOver={(event) => over(event, area, index)}
+                    onDrop={(event) => drop(event, area, index)}
+                  >
+                    <button
+                      type="button"
+                      className={cx("chip-button", open && "open")}
+                      aria-haspopup="menu"
+                      aria-expanded={open}
+                      title={
+                        chip.field && chip.field.members.length > 0
+                          ? `${chip.caption}: ${chip.field.memberCaptions.join(", ")}`
+                          : chip.caption
+                      }
+                      onClick={(event) =>
+                        setMenu(open ? null : { area, name: chip.name, anchor: event.currentTarget })
+                      }
+                    >
+                      <span className="chip-caption">{chip.caption}</span>
+                      {filter !== null && (
+                        <span className="chip-filter">
+                          <Icon name="funnel" />
+                          <span className="chip-filter-text">{filter}</span>
+                        </span>
+                      )}
+                      <Icon name="chevron-down" className="chip-caret" />
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        );
+      })}
+      {menu && (
+        <Menu
+          anchor={menu.anchor}
+          label={`${AREA_LABELS[menu.area]} field`}
+          items={menuItems(menu.area, menu.name)}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </section>
+  );
+}
