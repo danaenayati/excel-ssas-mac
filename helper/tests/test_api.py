@@ -287,3 +287,33 @@ def test_served_over_https_with_the_generated_certificate(tmp_path, app):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# -- the real backend class behind the API, against the loopback stand-in server ------
+def test_real_backend_through_the_api(tmp_path, ntlm_users):
+    from fake_ssas import FakeSsas
+    from test_ssas_backend import RESPONSES
+
+    user, password = ntlm_users
+    real = App(Store(tmp_path / "real", secrets=MemorySecrets()), port=PORT, pane_dir=None)
+    with FakeSsas(dict(RESPONSES)) as server:
+        address = f"127.0.0.1:{server.port}"
+        status, body = call(real, "POST", "/api/connections", {"server": address, "username": user, "password": "wrong"})
+        assert status == 401 and body["error"]["category"] == "auth"
+
+        status, created = call(real, "POST", "/api/connections", {"server": address, "username": user, "password": password})
+        assert status == 200 and created["server"] == address
+        base = f"/api/connections/{created['id']}"
+
+        assert [c["name"] for c in call(real, "GET", f"{base}/catalogs")[1]] == ["Archive", "Sales"]
+        assert call(real, "GET", f"{base}/cubes?catalog=Sales")[1][0]["name"] == "Finance View"
+        status, fields = call(real, "GET", f"{base}/fields?catalog=Sales&cube=Sales")
+        assert status == 200
+        layout = {"rows": [field(fields, "[Geo].[City]")], "values": [{"measure": "[Measures].[Rides]", "caption": "Rides"}]}
+        status, grid = call(real, "POST", f"{base}/query", {"catalog": "Sales", "cube": "Sales", "layout": layout})
+        assert status == 200
+        assert [line[0]["text"] for line in grid["rowHeaders"]] == ["Tehran", "Grand Total"]
+        assert grid["values"] == [[120], [200]]
+        status, members = call(real, "POST", f"{base}/members", {"catalog": "Sales", "cube": "Sales", "hierarchy": "[Geo].[City]"})
+        assert status == 200 and [m["caption"] for m in members["members"]] == ["Tehran", "Shiraz", "Tabriz"]
+        real.close()

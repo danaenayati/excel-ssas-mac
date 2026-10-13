@@ -9,6 +9,7 @@ printed or logged.
 from __future__ import annotations
 
 import getpass
+import logging
 import socket
 import sys
 from collections.abc import Callable
@@ -136,7 +137,10 @@ def run(server: str, username: str, password: str, out: Printer = print) -> bool
         backend.close()
 
 
-def main() -> int:
+def main(verbose: bool = False) -> int:
+    if verbose:
+        # Sizes and step names only: no passwords, no sign-in tokens, no cube data.
+        logging.basicConfig(level=logging.DEBUG, format="    [%(name)s] %(message)s", stream=sys.stdout)
     print("Cube connection test")
     print("Nothing here is sent anywhere except to your own server.\n")
     try:
@@ -166,4 +170,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main("--verbose" in sys.argv[1:]))

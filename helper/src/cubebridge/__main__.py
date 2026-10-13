@@ -81,7 +81,8 @@ def main(argv: list[str] | None = None) -> int:
     setup_parser.add_argument("--dir", type=Path, default=default_directory())
     setup_parser.add_argument("--renew-cert", action="store_true")
 
-    sub.add_parser("probe", help="test the connection to your server")
+    probe_parser = sub.add_parser("probe", help="test the connection to your server")
+    probe_parser.add_argument("--verbose", action="store_true", help="also print protocol step sizes")
 
     args = parser.parse_args(argv)
     if args.command == "serve":
@@ -90,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         return _setup(args.dir, args.renew_cert)
     from . import probe
 
-    return probe.main()
+    return probe.main(verbose=args.verbose)
 
 
 if __name__ == "__main__":

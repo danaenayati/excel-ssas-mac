@@ -13,6 +13,7 @@ Handshake logic derived from oluies/ssas-xmla-tcp (Apache-2.0); see THIRD_PARTY_
 from __future__ import annotations
 
 import base64
+import logging
 import threading
 from collections.abc import Callable, Mapping
 
@@ -20,6 +21,8 @@ from ..errors import CubeError, IncompleteMessage, ProtocolError
 from ..pivot.model import CellSet
 from . import dime, envelopes, sealing, xmla
 from .transport import MessageReader, SocketChannel, send_message
+
+log = logging.getLogger("cubebridge.ssas")
 
 SERVICE_CLASS = "MSOLAPSvc.3"
 MAX_HANDSHAKE_ROUNDS = 10
@@ -128,8 +131,11 @@ class Session:
             try:
                 self._channel.set_timeout(timeout)
                 payload = build(self._session_id)
-                send_message(self._channel, sealing.seal_message(self._context, payload), dime.OPTIONS_NEGOTIATED)
+                sealed = sealing.seal_message(self._context, payload)
+                log.debug("request: %d bytes of XML, %d bytes sealed", len(payload), len(sealed))
+                send_message(self._channel, sealed, dime.OPTIONS_NEGOTIATED)
                 raw = self._reader.read_message()
+                log.debug("response: %d bytes sealed", len(raw))
                 try:
                     plain = sealing.unseal_message(self._context, raw)
                 except IncompleteMessage as exc:
@@ -140,7 +146,9 @@ class Session:
                     raise ProtocolError(f"could not decrypt the response ({type(exc).__name__})") from exc
                 if not plain.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"<"):
                     raise ProtocolError("the decrypted response is not XML")
-            except CubeError:
+                log.debug("response: %d bytes of XML, starting %r", len(plain), plain[:60])
+            except CubeError as exc:
+                log.debug("request failed: %s (%s)", exc.category, exc.detail or exc.message)
                 # Transport-level trouble: the stream position and cipher state are
                 # no longer trustworthy.
                 self._close()
@@ -166,7 +174,8 @@ class Session:
 
         in_token: bytes | None = None
         sent_any = False
-        for _ in range(MAX_HANDSHAKE_ROUNDS):
+        log.debug("connected to port %d; starting sign-in", self.port)
+        for round_number in range(1, MAX_HANDSHAKE_ROUNDS + 1):
             try:
                 out_token = context.step(in_token)
             except Exception as exc:
@@ -180,6 +189,7 @@ class Session:
                 if context.complete:
                     return context
                 raise CubeError("auth", "The sign-in stopped before it was complete.")
+            log.debug("sign-in round %d: sending a %d-byte token", round_number, len(out_token))
             # NEGO stays clear on the very first record and is set on every later one.
             options = dime.OPTIONS_NEGOTIATED if sent_any else dime.OPTIONS_FIRST
             send_message(
@@ -199,11 +209,13 @@ class Session:
                     ) from exc
                 raise
             sent_any = True
+            log.debug("sign-in round %d: reply of %d bytes", round_number, len(reply))
             # Every reply is fault-checked, including the last one: for NTLM the client
             # side is complete as soon as it sends its final token, so a "Logon failure"
             # in the reply would otherwise be missed.
             parsed = xmla.parse(reply, during_auth=True)
             if context.complete:
+                log.debug("sign-in complete after %d round(s)", round_number)
                 return context
             in_token = parsed.handshake_token or None
         raise CubeError("auth", "The sign-in did not finish.", f"more than {MAX_HANDSHAKE_ROUNDS} rounds")

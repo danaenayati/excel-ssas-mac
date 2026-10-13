@@ -7,4 +7,4 @@ if [ ! -x "$PYTHON" ]; then
   echo "Cube Explorer is not installed yet. Run ./install.sh first."
   exit 1
 fi
-exec "$PYTHON" -m cubebridge probe
+exec "$PYTHON" -m cubebridge probe "$@"
