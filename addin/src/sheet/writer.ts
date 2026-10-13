@@ -27,12 +27,15 @@ import {
   TEXT_FORMAT,
   chunkBlock,
   excelValues,
+  isTextFormat,
   sliceMatrix,
   type Block,
 } from "./layout";
 
 /** Fill of header cells: the light blue of Excel's default PivotTable style. */
 export const HEADER_FILL = "#DDEBF7";
+/** Font colour of the placeholder of an empty report. */
+export const MUTED_COLOR = "#7F7F7F";
 
 /** Longest address string passed to `worksheet.getRanges()`. Kept short on purpose:
  *  Excel's own limit for a multi-area reference string is 255 characters. */
@@ -188,11 +191,12 @@ export async function writeBlock(
     } catch {
       // Excel refuses the whole write when it dislikes one number format (cube format
       // strings do not always translate). The numbers matter more than their display:
-      // write this chunk again with plain formats, keeping text cells as text.
+      // write this chunk again with plain formats, keeping text cells as text. Filter
+      // cells are text too; they lose their arrow here but keep their value.
       suspend();
       const range = sheet.getRange(address);
       range.numberFormat = formats.map((line) =>
-        line.map((format) => (format === TEXT_FORMAT ? TEXT_FORMAT : GENERAL_FORMAT)),
+        line.map((format) => (isTextFormat(format) ? TEXT_FORMAT : GENERAL_FORMAT)),
       );
       range.values = chunkValues;
       await context.sync();
@@ -207,6 +211,10 @@ export async function writeBlock(
   applyFormat(sheet, anchor, block.bold, modern, (format) => {
     format.font.bold = true;
   });
+  applyFormat(sheet, anchor, block.muted, modern, (format) => {
+    format.font.color = MUTED_COLOR;
+    format.font.italic = true;
+  });
   if (modern) {
     for (const group of block.indents) {
       applyFormat(sheet, anchor, group.rects, true, (format) => {
@@ -214,7 +222,7 @@ export async function writeBlock(
       });
     }
   }
-  targetRange.format.autofitColumns();
+  if (block.autofit) targetRange.format.autofitColumns();
   setName(context, reportId, targetRange);
   await context.sync();
 

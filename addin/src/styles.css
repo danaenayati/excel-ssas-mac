@@ -598,6 +598,14 @@ input[type="checkbox"] {
   border-bottom: 1px solid var(--border-soft);
 }
 
+.hint-line {
+  flex: none;
+  margin: 6px 8px 0;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  background: var(--info-bg);
+}
+
 .rebind {
   flex: none;
   margin: 6px 8px 0;
@@ -799,32 +807,48 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
-.chip-filter {
-  display: flex;
-  flex: 0 1 auto;
-  align-items: center;
-  gap: 2px;
-  min-width: 14px;
-  color: var(--text-2);
-  font-size: 11px;
-}
-
-.chip-filter .icon {
-  width: 11px;
-  height: 11px;
-}
-
-.chip-filter-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
+.chip-funnel,
 .chip-caret {
   width: 11px;
   height: 11px;
   color: var(--text-2);
+}
+
+/* A Filters chip: the body opens the member picker, the small button its menu. */
+.chip.split {
+  display: flex;
+  gap: 2px;
+}
+
+.chip-main {
+  flex: 1;
+  padding-right: 6px;
+}
+
+.chip-value {
+  color: var(--text-2);
+}
+
+.chip-more {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  cursor: default;
+}
+
+.chip-more:hover,
+.chip-more.open {
+  border-color: var(--border);
+  background: var(--hover);
+  color: var(--text);
 }
 
 .options {
@@ -866,6 +890,20 @@ input[type="checkbox"] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.drill-value {
+  font-weight: 400;
+  color: var(--text-2);
+}
+
+/* "Filter <field>…": the field's name can be long, the pane is not wide. */
+.drill-filter {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 62%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-line {
@@ -1242,4 +1280,23 @@ tbody .pv-head {
 .pv-cell.selected {
   outline: 2px solid #217346;
   outline-offset: -1px;
+}
+
+/* The placeholder of an empty report: quiet, and spilling over the empty cells to its
+   right as long text does in Excel. */
+.pv-cell.muted {
+  max-width: 78px;
+  overflow: visible;
+  color: #7f7f7f;
+  font-style: italic;
+}
+
+/* A filter cell: in Excel it looks like any header cell with a small arrow after its
+   text; here the pointer also says it can be clicked. */
+.pv-cell.filter {
+  cursor: pointer;
+}
+
+.pv-scroll:focus-visible {
+  outline-offset: -2px;
 }

@@ -63,6 +63,23 @@ export function isEmptyLayout(layout: Layout): boolean {
   return layout.rows.length === 0 && layout.columns.length === 0 && layout.values.length === 0;
 }
 
+/** What the sheet shows for a filter with no selection. */
+export function noRestrictionLabel(field: Pick<PlacedField, "allMember">): string {
+  return field.allMember !== null ? "All" : "(Default)";
+}
+
+/** The text of a filter row's value cell, exactly as the helper writes it. */
+export function filterValueText(field: PlacedField): string {
+  if (field.members.length === 0) return noRestrictionLabel(field);
+  if (field.members.length === 1) return field.memberCaptions[0] ?? field.members[0];
+  return "(Multiple Items)";
+}
+
+/** The same selection for a chip: "All", "2025", "3 selected". */
+export function selectionSummary(field: PlacedField): string {
+  return field.members.length > 1 ? `${field.members.length} selected` : filterValueText(field);
+}
+
 export interface Placement {
   area: Area;
   index: number;

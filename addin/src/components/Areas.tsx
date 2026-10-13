@@ -1,13 +1,22 @@
-// The four areas (Filters, Columns, Rows, Values) and the chips in them. Each chip is
-// a button that opens a menu: move to another area, move up or down, filter members,
-// remove. Dragging a chip or a field onto an area does the same moves faster, but
-// nothing depends on it.
+// The four areas (Filters, Columns, Rows, Values) and the chips in them.
+//
+// A chip in Rows, Columns or Values is a button that opens a menu: move to another
+// area, move up or down, filter members, remove. A small funnel marks a field whose
+// members are restricted.
+//
+// A chip in Filters says what it is filtering by ("Years: 2025") and opens the member
+// picker when clicked, because choosing members is what a filter is for; its menu is
+// behind the small button at its right.
+//
+// Dragging a chip or a field onto an area does the same moves faster, but nothing
+// depends on it.
 
 import { useState, type DragEvent } from "react";
 import {
   AREA_LABELS,
   FIELD_AREAS,
   locate,
+  selectionSummary,
   type Area,
   type FieldArea,
   type LayoutAction,
@@ -38,12 +47,6 @@ function chipsOf(layout: Layout, area: Area): ChipInfo[] {
     return layout.values.map((v) => ({ name: v.measure, caption: v.caption, field: null }));
   }
   return layout[area].map((f) => ({ name: f.hierarchy, caption: f.caption, field: f }));
-}
-
-function filterText(field: PlacedField | null): string | null {
-  if (!field || field.members.length === 0) return null;
-  if (field.members.length === 1) return field.memberCaptions[0] ?? "1 item";
-  return `${field.members.length} items`;
 }
 
 export function Areas({ layout, dispatch, onFilter }: Props) {
@@ -151,12 +154,19 @@ export function Areas({ layout, dispatch, onFilter }: Props) {
             </h3>
             <ul className="chips" aria-labelledby={`area-${area}`}>
               {chips.map((chip, index) => {
-                const filter = filterText(chip.field);
+                const field = chip.field;
+                const restricted = field !== null && field.members.length > 0;
+                const detail = restricted ? `${chip.caption}: ${field.memberCaptions.join(", ")}` : chip.caption;
                 const open = menu !== null && menu.area === area && menu.name === chip.name;
+                const pageFilter = area === "filters" && field !== null;
                 return (
                   <li
                     key={chip.name}
-                    className={cx("chip", target && hover.index === index && "drop-before")}
+                    className={cx(
+                      "chip",
+                      pageFilter && "split",
+                      target && hover.index === index && "drop-before",
+                    )}
                     draggable
                     onDragStart={(event) =>
                       startDrag(event, {
@@ -173,29 +183,53 @@ export function Areas({ layout, dispatch, onFilter }: Props) {
                     onDragOver={(event) => over(event, area, index)}
                     onDrop={(event) => drop(event, area, index)}
                   >
-                    <button
-                      type="button"
-                      className={cx("chip-button", open && "open")}
-                      aria-haspopup="menu"
-                      aria-expanded={open}
-                      title={
-                        chip.field && chip.field.members.length > 0
-                          ? `${chip.caption}: ${chip.field.memberCaptions.join(", ")}`
-                          : chip.caption
-                      }
-                      onClick={(event) =>
-                        setMenu(open ? null : { area, name: chip.name, anchor: event.currentTarget })
-                      }
-                    >
-                      <span className="chip-caption">{chip.caption}</span>
-                      {filter !== null && (
-                        <span className="chip-filter">
-                          <Icon name="funnel" />
-                          <span className="chip-filter-text">{filter}</span>
-                        </span>
-                      )}
-                      <Icon name="chevron-down" className="chip-caret" />
-                    </button>
+                    {pageFilter ? (
+                      <>
+                        <button
+                          type="button"
+                          className="chip-button chip-main"
+                          title={`${detail}. Click to choose.`}
+                          aria-label={`Filter ${chip.caption}: ${selectionSummary(field)}`}
+                          onClick={() => {
+                            setMenu(null);
+                            onFilter(chip.name);
+                          }}
+                        >
+                          <span className="chip-caption">
+                            {chip.caption}: <span className="chip-value">{selectionSummary(field)}</span>
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className={cx("chip-more", open && "open")}
+                          aria-label={`${chip.caption}: move or remove`}
+                          aria-haspopup="menu"
+                          aria-expanded={open}
+                          title="Move or remove"
+                          onClick={(event) =>
+                            setMenu(open ? null : { area, name: chip.name, anchor: event.currentTarget })
+                          }
+                        >
+                          <Icon name="more" />
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className={cx("chip-button", open && "open")}
+                        aria-haspopup="menu"
+                        aria-expanded={open}
+                        aria-label={restricted ? `${chip.caption}, filtered` : chip.caption}
+                        title={detail}
+                        onClick={(event) =>
+                          setMenu(open ? null : { area, name: chip.name, anchor: event.currentTarget })
+                        }
+                      >
+                        <span className="chip-caption">{chip.caption}</span>
+                        {restricted && <Icon name="funnel" className="chip-funnel" />}
+                        <Icon name="chevron-down" className="chip-caret" />
+                      </button>
+                    )}
                   </li>
                 );
               })}

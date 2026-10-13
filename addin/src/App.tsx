@@ -20,16 +20,23 @@ import {
   type CellAddress,
   type Extent,
   type ReportDef,
+  type SheetClick,
   type SheetHost,
   type SheetSelection,
 } from "./sheet/host";
-import type { MemberHit } from "./sheet/layout";
+import { guessFieldCell, type MemberHit } from "./sheet/layout";
 import { PreviewHost } from "./sheet/preview";
-import { findField, isEmptyLayout, type LayoutAction } from "./state/layout";
-import { currentReducer, newReportDef } from "./state/report";
-import { ReportRunner, toUiError, type RunOutcome, type UiError } from "./state/runner";
+import { findField, isEmptyLayout, selectionSummary, type LayoutAction } from "./state/layout";
+import { currentReducer, decidePlace, newReportDef, placeLabel } from "./state/report";
+import {
+  ReportRunner,
+  toUiError,
+  type RunOptions,
+  type RunOutcome,
+  type UiError,
+} from "./state/runner";
 import { useCached, type Cache } from "./state/useCached";
-import type { Catalog, Connection, Cube, Fields, LayoutOptions, Status } from "./types";
+import type { Catalog, Connection, Cube, Fields, LayoutOptions, PlacedField, Status } from "./types";
 import { plural } from "./util";
 
 interface Props {
@@ -43,7 +50,7 @@ type Screen = "connections" | "explorer";
 
 type Question =
   | { kind: "overwrite"; target: Extent; answer: (ok: boolean) => void }
-  | { kind: "deleteReport"; def: ReportDef; hasCells: boolean }
+  | { kind: "deleteReport"; def: ReportDef; onSheet: boolean }
   | { kind: "reset"; what: "database" | "cube"; apply: () => void }
   | { kind: "query"; mdx: string };
 
@@ -51,6 +58,8 @@ type Question =
 const DEBOUNCE_MS = 400;
 /** Warn about the helper's certificate when it has this many days left, or fewer. */
 const CERT_WARNING_DAYS = 30;
+/** While the user clicks around one sheet, re-read where the reports are this often at most. */
+const LOCATION_REFRESH_MS = 3000;
 
 function upsert(list: ReportDef[], def: ReportDef): ReportDef[] {
   const index = list.findIndex((d) => d.id === def.id);
@@ -96,10 +105,12 @@ export function App({ api, host, mock }: Props) {
   const currentRef = useLatest(current);
   const reportsRef = useLatest(reports);
   const connectionsRef = useLatest(connections);
-  const locationsRef = useLatest(locations);
   const ranRef = useLatest(ran);
   const busyPrefix = useRef("");
   const cache = useRef<Cache>(new Map()).current;
+  const lastSheet = useRef<string | null>(null);
+  const lastLocationRead = useRef(0);
+  const locationSeq = useRef(0);
 
   // -- runner ---------------------------------------------------------------
 
@@ -127,6 +138,32 @@ export function App({ api, host, mock }: Props) {
     host.getSelection().then(setSelection, () => undefined);
   }, [host]);
 
+  /**
+   * Read from the workbook where every report is now. What the pane remembers goes
+   * stale behind its back: a deleted sheet takes a report's cells with it.
+   */
+  const refreshLocations = useCallback(async () => {
+    const seq = ++locationSeq.current;
+    lastLocationRead.current = Date.now();
+    const found: Record<string, Extent | null> = {};
+    try {
+      for (const def of reportsRef.current) found[def.id] = await host.getReportExtent(def.id);
+    } catch {
+      return; // Excel is busy; the next selection change tries again.
+    }
+    if (seq === locationSeq.current) setLocations((map) => ({ ...map, ...found }));
+  }, [host, reportsRef]);
+
+  /** One report's location, read now, and remembered. Null when it has no cells. */
+  const liveExtent = useCallback(
+    async (reportId: string): Promise<Extent | null> => {
+      const extent = await host.getReportExtent(reportId);
+      setLocations((map) => ({ ...map, [reportId]: extent }));
+      return extent;
+    },
+    [host],
+  );
+
   /** Fold the result of a run into the pane's state. `single` runs report their own notes. */
   const applyOutcome = useCallback(
     (def: ReportDef, outcome: RunOutcome, single: boolean) => {
@@ -134,22 +171,22 @@ export function App({ api, host, mock }: Props) {
         const cur = currentRef.current;
         return cur !== null && cur.def.id === def.id;
       };
+      const onSheet = (extent: Extent) => {
+        setReports((list) => upsert(list, def));
+        setLocations((map) => ({ ...map, [def.id]: extent }));
+        // Addressed by id rather than checked here: the reducer sees the report being
+        // edited as it is now, even if this runs before the pane has re-rendered.
+        dispatch({ type: "saved", id: def.id });
+        refreshSelection();
+      };
       switch (outcome.kind) {
         case "written":
-          setReports((list) => upsert(list, def));
-          setLocations((map) => ({ ...map, [def.id]: outcome.extent }));
-          if (isCurrent()) dispatch({ type: "saved" });
-          refreshSelection();
+          onSheet(outcome.extent);
           break;
         case "empty":
-          if (outcome.cleared) {
-            setReports((list) => upsert(list, def));
-            host.getReportExtent(def.id).then(
-              (extent) => setLocations((map) => ({ ...map, [def.id]: extent })),
-              () => undefined,
-            );
-            refreshSelection();
-          }
+          // The placeholder is on the sheet and the definition saved, or (a new report
+          // that has not been given a place) nothing happened.
+          if (outcome.extent) onSheet(outcome.extent);
           break;
         case "cancelled":
           if (single && isCurrent()) setNote("Cancelled. The sheet was not changed.");
@@ -158,11 +195,12 @@ export function App({ api, host, mock }: Props) {
           if (single && isCurrent()) setNote("Not updated, so that the other cells stay as they are.");
           break;
         case "needs-anchor":
+          setLocations((map) => ({ ...map, [def.id]: null }));
           if (single && isCurrent()) {
             setNote(
               currentRef.current && currentRef.current.persisted
                 ? "The cells of this report can no longer be found. Select a cell and choose Place here."
-                : "Select an empty cell outside other reports, then choose Insert here.",
+                : "Select an empty cell outside other reports, then choose Place here.",
             );
           }
           break;
@@ -174,30 +212,42 @@ export function App({ api, host, mock }: Props) {
       }
       setTick((n) => n + 1);
     },
-    [currentRef, host, refreshSelection],
+    [currentRef, refreshSelection],
+  );
+
+  /** Run one report and show the result. Resolves with null when there is nothing to ask the cube. */
+  const execute = useCallback(
+    async (def: ReportDef, revision: number, options: RunOptions): Promise<RunOutcome | null> => {
+      const done = () => setRan({ id: def.id, revision });
+      const empty = isEmptyLayout(def.layout);
+      // A report with fields needs its connection (the banner asks for one) and a cube.
+      // One without fields only puts its placeholder on the sheet.
+      const askable =
+        connectionsRef.current.some((c) => c.id === def.connectionId) && def.catalog !== "" && def.cube !== "";
+      if (!empty && !askable) {
+        done();
+        return null;
+      }
+      setError(null);
+      setNote(null);
+      busyPrefix.current = "";
+      setBusy(empty ? "Writing to the sheet…" : "Asking the cube…");
+      const outcome = await runner.run(def, options);
+      if (outcome.kind !== "superseded") {
+        if (!runner.busy) setBusy(null);
+        done();
+      }
+      applyOutcome(def, outcome, true);
+      return outcome;
+    },
+    [applyOutcome, connectionsRef, runner],
   );
 
   const runCurrent = useCallback(async () => {
     const cur = currentRef.current;
     if (!cur) return;
-    const { def, revision } = cur;
-    const done = () => setRan({ id: def.id, revision });
-    // No connection on this Mac: the banner asks for one. No cube yet: nothing to ask.
-    if (!connectionsRef.current.some((c) => c.id === def.connectionId) || def.catalog === "" || def.cube === "") {
-      done();
-      return;
-    }
-    setError(null);
-    setNote(null);
-    busyPrefix.current = "";
-    setBusy("Asking the cube…");
-    const outcome = await runner.run(def, { anchor: cur.anchor, useSelection: !cur.persisted });
-    if (outcome.kind !== "superseded") {
-      if (!runner.busy) setBusy(null);
-      done();
-    }
-    applyOutcome(def, outcome, true);
-  }, [applyOutcome, connectionsRef, currentRef, runner]);
+    await execute(cur.def, cur.revision, { anchor: cur.anchor, useSelection: !cur.persisted });
+  }, [currentRef, execute]);
   const runCurrentRef = useLatest(runCurrent);
 
   // Every change to the definition re-queries: at once for Refresh and drill, after a
@@ -225,13 +275,15 @@ export function App({ api, host, mock }: Props) {
   }, []);
 
   const startDraft = useCallback(
-    (connectionId: string, catalog = "", cube = "", anchor: CellAddress | null = null) => {
-      dispatch({ type: "open", def: newReportDef(connectionId, catalog, cube), persisted: false, anchor });
+    (connectionId: string, catalog = "", cube = "", anchor: CellAddress | null = null): ReportDef => {
+      const draft = newReportDef(connectionId, catalog, cube);
+      dispatch({ type: "open", def: draft, persisted: false, anchor });
       setScreen("explorer");
       setError(null);
       setNote(null);
       setPicker(null);
       setSearch("");
+      return draft;
     },
     [],
   );
@@ -260,6 +312,8 @@ export function App({ api, host, mock }: Props) {
     setReports(defs);
     setLocations(where);
     setSelection(active);
+    lastSheet.current = active ? active.cell.sheetId : null;
+    lastLocationRead.current = Date.now();
     const hit = active && active.report ? active.report.id : null;
     const first = defs.find((d) => d.id === hit) ?? defs[0];
     if (first) openReport(first);
@@ -271,11 +325,17 @@ export function App({ api, host, mock }: Props) {
     void boot();
   }, [boot]);
 
-  // Selecting a cell inside a report makes that report the one being edited.
+  // Selecting a cell inside a report makes that report the one being edited. Arriving
+  // on another sheet (or a sheet being deleted) is when report locations go stale.
   useEffect(() => {
     if (phase !== "ready") return;
     return host.onSelectionChanged((next) => {
       setSelection(next);
+      const sheetChanged = lastSheet.current !== next.cell.sheetId;
+      lastSheet.current = next.cell.sheetId;
+      if (sheetChanged || Date.now() - lastLocationRead.current > LOCATION_REFRESH_MS) {
+        void refreshLocations();
+      }
       if (!next.report) return;
       const cur = currentRef.current;
       if (cur && cur.def.id === next.report.id) return;
@@ -283,11 +343,54 @@ export function App({ api, host, mock }: Props) {
       const def = reportsRef.current.find((d) => d.id === id);
       if (def) openReport(def);
     });
-  }, [phase, host, currentRef, reportsRef, openReport]);
+  }, [phase, host, currentRef, reportsRef, openReport, refreshLocations]);
 
   const reloadConnections = useCallback(async () => {
     setConnections(await api.connections());
   }, [api]);
+
+  // -- filtering from the sheet -------------------------------------------------
+
+  // The filter cells of a report (a page filter's cells, the captions of row and column
+  // fields) work as buttons: one click opens that field's checklist here in the pane.
+  // Moving onto one with the keyboard does not; the status bar offers the same action.
+  const handleClick = useCallback(
+    (click: SheetClick) => {
+      const id = click.report.id;
+      const cur = currentRef.current;
+      const saved = reportsRef.current.find((d) => d.id === id) ?? null;
+      const target = cur && cur.def.id === id ? cur.def : saved;
+      if (!target) return;
+
+      let onSheet: PlacedField | null = null;
+      const known = runner.buttonAt(id, click.report);
+      if (known !== undefined) {
+        onSheet = known;
+      } else if (saved) {
+        // No result in memory (the workbook was just reopened): go by where the saved
+        // layout puts its filter cells, and for a caption cell believe it only if the
+        // cell really holds that field's caption.
+        const guess = guessFieldCell(saved.layout, click.report.row, click.report.col);
+        const field = guess ? saved.layout[guess.area][guess.index] ?? null : null;
+        if (guess && field && (guess.area === "filters" || click.value === field.caption)) onSheet = field;
+      }
+      if (!onSheet) return; // an ordinary cell
+
+      // The field may have been taken out of the layout in the pane since.
+      const field = findField(target.layout, onSheet.hierarchy);
+      if (!field) return;
+      if (!cur || cur.def.id !== id) openReport(target);
+      else setScreen("explorer");
+      // Without its connection the report shows the "choose a connection" banner instead.
+      if (connectionsRef.current.some((c) => c.id === target.connectionId)) setPicker(field.hierarchy);
+    },
+    [connectionsRef, currentRef, openReport, reportsRef, runner],
+  );
+
+  useEffect(() => {
+    if (phase !== "ready") return;
+    return host.onCellClicked(handleClick);
+  }, [phase, host, handleClick]);
 
   // -- data for the report being edited ---------------------------------------
 
@@ -364,37 +467,81 @@ export function App({ api, host, mock }: Props) {
     else apply();
   };
 
-  const insertHere = async () => {
-    const cur = currentRef.current;
-    if (!cur) return;
-    let active: SheetSelection;
+  /** The selected cell and the current report's location, both read from the workbook now. */
+  const readPlace = async (reportId: string) => {
     try {
-      active = await host.getSelection();
+      const active = await host.getSelection();
+      const extent = await liveExtent(reportId);
+      setSelection(active);
+      return { active, extent };
     } catch (failure) {
       setError(toUiError(failure));
-      return;
+      return null;
     }
-    setSelection(active);
+  };
+
+  /**
+   * The button next to the report's location. If the report being edited has no cells
+   * (it is new, or its sheet was deleted) it is placed at the selected cell, fields and
+   * all. If it is on a sheet, a new report is started at the selected cell.
+   */
+  const placeHere = async () => {
+    const cur = currentRef.current;
+    if (!cur) return;
+    const place = await readPlace(cur.def.id);
+    if (!place) return;
     setError(null);
-    if (active.report) {
+    const decision = decidePlace(cur.def.id, place.extent, place.active);
+    const where = describeCell(place.active.cell);
+    if (decision.kind === "blocked") {
       setNote(
-        active.report.id === cur.def.id
+        decision.inside === "this"
           ? "This cell is part of this report. Select a cell outside it to start another report."
           : "This cell is inside another report. Select a cell outside it first.",
       );
       return;
     }
-    const where = describeCell(active.cell);
-    if (locationsRef.current[cur.def.id]) {
-      // The report being edited is on the sheet: start another one here, on the same cube.
-      startDraft(cur.def.connectionId, cur.def.catalog, cur.def.cube, active.cell);
-      setNote(`New report at ${where}. Tick a field to fill it.`);
+    const options: RunOptions = { anchor: place.active.cell, useSelection: false };
+    if (decision.kind === "new") {
+      // Starts with its placeholder on the sheet, so the click has something to show.
+      const draft = startDraft(cur.def.connectionId, cur.def.catalog, cur.def.cube, place.active.cell);
+      const outcome = await execute(draft, 0, options);
+      if (outcome && outcome.kind === "empty" && outcome.extent) {
+        setNote(`New report at ${where}. Tick a field to fill it.`);
+      }
       return;
     }
-    // It has no cells yet (or lost them): this is where it goes.
-    dispatch({ type: "pin", anchor: active.cell });
-    if (isEmptyLayout(cur.def.layout)) setNote(`The report will start at ${where}. Tick a field to fill it.`);
-    else dispatch({ type: "touch" });
+    // Remembered too, so that a later try goes to the same cell if this one fails.
+    dispatch({ type: "pin", anchor: place.active.cell });
+    const outcome = await execute(cur.def, cur.revision, options);
+    if (outcome && outcome.kind === "empty" && outcome.extent) {
+      setNote(`Report placed at ${where}. Tick a field to fill it.`);
+    } else if (outcome === null) {
+      setNote(`The report will go to ${where} once it has a connection and a cube.`);
+    }
+  };
+
+  /** Report menu: take the report from where it is and write it at the selected cell. */
+  const moveHere = async () => {
+    const cur = currentRef.current;
+    if (!cur) return;
+    const place = await readPlace(cur.def.id);
+    if (!place) return;
+    if (place.active.report) {
+      setError(null);
+      setNote("Select a cell outside every report first, then choose Move this report here.");
+      return;
+    }
+    const outcome = await execute(cur.def, cur.revision, {
+      anchor: place.active.cell,
+      useSelection: false,
+      relocate: true,
+    });
+    if (outcome === null) {
+      setNote("Choose a connection for this report first.");
+    } else if (outcome.kind === "written" || (outcome.kind === "empty" && outcome.extent)) {
+      setNote(`Report moved to ${describeCell(place.active.cell)}.`);
+    }
   };
 
   const refreshAll = async () => {
@@ -412,6 +559,7 @@ export function App({ api, host, mock }: Props) {
     let stopped = false;
     for (let i = 0; i < list.length; i++) {
       const item = list[i];
+      // A report with no fields has nothing to refresh; its placeholder stays as it is.
       if (isEmptyLayout(item.layout)) continue;
       if (!connectionsRef.current.some((c) => c.id === item.connectionId)) {
         unbound++;
@@ -430,7 +578,7 @@ export function App({ api, host, mock }: Props) {
         stopped = true;
         break;
       }
-      if (outcome.kind === "written" || outcome.kind === "empty") done++;
+      if (outcome.kind === "written") done++;
       else if (outcome.kind === "needs-anchor") lost++;
       else if (outcome.kind === "declined") skipped++;
       else if (outcome.kind === "error") {
@@ -448,6 +596,16 @@ export function App({ api, host, mock }: Props) {
     if (failed > 0) parts.push(`${failed} failed.`);
     setNote(parts.join(" "));
     if (firstError) setError(firstError);
+  };
+
+  const askDeleteReport = async (target: ReportDef) => {
+    let extent: Extent | null = null;
+    try {
+      extent = await liveExtent(target.id);
+    } catch {
+      // Excel is busy: ask as if it had no cells; deleting still removes the definition.
+    }
+    setQuestion({ kind: "deleteReport", def: target, onSheet: extent !== null });
   };
 
   const deleteReport = async (target: ReportDef, clearCells: boolean) => {
@@ -473,7 +631,11 @@ export function App({ api, host, mock }: Props) {
       if (rest.length > 0) openReport(rest[0]);
       else startDraft(target.connectionId, target.catalog, target.cube);
     }
-    setNote(clearCells ? "Report deleted and its cells cleared." : "Report deleted. Its numbers stay as plain cells.");
+    setNote(
+      clearCells || isEmptyLayout(target.layout)
+        ? "Report deleted and its cells cleared."
+        : "Report deleted. Its numbers stay as plain cells.",
+    );
   };
 
   // -- what to show -------------------------------------------------------------
@@ -481,15 +643,24 @@ export function App({ api, host, mock }: Props) {
   const runtime = def ? runner.runtimes.get(def.id) ?? null : null;
   const location = def ? locations[def.id] ?? null : null;
 
+  // What the selected cell offers: drill for a member, "Filter <field>…" for a field.
   let drill: Drill = { state: "none" };
+  let filterField: PlacedField | null = null;
   if (def && selection && selection.report && selection.report.id === def.id) {
     const at = selection.report;
-    if (!runtime || runtime.rows !== at.rows || runtime.cols !== at.cols) {
+    let onSheet = runner.fieldAt(def.id, at);
+    if (onSheet === undefined) {
       drill = isEmptyLayout(def.layout) ? { state: "none" } : { state: "stale" };
+      // Even with no result in memory, the filter rows are known to head the block.
+      const saved = reports.find((d) => d.id === def.id) ?? def;
+      const guess = guessFieldCell(saved.layout, at.row, at.col);
+      onSheet = guess && guess.area === "filters" ? saved.layout.filters[guess.index] ?? null : null;
     } else {
       const hit = runner.memberAt(def.id, at.row, at.col);
       if (hit) drill = { state: "member", hit };
     }
+    // Offer it only if the field is still in the layout being edited.
+    if (onSheet) filterField = findField(def.layout, onSheet.hierarchy);
   }
 
   const expand = (hit: MemberHit) =>
@@ -524,26 +695,28 @@ export function App({ api, host, mock }: Props) {
     : "";
 
   const reportMenuItems = (): MenuEntry[] => {
-    const items: MenuEntry[] = [
-      {
-        label: "Reload field list",
-        run: () => {
-          cache.clear();
-          setGeneration((n) => n + 1);
-        },
+    const items: MenuEntry[] = [];
+    if (current && current.persisted) {
+      items.push({
+        label: "Move this report here",
+        disabled: !location || busy !== null,
+        run: () => void moveHere(),
+      });
+      items.push("separator");
+    }
+    items.push({
+      label: "Reload field list",
+      run: () => {
+        cache.clear();
+        setGeneration((n) => n + 1);
       },
-    ];
+    });
     if (current && current.persisted) {
       const target = current.def;
       items.push("separator", {
         label: "Delete report…",
         danger: true,
-        run: () =>
-          setQuestion({
-            kind: "deleteReport",
-            def: target,
-            hasCells: Boolean(location) && !isEmptyLayout(target.layout),
-          }),
+        run: () => void askDeleteReport(target),
       });
     }
     return items;
@@ -587,6 +760,7 @@ export function App({ api, host, mock }: Props) {
   } else {
     const others = reports.filter((d) => d.id !== def.id);
     const showSwitch = others.length > 0;
+    const lost = current.persisted && !location;
     body = (
       <div className="screen explorer">
         <header className="bar">
@@ -647,10 +821,27 @@ export function App({ api, host, mock }: Props) {
               {current.persisted ? reportLabel(def) : draftLabel}
             </span>
           )}
-          <button type="button" className="button small" onClick={() => void insertHere()} disabled={busy !== null}>
-            {current.persisted && !location ? "Place here" : "Insert here"}
+          <button
+            type="button"
+            className="button small"
+            onClick={() => void placeHere()}
+            disabled={busy !== null}
+            title={
+              location
+                ? "Start another report at the selected cell"
+                : "Put this report, with its fields, at the selected cell"
+            }
+          >
+            {placeLabel(location)}
           </button>
         </div>
+
+        {lost && (
+          <p className="hint-line" role="status">
+            This report has no cells on a sheet (its sheet may have been deleted). Select a cell and
+            choose Place here to put it back with its fields.
+          </p>
+        )}
 
         {!connection && (
           <div className="rebind" role="alert">
@@ -747,6 +938,12 @@ export function App({ api, host, mock }: Props) {
           note={note}
           runtime={runtime}
           drill={drill}
+          filter={
+            filterField && connection
+              ? { caption: filterField.caption, summary: selectionSummary(filterField) }
+              : null
+          }
+          onFilter={() => filterField && setPicker(filterField.hierarchy)}
           onExpand={expand}
           onCollapse={collapse}
           onShowQuery={() => runtime && setQuestion({ kind: "query", mdx: runtime.stats.mdx })}
@@ -807,7 +1004,7 @@ export function App({ api, host, mock }: Props) {
             title="Delete this report?"
             onCancel={() => setQuestion(null)}
             buttons={
-              question.hasCells
+              question.onSheet && !isEmptyLayout(question.def.layout)
                 ? [
                     { label: "Cancel", run: () => setQuestion(null), focus: true },
                     { label: "Keep values", run: () => void deleteReport(question.def, false) },
@@ -815,12 +1012,17 @@ export function App({ api, host, mock }: Props) {
                   ]
                 : [
                     { label: "Cancel", run: () => setQuestion(null), focus: true },
-                    { label: "Delete", run: () => void deleteReport(question.def, false), danger: true },
+                    {
+                      label: "Delete",
+                      danger: true,
+                      // With no fields, what is on the sheet is only its placeholder.
+                      run: () => void deleteReport(question.def, question.onSheet),
+                    },
                   ]
             }
           >
             <p>
-              {question.hasCells
+              {question.onSheet && !isEmptyLayout(question.def.layout)
                 ? "It will no longer refresh. You can keep its numbers as plain cells, or clear them from the sheet."
                 : "It will be removed from this workbook."}
             </p>

@@ -1,6 +1,7 @@
-// The bottom of the Explorer: what the selected cell can do (Expand / Collapse), the
-// last error or note, and the status line with counts, elapsed time, Show query,
-// Refresh and Refresh All. While a query runs it shows a spinner and Cancel instead.
+// The bottom of the Explorer: what the selected cell can do (Expand / Collapse, and
+// "Filter <field>…" when the cell stands for a field), the last error or note, and the
+// status line with counts, elapsed time, Show query, Refresh and Refresh All. While a
+// query runs it shows a spinner and Cancel instead.
 
 import type { MemberHit } from "../sheet/layout";
 import type { ReportRuntime, UiError } from "../state/runner";
@@ -23,6 +24,9 @@ interface Props {
   note: string | null;
   runtime: ReportRuntime | null;
   drill: Drill;
+  /** The field the selected cell stands for, when it is one that can be filtered. */
+  filter: { caption: string; summary: string } | null;
+  onFilter: () => void;
   onExpand: (hit: MemberHit) => void;
   onCollapse: (hit: MemberHit) => void;
   onShowQuery: () => void;
@@ -33,12 +37,32 @@ interface Props {
 }
 
 export function StatusBar(props: Props) {
-  const { busy, runtime, drill } = props;
+  const { busy, runtime, drill, filter } = props;
   const working = busy !== null;
+  const filterButton = filter && (
+    <button
+      type="button"
+      className="button small drill-filter"
+      onClick={props.onFilter}
+      title={`Choose which ${filter.caption} to show`}
+    >
+      Filter {filter.caption}…
+    </button>
+  );
 
   return (
     <footer className="status">
-      {drill.state === "stale" && <p className="drill muted">Refresh this report to enable drill.</p>}
+      {drill.state === "stale" && !filter && (
+        <p className="drill muted">Refresh this report to enable drill.</p>
+      )}
+      {drill.state !== "member" && filter && (
+        <div className="drill">
+          <span className="drill-caption" title={`${filter.caption}: ${filter.summary}`}>
+            {filter.caption}: <span className="drill-value">{filter.summary}</span>
+          </span>
+          {filterButton}
+        </div>
+      )}
       {drill.state === "member" && (
         <div className="drill">
           <span className="drill-caption" title={drill.hit.member.caption}>
@@ -65,8 +89,9 @@ export function StatusBar(props: Props) {
               </button>
             )
           ) : (
-            <span className="muted">Nothing below this item</span>
+            !filter && <span className="muted">Nothing below this item</span>
           )}
+          {filterButton}
         </div>
       )}
 

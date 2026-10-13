@@ -1,10 +1,13 @@
 // Draws the PreviewHost's sheet next to the pane when the page is opened in an
-// ordinary browser. Clicking a cell selects it, as clicking a sheet cell would in
-// Excel. The small toolbar simulates the few things a user does to a sheet that the
-// pane has to cope with: typing into a cell, inserting rows, starting a new workbook.
+// ordinary browser. Clicking a cell selects it and counts as a click, as in Excel; the
+// arrow keys move the selection without clicking (click the grid first to give it the
+// keyboard). The toolbar simulates the few other things a user does to a sheet that
+// the pane has to cope with: typing into a cell, inserting rows, deleting the sheet,
+// starting a new workbook.
 
-import { memo, useState, useSyncExternalStore } from "react";
+import { memo, useState, useSyncExternalStore, type KeyboardEvent } from "react";
 import { cellA1, columnLetters, containsCell } from "../sheet/geometry";
+import { FILTER_FORMAT } from "../sheet/layout";
 import { formatForPreview, type PreviewCell, type PreviewHost, type PreviewSnapshot } from "../sheet/preview";
 import { cx } from "../util";
 
@@ -41,6 +44,8 @@ const Row = memo(
             "pv-cell",
             cell && cell.bold && "bold",
             cell && cell.fill && "fill",
+            cell && cell.muted && "muted",
+            cell && cell.format === FILTER_FORMAT && "filter",
             numeric && "num",
             inReport && "in-report",
             selected === col && "selected",
@@ -73,7 +78,19 @@ export function PreviewSheet({ host }: { host: PreviewHost }) {
   const cols = Math.min(MAX_COLS, Math.max(MIN_COLS, snapshot.usedCols + 3, snapshot.selection.col + 2));
   const clipped = snapshot.usedRows > MAX_ROWS || snapshot.usedCols > MAX_COLS;
   const { row, col } = snapshot.selection;
-  const select = (r: number, c: number) => host.select(r, c);
+  const click = (r: number, c: number) => host.click(r, c);
+  const keys: Record<string, [number, number]> = {
+    ArrowUp: [-1, 0],
+    ArrowDown: [1, 0],
+    ArrowLeft: [0, -1],
+    ArrowRight: [0, 1],
+  };
+  const onKeyDown = (event: KeyboardEvent) => {
+    const step = keys[event.key];
+    if (!step) return;
+    event.preventDefault();
+    host.select(Math.max(0, row + step[0]), Math.max(0, col + step[1]));
+  };
 
   const header: JSX.Element[] = [];
   for (let c = 0; c < cols; c++) {
@@ -93,7 +110,7 @@ export function PreviewSheet({ host }: { host: PreviewHost }) {
         version={snapshot.contentVersion}
         snapshot={snapshot}
         selected={r === row ? col : -1}
-        onSelect={select}
+        onSelect={click}
       />,
     );
   }
@@ -101,7 +118,7 @@ export function PreviewSheet({ host }: { host: PreviewHost }) {
   return (
     <div className="preview">
       <div className="pv-toolbar">
-        <strong>Preview sheet</strong>
+        <strong>Preview: {snapshot.sheetName}</strong>
         <span className="pv-name" data-testid="pv-selection">
           {cellA1(row, col)}
         </span>
@@ -131,6 +148,14 @@ export function PreviewSheet({ host }: { host: PreviewHost }) {
         <button
           type="button"
           className="button small"
+          title="The reports stay in the workbook but lose their cells, as when a sheet is deleted in Excel"
+          onClick={() => host.deleteSheet()}
+        >
+          Delete sheet
+        </button>
+        <button
+          type="button"
+          className="button small"
           onClick={() => {
             // The pane only reads the workbook's reports when it opens, as in Excel,
             // so a new workbook means opening the pane again.
@@ -144,7 +169,7 @@ export function PreviewSheet({ host }: { host: PreviewHost }) {
           Not Excel: a stand-in for testing. Reloading the page is like reopening the workbook.
         </span>
       </div>
-      <div className="pv-scroll">
+      <div className="pv-scroll" tabIndex={0} onKeyDown={onKeyDown} aria-label="Preview sheet">
         <table className="pv-table">
           <thead>
             <tr>

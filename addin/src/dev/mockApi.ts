@@ -392,7 +392,9 @@ class SampleCube {
       if (!parent) throw fail("not-found", 404, "That item is no longer in the cube.", request.parent);
       list = parent.children;
     } else {
-      list = h.top;
+      // As the real helper does: the top level is what sits under the All member.
+      // The All member itself is never listed.
+      list = h.all ? h.all.children : h.top;
     }
     return {
       members: list.slice(0, limit).map(
@@ -611,7 +613,9 @@ class SampleCube {
       caption: field.caption,
       value:
         field.members.length === 0
-          ? "All"
+          ? field.allMember !== null
+            ? "All"
+            : "(Default)"
           : field.members.length === 1
             ? field.memberCaptions[0] ?? field.members[0]
             : "(Multiple Items)",

@@ -33,6 +33,46 @@ export function rectA1(rect: Rect): string {
   return first + ":" + cellA1(rect.row + rect.rows - 1, rect.col + rect.cols - 1);
 }
 
+/** "AA" -> 26. Null when the text is not a column name on the sheet. */
+function columnIndex(letters: string): number | null {
+  if (!/^[A-Za-z]{1,3}$/.test(letters)) return null;
+  let n = 0;
+  for (const ch of letters.toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64);
+  return n >= 1 && n <= MAX_COLS ? n - 1 : null;
+}
+
+function parseCell(text: string): { row: number; col: number } | null {
+  const match = /^([A-Za-z]{1,3})([0-9]{1,7})$/.exec(text);
+  if (!match) return null;
+  const col = columnIndex(match[1]);
+  const row = Number(match[2]);
+  if (col === null || row < 1 || row > MAX_ROWS) return null;
+  return { row: row - 1, col };
+}
+
+/**
+ * The rectangle an address names: "C2", "B2:H30", "$B$2", "Sheet1!B2:C3". Null for
+ * anything else (whole rows or columns, several areas, a name), which callers treat
+ * as "not a small cell edit".
+ */
+export function parseA1(address: string): Rect | null {
+  const bang = address.lastIndexOf("!");
+  const local = (bang >= 0 ? address.slice(bang + 1) : address).replace(/\$/g, "").trim();
+  const parts = local.split(":");
+  if (parts.length > 2) return null;
+  const first = parseCell(parts[0]);
+  const last = parts.length === 2 ? parseCell(parts[1]) : first;
+  if (!first || !last) return null;
+  const row = Math.min(first.row, last.row);
+  const col = Math.min(first.col, last.col);
+  return {
+    row,
+    col,
+    rows: Math.abs(first.row - last.row) + 1,
+    cols: Math.abs(first.col - last.col) + 1,
+  };
+}
+
 export function offsetRect(rect: Rect, dRow: number, dCol: number): Rect {
   return { row: rect.row + dRow, col: rect.col + dCol, rows: rect.rows, cols: rect.cols };
 }

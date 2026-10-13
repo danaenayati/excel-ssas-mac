@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { Layout } from "../types";
 import {
   emptyLayout,
+  filterValueText,
   findField,
   isEmptyLayout,
   layoutReducer,
   locate,
+  noRestrictionLabel,
+  selectionSummary,
   type HierarchyInput,
   type LayoutAction,
   type MeasureInput,
@@ -564,5 +567,55 @@ describe("replace", () => {
   it("swaps in a whole layout, as when another report becomes active", () => {
     const other = run([{ type: "addMeasure", measure: fare }]);
     expect(layoutReducer(emptyLayout(), { type: "replace", layout: other })).toBe(other);
+  });
+});
+
+describe("how a field's selection reads", () => {
+  const filtered = (hierarchy: HierarchyInput, captions: string[]) => {
+    const layout = run([
+      { type: "addHierarchy", hierarchy, area: "filters" },
+      {
+        type: "setMembers",
+        hierarchy: hierarchy.uniqueName,
+        members: captions.map((c) => `${hierarchy.uniqueName}.[${c}]`),
+        captions,
+      },
+    ]);
+    return layout.filters[0];
+  };
+
+  it("is All, or (Default) without an All member, when nothing is selected", () => {
+    expect(noRestrictionLabel(city)).toBe("All");
+    expect(noRestrictionLabel(segment)).toBe("(Default)");
+    expect(filterValueText(filtered(city, []))).toBe("All");
+    expect(filterValueText(filtered(segment, []))).toBe("(Default)");
+    expect(selectionSummary(filtered(city, []))).toBe("All");
+    expect(selectionSummary(filtered(segment, []))).toBe("(Default)");
+  });
+
+  it("is the member's caption for one member, on the sheet and on the chip", () => {
+    expect(filterValueText(filtered(city, ["Tehran"]))).toBe("Tehran");
+    expect(selectionSummary(filtered(city, ["Tehran"]))).toBe("Tehran");
+  });
+
+  it("is (Multiple Items) on the sheet and a count on the chip for several", () => {
+    const three = filtered(city, ["Tehran", "Shiraz", "Rey"]);
+    expect(filterValueText(three)).toBe("(Multiple Items)");
+    expect(selectionSummary(three)).toBe("3 selected");
+    expect(selectionSummary(filtered(city, ["Tehran", "Shiraz"]))).toBe("2 selected");
+  });
+
+  it("is unchanged by moving the field to another area", () => {
+    const start = run([
+      { type: "addHierarchy", hierarchy: city, area: "filters" },
+      {
+        type: "setMembers",
+        hierarchy: city.uniqueName,
+        members: ["[Geography].[City].[Tehran]"],
+        captions: ["Tehran"],
+      },
+    ]);
+    const moved = layoutReducer(start, { type: "move", name: city.uniqueName, area: "rows" });
+    expect(selectionSummary(moved.rows[0])).toBe("Tehran");
   });
 });

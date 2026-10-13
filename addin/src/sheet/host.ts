@@ -43,6 +43,14 @@ export interface SheetSelection {
   report: { id: string; row: number; col: number; rows: number; cols: number } | null;
 }
 
+/** The user clicked a cell inside a report's block. */
+export interface SheetClick {
+  /** As in `SheetSelection`: the report, the cell's offsets in its block, the block's size. */
+  report: { id: string; row: number; col: number; rows: number; cols: number };
+  /** The cell's value as text, without anything its number format adds. */
+  value: string;
+}
+
 export interface SheetHost {
   readonly kind: "excel" | "preview";
 
@@ -51,6 +59,14 @@ export interface SheetHost {
 
   /** Calls `listener` whenever the active cell changes. Returns the unsubscribe function. */
   onSelectionChanged(listener: (selection: SheetSelection) => void): () => void;
+
+  /**
+   * Calls `listener` when a cell inside a report is clicked, including a click on the
+   * cell that is already selected (which changes no selection). Never called for
+   * keyboard movement. A host that cannot hear clicks simply never calls it; the pane
+   * then relies on the selection. Returns the unsubscribe function.
+   */
+  onCellClicked(listener: (click: SheetClick) => void): () => void;
 
   /**
    * Where a report's block is now, resolved from the workbook name `CubeReport_<id>`;
@@ -65,8 +81,9 @@ export interface SheetHost {
   hasContentOutside(target: Extent, previous: Extent | null): Promise<boolean>;
 
   /**
-   * Clears the report's previous extent, writes `block` with its top-left at `anchor`,
-   * formats it, and points `CubeReport_<id>` at the new extent, which it returns.
+   * Clears the report's previous extent (wherever it is), writes `block` with its
+   * top-left at `anchor`, formats it, and points `CubeReport_<id>` at the new extent,
+   * which it returns.
    */
   writeReport(reportId: string, anchor: CellAddress, block: Block): Promise<Extent>;
 

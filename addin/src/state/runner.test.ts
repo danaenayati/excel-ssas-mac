@@ -3,6 +3,7 @@ import type { Api } from "../api";
 import { ApiFailure, HelperDown } from "../apiErrors";
 import { createMockApi } from "../dev/mockApi";
 import type { Extent, ReportDef } from "../sheet/host";
+import { FILTER_FORMAT, PLACEHOLDER_TEXT, guessFieldCell } from "../sheet/layout";
 import { PreviewHost } from "../sheet/preview";
 import type { Fields, Layout } from "../types";
 import { emptyLayout, layoutReducer, type LayoutAction } from "./layout";
@@ -105,11 +106,13 @@ describe("first run of a new report", () => {
     expect(cellText(0, 0)).toBeUndefined();
   });
 
-  it("writes nothing and saves nothing while the layout is empty", async () => {
+  it("writes nothing and saves nothing for an empty layout that has no place yet", async () => {
+    // Not even at the selected cell: a placeholder only goes where the report was put.
+    host.select(2, 2);
     const def = report(emptyLayout());
     expect(await runner.run(def, { anchor: null, useSelection: true })).toEqual({
       kind: "empty",
-      cleared: false,
+      extent: null,
     });
     expect(host.snapshot().cells.size).toBe(0);
     expect(await host.loadReports()).toEqual([]);
@@ -174,16 +177,17 @@ describe("refresh", () => {
     expect(cellText(0, 0)).toBeUndefined();
   });
 
-  it("empties the block but keeps its place when every field is removed", async () => {
+  it("leaves a placeholder at its place when every field is removed", async () => {
     host.select(4, 4);
     const def = report(basic());
     expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
     const emptied = { ...def, layout: emptyLayout() };
-    expect(await runner.run(emptied, { anchor: null, useSelection: false })).toEqual({
-      kind: "empty",
-      cleared: true,
-    });
-    expect(host.snapshot().cells.size).toBe(0);
+    const outcome = await runner.run(emptied, { anchor: null, useSelection: false });
+    expect(outcome).toMatchObject({ kind: "empty", extent: { row: 4, col: 4, rows: 1, cols: 1 } });
+    // The old block is gone; one quiet cell marks where the report is.
+    expect(host.snapshot().cells.size).toBe(1);
+    expect(cellText(4, 4)).toBe(PLACEHOLDER_TEXT);
+    expect(host.snapshot().cells.get("4,4")?.muted).toBe(true);
     expect(await host.getReportExtent(def.id)).toMatchObject({ row: 4, col: 4, rows: 1, cols: 1 });
     expect(await host.loadReports()).toEqual([emptied]);
     expect(runner.runtimes.has(def.id)).toBe(false);
@@ -434,5 +438,223 @@ describe("drill", () => {
     expect(cellText(0, 0)).toBe("City");
     expect(cellText(0, 1)).toBe("Rey");
     expect(cellText(3, 0)).toBe("Calendar");
+  });
+});
+
+describe("placeholder of a report with no fields", () => {
+  const at = (row: number, col: number) => ({ sheetId: "preview-sheet-1", sheetName: "Sheet1", row, col });
+
+  it("is written where a new report is put, tracked by its name, and saved", async () => {
+    const def = report(emptyLayout());
+    const outcome = await runner.run(def, { anchor: at(6, 2), useSelection: false });
+    expect(outcome).toMatchObject({ kind: "empty", extent: { row: 6, col: 2, rows: 1, cols: 1 } });
+    expect(cellText(6, 2)).toBe(PLACEHOLDER_TEXT);
+    expect(host.snapshot().cells.get("6,2")).toMatchObject({ muted: true, format: "@" });
+    expect(await host.getReportExtent(def.id)).toMatchObject({ row: 6, col: 2, rows: 1, cols: 1 });
+    expect(await host.loadReports()).toEqual([def]);
+    // Selecting it finds the report.
+    host.select(6, 2);
+    expect((await host.getSelection()).report).toMatchObject({ id: def.id, row: 0, col: 0 });
+  });
+
+  it("is replaced by the first real result, at the same cell", async () => {
+    const def = report(emptyLayout());
+    await runner.run(def, { anchor: at(6, 2), useSelection: false });
+    const filled = { ...def, layout: basic() };
+    const written = expectWritten(await runner.run(filled, { anchor: null, useSelection: false }));
+    expect(written.extent).toMatchObject({ row: 6, col: 2, rows: 4, cols: 2 });
+    expect(cellText(6, 2)).toBe("Calendar");
+    expect(host.snapshot().cells.get("6,2")?.muted).toBeUndefined();
+    expect(asked).toEqual([]);
+  });
+
+  it("counts a layout with only a filter as having no fields", async () => {
+    const def = report(layoutOf([{ type: "addHierarchy", hierarchy: hierarchy("City"), area: "filters" }]));
+    const outcome = await runner.run(def, { anchor: at(0, 0), useSelection: false });
+    expect(outcome.kind).toBe("empty");
+    expect(cellText(0, 0)).toBe(PLACEHOLDER_TEXT);
+    expect(host.snapshot().cells.size).toBe(1);
+  });
+
+  it("asks before covering a cell that holds something, and leaves it on No", async () => {
+    host.type(6, 2, "mine");
+    answer = false;
+    const def = report(emptyLayout());
+    expect(await runner.run(def, { anchor: at(6, 2), useSelection: false })).toEqual({ kind: "declined" });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ row: 6, col: 2, rows: 1, cols: 1 });
+    expect(cellText(6, 2)).toBe("mine");
+    expect(await host.loadReports()).toEqual([]);
+
+    answer = true;
+    expect((await runner.run(def, { anchor: at(6, 2), useSelection: false })).kind).toBe("empty");
+    expect(cellText(6, 2)).toBe(PLACEHOLDER_TEXT);
+  });
+
+  it("is not rewritten over itself with a question", async () => {
+    const def = report(emptyLayout());
+    await runner.run(def, { anchor: at(1, 1), useSelection: false });
+    expect((await runner.run(def, { anchor: null, useSelection: false })).kind).toBe("empty");
+    expect(asked).toEqual([]);
+    expect(host.snapshot().cells.size).toBe(1);
+  });
+});
+
+describe("a report that lost its cells, and moving a report", () => {
+  it("is written again, with its fields, at the cell it is given", async () => {
+    host.select(1, 1);
+    const def = report(basic());
+    expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+
+    // The sheet is deleted: the definition stays, the cells and the name's target go.
+    host.deleteSheet();
+    expect(await host.getReportExtent(def.id)).toBeNull();
+    expect(await host.loadReports()).toEqual([def]);
+    expect(await runner.run(def, { anchor: null, useSelection: false })).toEqual({ kind: "needs-anchor" });
+
+    const selected = (await host.getSelection()).cell;
+    expect(selected).toMatchObject({ sheetName: "Sheet2", row: 0, col: 0 });
+    const again = expectWritten(await runner.run(def, { anchor: selected, useSelection: false }));
+    expect(again.extent).toMatchObject({ sheetName: "Sheet2", row: 0, col: 0, rows: 4, cols: 2 });
+    expect(cellText(0, 0)).toBe("Calendar");
+    expect(cellText(3, 0)).toBe("Grand Total");
+    expect(await host.loadReports()).toEqual([def]);
+  });
+
+  it("relocate moves the block: old cells cleared, name at the new place", async () => {
+    host.select(0, 0);
+    const def = report(basic());
+    expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    const target = { sheetId: "preview-sheet-1", sheetName: "Sheet1", row: 10, col: 3 };
+    const moved = expectWritten(await runner.run(def, { anchor: target, useSelection: false, relocate: true }));
+    expect(moved.extent).toMatchObject({ row: 10, col: 3, rows: 4, cols: 2 });
+    expect(cellText(0, 0)).toBeUndefined();
+    expect(cellText(10, 3)).toBe("Calendar");
+    expect(host.snapshot().cells.size).toBe(8);
+    expect(await host.getReportExtent(def.id)).toMatchObject({ row: 10, col: 3 });
+    expect(asked).toEqual([]);
+  });
+
+  it("without relocate an offered anchor does not move a report that has cells", async () => {
+    host.select(0, 0);
+    const def = report(basic());
+    expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    const target = { sheetId: "preview-sheet-1", sheetName: "Sheet1", row: 10, col: 3 };
+    const same = expectWritten(await runner.run(def, { anchor: target, useSelection: false }));
+    expect(same.extent).toMatchObject({ row: 0, col: 0 });
+  });
+
+  it("relocate moves a placeholder too", async () => {
+    const def = report(emptyLayout());
+    const from = { sheetId: "preview-sheet-1", sheetName: "Sheet1", row: 2, col: 2 };
+    const to = { sheetId: "preview-sheet-1", sheetName: "Sheet1", row: 8, col: 1 };
+    await runner.run(def, { anchor: from, useSelection: false });
+    const outcome = await runner.run(def, { anchor: to, useSelection: false, relocate: true });
+    expect(outcome).toMatchObject({ kind: "empty", extent: { row: 8, col: 1 } });
+    expect(cellText(2, 2)).toBeUndefined();
+    expect(cellText(8, 1)).toBe(PLACEHOLDER_TEXT);
+  });
+});
+
+describe("filter cells of a written report", () => {
+  // Filter: Year. Columns: City. Rows: Calendar. Values: Rides.
+  // Row 0: filter. Row 1: blank. Row 2: City header. Row 3: measures + corner. Row 4+: data.
+  function full(): Layout {
+    return layoutOf(
+      [
+        { type: "addHierarchy", hierarchy: hierarchy("Year"), area: "filters" },
+        { type: "addHierarchy", hierarchy: hierarchy("City"), area: "columns" },
+      ],
+      basic(),
+    );
+  }
+  const size = (extent: Extent) => ({ rows: extent.rows, cols: extent.cols });
+
+  it("writes the arrow format on the three kinds of filter cell, and the column field's caption", async () => {
+    host.select(0, 0);
+    expectWritten(await runner.run(report(full()), { anchor: null, useSelection: true }));
+    const cell = (row: number, col: number) => host.snapshot().cells.get(row + "," + col);
+    expect(cell(0, 0)).toMatchObject({ value: "Year", format: "@" });
+    expect(cell(0, 1)).toMatchObject({ value: "All", format: FILTER_FORMAT });
+    expect(cell(2, 0)).toMatchObject({ value: "City", format: FILTER_FORMAT });
+    expect(cell(3, 0)).toMatchObject({ value: "Calendar", format: FILTER_FORMAT });
+    // Member and measure headers are plain text.
+    expect(cell(2, 1)).toMatchObject({ value: "Tehran", format: "@" });
+    expect(cell(3, 1)).toMatchObject({ value: "Rides", format: "@" });
+  });
+
+  it("knows the field behind each button, and that other cells are not buttons", async () => {
+    host.select(0, 0);
+    const def = report(full());
+    const written = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    const at = (row: number, col: number) => ({ row, col, ...size(written.extent) });
+    expect(runner.buttonAt(def.id, at(0, 0))?.caption).toBe("Year");
+    expect(runner.buttonAt(def.id, at(0, 1))?.caption).toBe("Year");
+    expect(runner.buttonAt(def.id, at(2, 0))?.caption).toBe("City");
+    expect(runner.buttonAt(def.id, at(3, 0))?.caption).toBe("Calendar");
+    expect(runner.buttonAt(def.id, at(2, 1))).toBeNull(); // a city's header
+    expect(runner.buttonAt(def.id, at(3, 1))).toBeNull(); // a measure caption
+    expect(runner.buttonAt(def.id, at(4, 0))).toBeNull(); // a member
+    expect(runner.buttonAt(def.id, at(4, 1))).toBeNull(); // a number
+    expect(runner.buttonAt(def.id, at(1, 0))).toBeNull(); // the blank row
+  });
+
+  it("also offers the column field for the cells of its header row", async () => {
+    host.select(0, 0);
+    const def = report(full());
+    const written = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    const at = (row: number, col: number) => ({ row, col, ...size(written.extent) });
+    expect(runner.fieldAt(def.id, at(2, 1))?.caption).toBe("City");
+    expect(runner.fieldAt(def.id, at(2, written.extent.cols - 1))?.caption).toBe("City"); // Grand Total
+    expect(runner.fieldAt(def.id, at(0, 1))?.caption).toBe("Year");
+    expect(runner.fieldAt(def.id, at(3, 1))).toBeNull();
+    expect(runner.fieldAt(def.id, at(4, 0))).toBeNull();
+  });
+
+  it("cannot tell without a result, or once the block has changed size", async () => {
+    host.select(0, 0);
+    const def = report(full());
+    expect(runner.buttonAt(def.id, { row: 0, col: 1, rows: 7, cols: 10 })).toBeUndefined();
+    const written = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    const grown = { rows: written.extent.rows + 1, cols: written.extent.cols };
+    expect(runner.buttonAt(def.id, { row: 0, col: 1, ...grown })).toBeUndefined();
+    expect(runner.fieldAt(def.id, { row: 0, col: 1, ...grown })).toBeUndefined();
+    runner.forget(def.id);
+    expect(runner.buttonAt(def.id, { row: 0, col: 1, ...size(written.extent) })).toBeUndefined();
+  });
+
+  it("agrees with the guess made from the layout alone, for every cell of the block", async () => {
+    host.select(0, 0);
+    const layouts = [
+      full(),
+      basic(),
+      layoutOf([{ type: "addMeasure", measure: measure("Rides") }]),
+      layoutOf([
+        { type: "addMeasure", measure: measure("Rides") },
+        { type: "addHierarchy", hierarchy: hierarchy("City"), area: "columns" },
+        { type: "addHierarchy", hierarchy: hierarchy("Year"), area: "columns" },
+        { type: "addHierarchy", hierarchy: hierarchy("Service Type"), area: "filters" },
+      ]),
+    ];
+    for (const layout of layouts) {
+      const def = report(layout);
+      const written = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+      for (let row = 0; row < written.extent.rows; row++) {
+        for (let col = 0; col < written.extent.cols; col++) {
+          const guess = guessFieldCell(layout, row, col);
+          const guessed = guess ? layout[guess.area][guess.index] : null;
+          expect(runner.buttonAt(def.id, { row, col, ...size(written.extent) }) ?? null).toEqual(guessed ?? null);
+        }
+      }
+      host.reset();
+      host.select(0, 0);
+    }
+  });
+
+  it("has no buttons on a placeholder", async () => {
+    const def = report(emptyLayout());
+    await runner.run(def, { anchor: { sheetId: "preview-sheet-1", sheetName: "Sheet1", row: 0, col: 0 }, useSelection: false });
+    expect(runner.buttonAt(def.id, { row: 0, col: 0, rows: 1, cols: 1 })).toBeUndefined();
+    expect(host.snapshot().cells.get("0,0")?.format).toBe("@");
   });
 });

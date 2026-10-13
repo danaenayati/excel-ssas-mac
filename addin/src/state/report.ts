@@ -2,7 +2,7 @@
 // workbook yet, and where an unwritten one will go. Pure reducer, wrapping the layout
 // reducer.
 
-import type { CellAddress, ReportDef } from "../sheet/host";
+import type { CellAddress, Extent, ReportDef, SheetSelection } from "../sheet/host";
 import type { Layout, PlacedField, ValueField } from "../types";
 import { DEFAULT_OPTIONS, emptyLayout, layoutReducer, type LayoutAction } from "./layout";
 
@@ -34,7 +34,9 @@ export type CurrentAction =
   /** Fill in a database or cube the user has not chosen yet. Not a change to query. */
   | { type: "defaults"; catalog?: string; cube?: string }
   | { type: "pin"; anchor: CellAddress }
-  | { type: "saved" }
+  /** The report is in the workbook now. With `id`, only if that is the report being
+   *  edited: the result of a run may arrive after the pane has moved to another one. */
+  | { type: "saved"; id?: string }
   /** Ask for a re-query without changing anything (Refresh). */
   | { type: "touch" };
 
@@ -106,10 +108,44 @@ export function currentReducer(state: Current | null, action: CurrentAction): Cu
     case "pin":
       return { ...state, anchor: action.anchor };
     case "saved":
+      if (action.id !== undefined && action.id !== state.def.id) return state;
       return state.persisted ? state : { ...state, persisted: true };
     case "touch":
       return { ...state, revision: state.revision + 1, urgent: true };
   }
+}
+
+// ---------------------------------------------------------------------------
+// What the button next to the report's location does.
+// ---------------------------------------------------------------------------
+
+export type PlaceDecision =
+  /** The selected cell belongs to a report: nothing can be put there. */
+  | { kind: "blocked"; inside: "this" | "other" }
+  /** The report being edited has no cells: it goes to the selected cell, fields and all. */
+  | { kind: "place" }
+  /** It is on a sheet: the button starts another report at the selected cell. */
+  | { kind: "new" };
+
+/**
+ * `extent` must be the report's location read from the workbook just now, not a
+ * remembered one: a report whose sheet was deleted still exists but has no cells, and
+ * the button must then place that report rather than start an empty one.
+ */
+export function decidePlace(
+  reportId: string,
+  extent: Extent | null,
+  selection: Pick<SheetSelection, "report">,
+): PlaceDecision {
+  if (selection.report) {
+    return { kind: "blocked", inside: selection.report.id === reportId ? "this" : "other" };
+  }
+  return extent === null ? { kind: "place" } : { kind: "new" };
+}
+
+/** The button's wording for the same two cases. */
+export function placeLabel(extent: Extent | null): string {
+  return extent === null ? "Place here" : "New report here";
 }
 
 // ---------------------------------------------------------------------------

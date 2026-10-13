@@ -4,7 +4,8 @@
 // means "no restriction". The picker shows that as a tree of checkboxes with the usual
 // three states. A ticked member stands for itself and everything below it, so the
 // selection is kept as the smallest set of members that covers what is ticked. A
-// virtual root above the top level stands for "everything".
+// virtual root above the top level stands for "everything". The helper lists the
+// hierarchy's top-level members directly under it; the All member is never in the tree.
 
 import type { Member, PlacedField } from "../types";
 
@@ -201,7 +202,9 @@ export interface PickerResult {
 
 /**
  * The selection as the contract wants it, or null when nothing is ticked (which is not
- * a valid filter). Everything ticked, or the All member ticked, is "no restriction".
+ * a valid filter). Everything ticked is "no restriction". So is a selection that holds
+ * the All member, which the tree never offers but a search across all levels, or a
+ * workbook saved by an earlier version, can still bring in.
  */
 export function pickerResult(state: PickerState, allMember: string | null): PickerResult | null {
   if (state.selected.size === 0) return null;

@@ -3,6 +3,8 @@ import type { ReportDef } from "../sheet/host";
 import { emptyLayout, isEmptyLayout } from "./layout";
 import {
   currentReducer,
+  decidePlace,
+  placeLabel,
   newReportDef,
   newReportId,
   parseReportDef,
@@ -106,6 +108,9 @@ describe("current report reducer", () => {
     const saved = currentReducer(pinned, { type: "saved" })!;
     expect(saved.persisted).toBe(true);
     expect(currentReducer(saved, { type: "saved" })).toBe(saved);
+    // A result for some other report does not mark this one as saved.
+    expect(currentReducer(pinned, { type: "saved", id: "someone-else" })).toBe(pinned);
+    expect(currentReducer(pinned, { type: "saved", id: pinned.def.id })!.persisted).toBe(true);
     const touched = currentReducer(saved, { type: "touch" })!;
     expect(touched.revision).toBe(1);
     expect(touched.def).toBe(saved.def);
@@ -189,5 +194,38 @@ describe("reading a stored definition", () => {
 
   it("gives an empty layout when there is none", () => {
     expect(parseReportDef(JSON.stringify({ id: "abc" }))?.layout).toEqual(emptyLayout());
+  });
+});
+
+describe("what the place button does", () => {
+  const extent = { sheetId: "s1", sheetName: "Sheet1", row: 0, col: 0, rows: 4, cols: 2 };
+  const outside = { report: null };
+  const inside = (id: string) => ({ report: { id, row: 1, col: 0, rows: 4, cols: 2 } });
+
+  it("places the report being edited when it has no cells", () => {
+    expect(decidePlace("r1", null, outside)).toEqual({ kind: "place" });
+  });
+
+  it("starts another report when the one being edited is on a sheet", () => {
+    expect(decidePlace("r1", extent, outside)).toEqual({ kind: "new" });
+  });
+
+  it("goes by the location it is handed, so a report whose sheet was deleted is placed, not replaced", () => {
+    // What the pane remembered said "on Sheet1"; the workbook, read just now, says no cells.
+    const remembered = extent;
+    const live = null;
+    expect(decidePlace("r1", remembered, outside).kind).toBe("new");
+    expect(decidePlace("r1", live, outside).kind).toBe("place");
+  });
+
+  it("does nothing inside a report, whichever it is", () => {
+    expect(decidePlace("r1", extent, inside("r1"))).toEqual({ kind: "blocked", inside: "this" });
+    expect(decidePlace("r1", extent, inside("r2"))).toEqual({ kind: "blocked", inside: "other" });
+    expect(decidePlace("r1", null, inside("r2"))).toEqual({ kind: "blocked", inside: "other" });
+  });
+
+  it("words the button for the same two cases", () => {
+    expect(placeLabel(null)).toBe("Place here");
+    expect(placeLabel(extent)).toBe("New report here");
   });
 });

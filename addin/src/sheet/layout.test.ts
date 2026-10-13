@@ -1,16 +1,25 @@
 import { describe, expect, it } from "vitest";
 import type { Grid, HeaderCell, HeaderKind, LineKind, MemberRef } from "../types";
 import {
+  FILTER_FORMAT,
   GENERAL_FORMAT,
   MAX_CHUNK_CELLS,
+  PLACEHOLDER_TEXT,
   TEXT_FORMAT,
+  blockFields,
   buildBlock,
   chunkBlock,
+  columnHeaderAt,
   excelText,
   excelValues,
   expandedDescendants,
+  fieldCellAt,
+  guessFieldCell,
+  isTextFormat,
   memberAt,
+  placeholderBlock,
   sliceMatrix,
+  type BlockFields,
 } from "./layout";
 
 const CAL = "[Date].[Calendar]";
@@ -552,5 +561,280 @@ describe("expanded descendants", () => {
     expect(expandedDescendants({ rowHeaders: [], colHeaderRows }, "columns", y2025)).toEqual([
       q1.uniqueName,
     ]);
+  });
+});
+
+describe("filter cells: page filters", () => {
+  // sampleGrid has two filter rows; the layout that asked for it has two filters.
+  const fields: BlockFields = { filters: 2, rows: 1, columns: ["City"] };
+  const block = buildBlock(sampleGrid(), fields);
+
+  it("maps the caption and the value cell of each filter row to that filter", () => {
+    expect(fieldCellAt(block, 0, 0)).toEqual({ area: "filters", index: 0 });
+    expect(fieldCellAt(block, 0, 1)).toEqual({ area: "filters", index: 0 });
+    expect(fieldCellAt(block, 1, 0)).toEqual({ area: "filters", index: 1 });
+    expect(fieldCellAt(block, 1, 1)).toEqual({ area: "filters", index: 1 });
+    expect(fieldCellAt(block, 0, 2)).toBeNull();
+    expect(fieldCellAt(block, 2, 0)).toBeNull(); // the blank row
+  });
+
+  it("shows the arrow on the value cell only, and leaves both values as they were", () => {
+    expect(block.numberFormats[0].slice(0, 3)).toEqual([TEXT_FORMAT, FILTER_FORMAT, GENERAL_FORMAT]);
+    expect(block.numberFormats[1].slice(0, 2)).toEqual([TEXT_FORMAT, FILTER_FORMAT]);
+    expect(block.values[0].slice(0, 2)).toEqual(["Service Type", "Ride"]);
+    expect(block.values[1].slice(0, 2)).toEqual(["Segment", "(Multiple Items)"]);
+  });
+
+  it("marks none when the grid's filter rows do not match the layout's filters", () => {
+    const odd = buildBlock(sampleGrid(), { filters: 1, rows: 1, columns: ["City"] });
+    expect(fieldCellAt(odd, 0, 1)).toBeNull();
+    expect(odd.numberFormats[0][1]).toBe(TEXT_FORMAT);
+    // The other kinds do not depend on the filters.
+    expect(fieldCellAt(odd, 4, 0)).toEqual({ area: "rows", index: 0 });
+  });
+
+  it("has no filter cells at all when no layout is given", () => {
+    const bare = buildBlock(sampleGrid());
+    expect(bare.fieldCells.size).toBe(0);
+    expect(bare.numberFormats[0][1]).toBe(TEXT_FORMAT);
+  });
+});
+
+describe("filter cells: row-field captions", () => {
+  it("maps each corner cell of the last header row to its row field, with the arrow", () => {
+    const block = buildBlock(plainGrid(3, 2, 2, 2), { filters: 0, rows: 3, columns: ["City"] });
+    for (let r = 0; r < 3; r++) {
+      expect(fieldCellAt(block, 1, r)).toEqual({ area: "rows", index: r });
+      expect(block.numberFormats[1][r]).toBe(FILTER_FORMAT);
+    }
+    expect(block.values[1].slice(0, 3)).toEqual(["Field 0", "Field 1", "Field 2"]);
+    expect(fieldCellAt(block, 1, 3)).toBeNull(); // a measure caption
+  });
+
+  it("marks no corner cell when there are no row fields (the grid still has one corner column)", () => {
+    const grid = plainGrid(1, 2, 1);
+    grid.rowFieldCaptions = [""];
+    const block = buildBlock(grid, { filters: 0, rows: 0, columns: [] });
+    expect(fieldCellAt(block, 0, 0)).toBeNull();
+    expect(block.numberFormats[0][0]).toBe(TEXT_FORMAT);
+    expect(block.fieldCells.size).toBe(0);
+  });
+
+  it("does not mark the data rows' own header cells", () => {
+    const block = buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"] });
+    expect(fieldCellAt(block, 5, 0)).toBeNull();
+    expect(block.numberFormats[5][0]).toBe(TEXT_FORMAT);
+  });
+});
+
+describe("filter cells: column-field captions", () => {
+  it("writes the field's caption in the corner cell of its header row, with the arrow", () => {
+    // Header rows: 3 = City, 4 = measures (whose corner is the row field's caption).
+    const block = buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"] });
+    expect(block.values[3][0]).toBe("City");
+    expect(block.numberFormats[3][0]).toBe(FILTER_FORMAT);
+    expect(fieldCellAt(block, 3, 0)).toEqual({ area: "columns", index: 0 });
+    // The member headers next to it are not filter cells.
+    expect(fieldCellAt(block, 3, 1)).toBeNull();
+    expect(block.values[4][0]).toBe("Calendar");
+    expect(fieldCellAt(block, 4, 0)).toEqual({ area: "rows", index: 0 });
+  });
+
+  it("uses the corner column nearest the data when there are several row fields", () => {
+    const grid = plainGrid(3, 2, 2, 3); // two column fields, then the measures
+    const block = buildBlock(grid, { filters: 0, rows: 3, columns: ["Year", "City"] });
+    expect(block.values[0].slice(0, 3)).toEqual(["", "", "Year"]);
+    expect(block.values[1].slice(0, 3)).toEqual(["", "", "City"]);
+    expect(fieldCellAt(block, 0, 2)).toEqual({ area: "columns", index: 0 });
+    expect(fieldCellAt(block, 1, 2)).toEqual({ area: "columns", index: 1 });
+    expect(fieldCellAt(block, 0, 0)).toBeNull();
+    expect(block.numberFormats[0].slice(0, 3)).toEqual([TEXT_FORMAT, TEXT_FORMAT, FILTER_FORMAT]);
+    // The row captions keep the last header row.
+    expect(block.values[2].slice(0, 3)).toEqual(["Field 0", "Field 1", "Field 2"]);
+  });
+
+  it("puts it in the only corner column when there are no row fields", () => {
+    const grid = plainGrid(1, 2, 1, 2);
+    grid.rowFieldCaptions = [""];
+    const block = buildBlock(grid, { filters: 0, rows: 0, columns: ["City"] });
+    expect(block.values[0][0]).toBe("City");
+    expect(fieldCellAt(block, 0, 0)).toEqual({ area: "columns", index: 0 });
+    expect(fieldCellAt(block, 1, 0)).toBeNull(); // the empty row-caption corner
+    expect(block.fieldCells.size).toBe(1);
+  });
+
+  it("adds nothing when there are no column fields", () => {
+    const block = buildBlock(plainGrid(2, 2, 2), { filters: 0, rows: 2, columns: [] });
+    expect(Array.from(block.fieldCells.values()).every((cell) => cell.area === "rows")).toBe(true);
+    expect(block.fieldCells.size).toBe(2);
+  });
+
+  it("gives way to the row captions if a grid has no separate measures row", () => {
+    // One header row only, though the layout has a column field: the corner is the
+    // row field's. The column field is still reachable from the pane.
+    const block = buildBlock(plainGrid(1, 2, 1, 1), { filters: 0, rows: 1, columns: ["City"] });
+    expect(block.values[0][0]).toBe("Field 0");
+    expect(fieldCellAt(block, 0, 0)).toEqual({ area: "rows", index: 0 });
+  });
+
+  it("is still there with no data rows", () => {
+    const block = buildBlock(plainGrid(2, 3, 0, 2), { filters: 0, rows: 2, columns: ["City"] });
+    expect(block.rows).toBe(2);
+    expect(block.values[0].slice(0, 2)).toEqual(["", "City"]);
+    expect(fieldCellAt(block, 0, 1)).toEqual({ area: "columns", index: 0 });
+    expect(fieldCellAt(block, 1, 0)).toEqual({ area: "rows", index: 0 });
+    expect(fieldCellAt(block, 1, 1)).toEqual({ area: "rows", index: 1 });
+    expect(block.fieldCells.size).toBe(3);
+  });
+
+  it("keeps the header bold and filled across the caption cells", () => {
+    const block = buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"] });
+    expect(block.bold).toContainEqual({ row: 3, col: 0, rows: 2, cols: 7 });
+    expect(block.fill).toContainEqual({ row: 3, col: 0, rows: 2, cols: 7 });
+  });
+});
+
+describe("filter cells as Excel receives them", () => {
+  it("forces every filter cell to text, so that 2025 keeps its arrow", () => {
+    const grid = plainGrid(1, 1, 1, 2);
+    grid.filterRows = [{ caption: "Years", value: "2025" }];
+    grid.rowFieldCaptions = ["2024"];
+    const block = buildBlock(grid, { filters: 1, rows: 1, columns: ["=Risky"] });
+    const out = excelValues(block, false);
+    expect(out[0]).toEqual(["Years", "'2025"]); // caption cell is plain text; value cell is forced
+    expect(out[2][0]).toBe("'=Risky");
+    expect(out[3][0]).toBe("'2024");
+    // The block itself keeps the real values.
+    expect(block.values[0][1]).toBe("2025");
+  });
+
+  it("leaves ordinary header text and numbers as before", () => {
+    const block = buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"] });
+    const out = excelValues(block, false);
+    expect(out[5][0]).toBe("2025"); // a member caption in a Text cell
+    expect(out[5][1]).toBe(1);
+    expect(out[3][1]).toBe("Tehran");
+  });
+
+  it("counts both text formats as text, for the fallback that drops custom formats", () => {
+    expect(isTextFormat(TEXT_FORMAT)).toBe(true);
+    expect(isTextFormat(FILTER_FORMAT)).toBe(true);
+    expect(isTextFormat(GENERAL_FORMAT)).toBe(false);
+    expect(isTextFormat("#,##0")).toBe(false);
+    expect(FILTER_FORMAT.startsWith("@")).toBe(true);
+  });
+});
+
+describe("blockFields", () => {
+  it("takes the counts and the column captions from a layout", () => {
+    const field = (caption: string) => ({
+      hierarchy: `[D].[${caption}]`,
+      caption,
+      allMember: null,
+      expanded: [],
+      members: [],
+      memberCaptions: [],
+    });
+    expect(
+      blockFields({ filters: [field("Years")], rows: [field("A"), field("B")], columns: [field("City")] }),
+    ).toEqual({ filters: 1, rows: 2, columns: ["City"] });
+    expect(blockFields({ filters: [], rows: [], columns: [] })).toEqual({ filters: 0, rows: 0, columns: [] });
+  });
+});
+
+describe("placeholder block", () => {
+  const block = placeholderBlock();
+
+  it("is one quiet text cell", () => {
+    expect(block.rows).toBe(1);
+    expect(block.cols).toBe(1);
+    expect(block.values).toEqual([[PLACEHOLDER_TEXT]]);
+    expect(block.numberFormats).toEqual([[TEXT_FORMAT]]);
+    expect(block.muted).toEqual([{ row: 0, col: 0, rows: 1, cols: 1 }]);
+    expect(block.bold).toEqual([]);
+    expect(block.fill).toEqual([]);
+  });
+
+  it("has no filter cells, no members, and leaves the column width alone", () => {
+    expect(block.fieldCells.size).toBe(0);
+    expect(block.members.size).toBe(0);
+    expect(block.autofit).toBe(false);
+  });
+
+  it("says what to do, in words Excel will not read as a formula", () => {
+    expect(PLACEHOLDER_TEXT).toMatch(/Cube Explorer/);
+    expect(excelValues(block, false)).toEqual([[PLACEHOLDER_TEXT]]);
+  });
+
+  it("is a fresh object each time", () => {
+    expect(placeholderBlock()).not.toBe(block);
+    expect(placeholderBlock().values).not.toBe(block.values);
+  });
+});
+
+describe("column header cells, for the selected-cell action", () => {
+  // sampleGrid: 2 filter rows, blank row, header rows 3 (City) and 4 (measures); 1 corner column.
+  const shape = buildBlock(sampleGrid()).shape;
+
+  it("finds the column field for the member and total cells of its header row", () => {
+    expect(columnHeaderAt(shape, 3, 1, 1)).toBe(0);
+    expect(columnHeaderAt(shape, 3, 6, 1)).toBe(0); // Grand Total column
+  });
+
+  it("is null for the corner, the measures row, the data and outside", () => {
+    expect(columnHeaderAt(shape, 3, 0, 1)).toBeNull();
+    expect(columnHeaderAt(shape, 4, 1, 1)).toBeNull();
+    expect(columnHeaderAt(shape, 5, 1, 1)).toBeNull();
+    expect(columnHeaderAt(shape, 3, 7, 1)).toBeNull();
+    expect(columnHeaderAt(shape, 0, 1, 1)).toBeNull();
+    expect(columnHeaderAt(buildBlock(plainGrid(1, 2, 2)).shape, 0, 1, 0)).toBeNull();
+  });
+});
+
+describe("guessing the filter cells from the layout alone", () => {
+  const field = (caption: string) => ({
+    hierarchy: `[D].[${caption}]`,
+    caption,
+    allMember: null,
+    expanded: [],
+    members: [],
+    memberCaptions: [],
+  });
+
+  it("agrees with the block for the shapes the helper produces", () => {
+    const cases: { layout: { filters: string[]; rows: string[]; columns: string[] }; grid: Grid }[] = [];
+    const add = (filters: string[], rows: string[], columns: string[], N: number) => {
+      const grid = plainGrid(Math.max(1, rows.length), 2, N, columns.length + 1);
+      grid.filterRows = filters.map((caption) => ({ caption, value: "All" }));
+      grid.rowFieldCaptions = rows.length > 0 ? rows : [""];
+      cases.push({ layout: { filters, rows, columns }, grid });
+    };
+    add([], ["A"], [], 3);
+    add(["F1", "F2"], ["A", "B"], ["C1"], 3);
+    add(["F1"], [], ["C1", "C2"], 1);
+    add([], [], [], 1);
+    add(["F1"], ["A"], ["C1"], 0);
+
+    for (const { layout, grid } of cases) {
+      const full = {
+        filters: layout.filters.map(field),
+        rows: layout.rows.map(field),
+        columns: layout.columns.map(field),
+      };
+      const block = buildBlock(grid, blockFields(full));
+      for (let r = 0; r < block.rows + 1; r++) {
+        for (let c = 0; c < block.cols + 1; c++) {
+          expect(guessFieldCell(full, r, c)).toEqual(fieldCellAt(block, r, c));
+        }
+      }
+    }
+  });
+
+  it("is null outside the block's top-left region and for negative positions", () => {
+    const layout = { filters: [field("F")], rows: [field("A")], columns: [] };
+    expect(guessFieldCell(layout, 0, 2)).toBeNull();
+    expect(guessFieldCell(layout, 1, 0)).toBeNull(); // blank row
+    expect(guessFieldCell(layout, 3, 0)).toBeNull(); // first data row
+    expect(guessFieldCell(layout, -1, 0)).toBeNull();
   });
 });

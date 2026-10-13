@@ -9,6 +9,7 @@ import {
   containsCell,
   fitsSheet,
   intersect,
+  parseA1,
   rectA1,
   runs,
   subtract,
@@ -34,6 +35,36 @@ describe("A1 addresses", () => {
     expect(rectA1({ row: 1, col: 1, rows: 1, cols: 1 })).toBe("B2");
     expect(rectA1({ row: 1, col: 1, rows: 3, cols: 2 })).toBe("B2:C4");
     expect(rectA1({ row: MAX_ROWS - 1, col: MAX_COLS - 1, rows: 1, cols: 1 })).toBe("XFD1048576");
+  });
+});
+
+describe("parsing an address", () => {
+  it("reads a cell and a range", () => {
+    expect(parseA1("C2")).toEqual({ row: 1, col: 2, rows: 1, cols: 1 });
+    expect(parseA1("B2:H30")).toEqual({ row: 1, col: 1, rows: 29, cols: 7 });
+    expect(parseA1("XFD1048576")).toEqual({ row: MAX_ROWS - 1, col: MAX_COLS - 1, rows: 1, cols: 1 });
+  });
+
+  it("ignores dollar signs, a sheet name and letter case", () => {
+    expect(parseA1("$B$2:$C$4")).toEqual({ row: 1, col: 1, rows: 3, cols: 2 });
+    expect(parseA1("Sheet1!B2")).toEqual({ row: 1, col: 1, rows: 1, cols: 1 });
+    expect(parseA1("'My Sheet'!b2:c3")).toEqual({ row: 1, col: 1, rows: 2, cols: 2 });
+  });
+
+  it("normalises a range given backwards", () => {
+    expect(parseA1("D5:B2")).toEqual({ row: 1, col: 1, rows: 4, cols: 3 });
+  });
+
+  it("round-trips with rectA1", () => {
+    for (const address of ["A1", "Z99", "AA10:AB12", "B2:H30"]) {
+      expect(rectA1(parseA1(address) as Rect)).toBe(address);
+    }
+  });
+
+  it("returns null for whole rows and columns, several areas, names and junk", () => {
+    for (const address of ["B:B", "2:2", "A1,C3", "A1:B2:C3", "Total", "", "A0", "XFE1", "A1048577", "1A"]) {
+      expect(parseA1(address)).toBeNull();
+    }
   });
 });
 

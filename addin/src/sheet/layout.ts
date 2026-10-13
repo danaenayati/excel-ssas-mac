@@ -9,7 +9,7 @@
 //   N rows   R row-header cells | C values
 // All positions in a Block are relative to its top-left cell.
 
-import type { CellValue, Grid, HeaderCell, MemberRef } from "../types";
+import type { CellValue, Grid, HeaderCell, Layout, MemberRef } from "../types";
 import { chunkRect, runs, type Rect } from "./geometry";
 
 /** Excel's "Text" number format: stops Excel from reading "2024" or "March 2025" as a number or date. */
@@ -19,6 +19,14 @@ export const GENERAL_FORMAT = "General";
 export const MAX_CHUNK_CELLS = 20000;
 /** Spaces per indent level when the host cannot indent with formatting. */
 export const INDENT_SPACES = 3;
+/**
+ * Number format of a filter cell: the text, then a small arrow. The arrow is drawn by
+ * the format and is not part of the cell's value, so "Years" stays "Years". Only text
+ * shows it, so the hosts force these cells to text (see `excelValues`).
+ */
+export const FILTER_FORMAT = '@" ▾"';
+/** What a report with no fields shows at its place on the sheet. */
+export const PLACEHOLDER_TEXT = "Cube report: tick fields in the Cube Explorer panel to build it";
 
 export type Axis = "rows" | "columns";
 export type SheetValue = string | number | boolean;
@@ -50,6 +58,34 @@ export interface IndentGroup {
   rects: Rect[];
 }
 
+/**
+ * A filter cell: a cell that stands for a placed field and opens its checklist when
+ * clicked, as the page-filter and "Row Labels" buttons of a PivotTable do.
+ */
+export interface FieldCell {
+  area: "filters" | "rows" | "columns";
+  /** Position of the field in that area of the layout. */
+  index: number;
+}
+
+/** What `buildBlock` needs to know about the layout: the grid itself names no fields. */
+export interface BlockFields {
+  /** Number of hierarchies in Filters; filter row i belongs to filter i. */
+  filters: number;
+  /** Number of hierarchies in Rows; corner caption r belongs to row field r. */
+  rows: number;
+  /** Captions of the hierarchies in Columns; header row i belongs to column field i. */
+  columns: string[];
+}
+
+export function blockFields(layout: Pick<Layout, "filters" | "rows" | "columns">): BlockFields {
+  return {
+    filters: layout.filters.length,
+    rows: layout.rows.length,
+    columns: layout.columns.map((field) => field.caption),
+  };
+}
+
 export interface Block {
   rows: number;
   cols: number;
@@ -59,8 +95,14 @@ export interface Block {
   numberFormats: string[][];
   bold: Rect[];
   fill: Rect[];
+  /** Cells drawn as a quiet note (grey italic): the placeholder of an empty report. */
+  muted: Rect[];
   /** Cells to indent, grouped by level (1 or more). */
   indents: IndentGroup[];
+  /** Field behind a filter cell, keyed by `memberKey(row, col)`. */
+  fieldCells: Map<string, FieldCell>;
+  /** Whether the host should fit the column widths to the block after writing. */
+  autofit: boolean;
   /** Member behind a header cell, keyed by `memberKey(row, col)`. */
   members: Map<string, MemberHit>;
   shape: BlockShape;
@@ -83,7 +125,30 @@ function indentOf(cell: HeaderCell | undefined): number {
   return n > 0 ? n : 0;
 }
 
-export function buildBlock(grid: Grid): Block {
+export function isTextFormat(format: string): boolean {
+  return format === TEXT_FORMAT || format === FILTER_FORMAT;
+}
+
+export function fieldCellAt(
+  block: Pick<Block, "fieldCells">,
+  row: number,
+  col: number,
+): FieldCell | null {
+  return block.fieldCells.get(memberKey(row, col)) ?? null;
+}
+
+/**
+ * `fields` describes the layout the grid was asked for. With it the block marks its
+ * filter cells and gives each column field a caption cell, which the grid lacks:
+ *
+ *   - filter row i: caption and value cell stand for filter i; the value cell shows the arrow;
+ *   - last header row: corner cell r is the caption of row field r, with the arrow;
+ *   - header row i (column field i): the corner cell nearest the data gets that field's
+ *     caption, with the arrow.
+ *
+ * Without `fields` the block is the bare grid: no filter cells, no column captions.
+ */
+export function buildBlock(grid: Grid, fields: BlockFields = { filters: 0, rows: 0, columns: [] }): Block {
   const F = grid.filterRows.length;
   const H = grid.colHeaderRows.length;
   const R = grid.rowFieldCaptions.length;
@@ -117,10 +182,22 @@ export function buildBlock(grid: Grid): Block {
     numberFormats[row][col] = TEXT_FORMAT;
   };
 
-  // Page filters.
+  const fieldCells = new Map<string, FieldCell>();
+  const setFilterCell = (row: number, col: number, cell: FieldCell, arrow: boolean) => {
+    fieldCells.set(memberKey(row, col), cell);
+    if (arrow) numberFormats[row][col] = FILTER_FORMAT;
+  };
+
+  // Page filters. The helper answers one row per filter, in order; if it ever did not,
+  // there would be no telling which row is which field, so none is marked.
+  const filtersKnown = F === fields.filters;
   for (let f = 0; f < F; f++) {
     setText(f, 0, grid.filterRows[f].caption);
     setText(f, 1, grid.filterRows[f].value);
+    if (filtersKnown) {
+      setFilterCell(f, 0, { area: "filters", index: f }, false);
+      setFilterCell(f, 1, { area: "filters", index: f }, true);
+    }
   }
   if (F > 0) {
     const captions: Rect = { row: 0, col: 0, rows: F, cols: 1 };
@@ -132,8 +209,16 @@ export function buildBlock(grid: Grid): Block {
   for (let h = 0; h < H; h++) {
     const row = headerTop + h;
     const cells = grid.colHeaderRows[h] ?? [];
+    const last = h === H - 1;
     for (let r = 0; r < R; r++) {
-      setText(row, r, h === H - 1 ? grid.rowFieldCaptions[r] ?? "" : "");
+      setText(row, r, last ? grid.rowFieldCaptions[r] ?? "" : "");
+      if (last && r < fields.rows) setFilterCell(row, r, { area: "rows", index: r }, true);
+    }
+    // A column field's own caption, in the corner cell next to its header cells. The
+    // last header row is the measures' and its corner belongs to the row fields.
+    if (!last && h < fields.columns.length && R > 0) {
+      setText(row, R - 1, fields.columns[h]);
+      setFilterCell(row, R - 1, { area: "columns", index: h }, true);
     }
     for (let c = 0; c < C; c++) {
       const cell = cells[c];
@@ -204,7 +289,10 @@ export function buildBlock(grid: Grid): Block {
     numberFormats,
     bold,
     fill,
+    muted: [],
     indents,
+    fieldCells,
+    autofit: true,
     members,
     shape: {
       filterRows: F,
@@ -216,6 +304,79 @@ export function buildBlock(grid: Grid): Block {
       dataTop,
     },
   };
+}
+
+/**
+ * What a report with no fields puts on the sheet: one quiet cell at its place, so the
+ * report is visible, selectable and has somewhere to grow from. The text is left to
+ * spill over the cells to its right rather than widen its column.
+ */
+export function placeholderBlock(): Block {
+  const cell: Rect = { row: 0, col: 0, rows: 1, cols: 1 };
+  return {
+    rows: 1,
+    cols: 1,
+    values: [[PLACEHOLDER_TEXT]],
+    numberFormats: [[TEXT_FORMAT]],
+    bold: [],
+    fill: [],
+    muted: [cell],
+    indents: [],
+    fieldCells: new Map(),
+    autofit: false,
+    members: new Map(),
+    shape: {
+      filterRows: 0,
+      headerRows: 0,
+      headerCols: 0,
+      dataRows: 0,
+      dataCols: 0,
+      headerTop: 0,
+      dataTop: 0,
+    },
+  };
+}
+
+/**
+ * The column field whose header row a cell is in (its member and total cells, right of
+ * the corner), or null. These cells are not filter cells (a click on one does not
+ * open anything), but the pane offers "Filter <field>…" for the selected one.
+ */
+export function columnHeaderAt(
+  shape: BlockShape,
+  row: number,
+  col: number,
+  columnFields: number,
+): number | null {
+  const h = row - shape.headerTop;
+  if (h < 0 || h >= shape.headerRows - 1 || h >= columnFields) return null;
+  if (col < shape.headerCols || col >= shape.headerCols + shape.dataCols) return null;
+  return h;
+}
+
+/**
+ * Where the filter cells of a report should be, worked out from its layout alone, for
+ * when there is no result in memory (the workbook was just reopened). It assumes what
+ * the helper does: one filter row per filter, one header row per column field with the
+ * measures' row last, one corner column per row field (one in any case). A caller that
+ * has the cell's text should check it against the field's caption before trusting a
+ * row or column answer.
+ */
+export function guessFieldCell(
+  layout: Pick<Layout, "filters" | "rows" | "columns">,
+  row: number,
+  col: number,
+): FieldCell | null {
+  if (row < 0 || col < 0) return null;
+  const F = layout.filters.length;
+  if (row < F) return col <= 1 ? { area: "filters", index: row } : null;
+  const headerTop = F > 0 ? F + 1 : 0;
+  const h = row - headerTop;
+  const H = layout.columns.length + 1;
+  const R = Math.max(1, layout.rows.length);
+  if (h < 0 || h >= H) return null;
+  if (h === H - 1) return col < layout.rows.length ? { area: "rows", index: col } : null;
+  return col === R - 1 ? { area: "columns", index: h } : null;
 }
 
 /** The pieces a host writes one request at a time, each at most `maxCells` cells. */
@@ -250,16 +411,19 @@ export function excelText(text: string): string {
 
 /**
  * The values matrix as Excel should receive it: text cells guarded with `excelText`,
- * and, when the host cannot indent with formatting, indent levels turned into leading
+ * filter cells forced to text, and, when the host cannot indent with formatting, indent levels turned into leading
  * spaces. Returns a new matrix; the block is not changed.
  */
 export function excelValues(block: Block, indentWithSpaces: boolean): SheetValue[][] {
   const out = block.values.map((line, r) =>
-    line.map((value, c) =>
-      typeof value === "string" && block.numberFormats[r][c] === TEXT_FORMAT
-        ? excelText(value)
-        : value,
-    ),
+    line.map((value, c) => {
+      if (typeof value !== "string" || value === "") return value;
+      const format = block.numberFormats[r][c];
+      // A filter cell has a custom format, under which Excel would read "2025" as a
+      // number and drop the arrow. The apostrophe makes it text whatever it looks like.
+      if (format === FILTER_FORMAT) return "'" + value;
+      return format === TEXT_FORMAT ? excelText(value) : value;
+    }),
   );
   if (indentWithSpaces) {
     for (const group of block.indents) {

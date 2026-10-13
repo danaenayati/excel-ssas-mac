@@ -23,11 +23,13 @@ const m = (uniqueName: string, caption: string, level: number, hasChildren = fal
   hasChildren,
 });
 
-/** All -> 2025 (Q1, Q2), 2026 (not loaded). */
+/**
+ * The tree as the helper serves it: the top level is the years themselves (the All
+ * member is never listed). 2025 has its quarters loaded; 2026 has not been opened.
+ */
 function tree(members: string[] = [], captions: string[] = []): PickerState {
   let state = initPicker({ members, memberCaptions: captions });
-  state = setChildren(state, ROOT, [m(ALL, "All", 0, true)], false);
-  state = setChildren(state, ALL, [m("2025", "2025", 1, true), m("2026", "2026", 1, true)], false);
+  state = setChildren(state, ROOT, [m("2025", "2025", 1, true), m("2026", "2026", 1, true)], false);
   state = setChildren(state, "2025", [m("Q1", "Q1", 2), m("Q2", "Q2", 2)], false);
   return state;
 }
@@ -38,7 +40,7 @@ describe("starting state", () => {
   it("has everything ticked when the field has no restriction", () => {
     const state = tree();
     expect(isAll(state)).toBe(true);
-    for (const key of [ALL, "2025", "2026", "Q1", "Q2"]) expect(checkState(state, key)).toBe("on");
+    for (const key of ["2025", "2026", "Q1", "Q2"]) expect(checkState(state, key)).toBe("on");
     expect(pickerResult(state, ALL)).toEqual({ members: [], captions: [] });
     expect(describeSelection(state, ALL)).toBe("All selected");
   });
@@ -48,7 +50,6 @@ describe("starting state", () => {
     expect(checkState(state, "Q1")).toBe("on");
     expect(checkState(state, "Q2")).toBe("off");
     expect(checkState(state, "2025")).toBe("partial");
-    expect(checkState(state, ALL)).toBe("partial");
     expect(checkState(state, "2026")).toBe("off");
   });
 
@@ -70,7 +71,7 @@ describe("unticking", () => {
     expect(checkState(state, "Q2")).toBe("on");
     expect(checkState(state, "2025")).toBe("partial");
     expect(checkState(state, "2026")).toBe("on");
-    expect(checkState(state, ALL)).toBe("partial");
+    expect(isAll(state)).toBe(false);
     expect(pickerResult(state, ALL)).toEqual({ members: ["2026", "Q2"], captions: ["2026", "Q2"] });
   });
 
@@ -85,8 +86,8 @@ describe("unticking", () => {
     expect(sel(state)).toEqual(["2025"]);
   });
 
-  it("unticking the All member leaves nothing selected, which is not a valid filter", () => {
-    const { state } = toggle(tree(), ALL);
+  it("unticking every top-level member leaves nothing selected, which is not a valid filter", () => {
+    const { state } = toggle(toggle(tree(), "2025").state, "2026");
     expect(sel(state)).toEqual([]);
     expect(pickerResult(state, ALL)).toBeNull();
     expect(describeSelection(state, ALL)).toBe("Nothing selected");
@@ -154,9 +155,11 @@ describe("select all and none", () => {
     expect(pickerResult(state, ALL)).toEqual({ members: [], captions: [] });
   });
 
-  it("treats the All member alone as no restriction", () => {
-    const state = toggle(selectNone(tree()), ALL).state;
+  it("treats a selection holding the All member as no restriction", () => {
+    // The tree never offers it, but a workbook from an earlier version can carry it.
+    const state = tree([ALL], ["All"]);
     expect(pickerResult(state, ALL)).toEqual({ members: [], captions: [] });
+    expect(describeSelection(state, ALL)).toBe("All selected");
   });
 
   it("summarises a long selection by count", () => {
@@ -180,8 +183,7 @@ describe("search results", () => {
   });
 
   it("does the same when the All member is what is selected", () => {
-    const start = toggle(selectNone(tree()), ALL).state;
-    const state = toggleFlat(start, tehran, ALL);
+    const state = toggleFlat(tree([ALL], ["All"]), tehran, ALL);
     expect(sel(state)).toEqual([tehran.uniqueName]);
   });
 

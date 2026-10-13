@@ -62,20 +62,18 @@ export function MemberPicker({ api, connectionId, catalog, cube, field, onApply,
 
   const hierarchy = field.hierarchy;
 
-  /** Load the children of `key` (the top level for ROOT). Resolves with them. */
+  /** Load the children of `key` (the top level for ROOT). */
   const load = useCallback(
-    async (key: string): Promise<Member[] | null> => {
+    async (key: string): Promise<void> => {
       setLoading((before) => new Set(before).add(key));
       setError(null);
       try {
         const base = { catalog, cube, hierarchy };
         const response = await api.members(connectionId, key === ROOT ? base : { ...base, parent: key });
-        if (!alive.current) return null;
+        if (!alive.current) return;
         setState((before) => setChildren(before, key, response.members, response.truncated));
-        return response.members;
       } catch (failure) {
         if (alive.current) setError(toUiError(failure));
-        return null;
       } finally {
         if (alive.current) {
           setLoading((before) => {
@@ -89,22 +87,9 @@ export function MemberPicker({ api, connectionId, catalog, cube, field, onApply,
     [api, connectionId, catalog, cube, hierarchy],
   );
 
-  // Top level first. When it is just the All member, open it straight away: the
-  // useful list is one level down.
+  // The top level: the hierarchy's first level of members.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const top = await load(ROOT);
-      if (cancelled || !top) return;
-      if (top.length === 1 && top[0].hasChildren) {
-        const only = top[0].uniqueName;
-        setOpen(new Set([only]));
-        await load(only);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    void load(ROOT);
   }, [load]);
 
   // Search, after a short pause in typing. A newer search replaces an older one.

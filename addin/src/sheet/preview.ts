@@ -1,8 +1,13 @@
 // PreviewHost: a stand-in sheet for when the pane is opened in an ordinary browser
 // (Office.onReady resolves with host null). It keeps one sheet of cells, the report
 // names and the "workbook settings" in memory, mirrors them to sessionStorage so that
-// reloading the page behaves like reopening the workbook, and lets the page select a
-// cell. `components/PreviewSheet.tsx` draws it.
+// reloading the page behaves like reopening the workbook, and lets the page click a
+// cell, move the selection with the keyboard, type into a cell, insert rows and delete
+// the sheet. `components/PreviewSheet.tsx` draws it.
+//
+// It imitates the parts of Excel the pane has to cope with: a deleted sheet leaves the
+// report definitions behind with no cells; a click is reported after the selection it
+// causes; and moving with the keyboard selects without clicking.
 
 import { containsCell, intersect, subtract, type Rect } from "./geometry";
 import {
@@ -11,6 +16,7 @@ import {
   type CellAddress,
   type Extent,
   type ReportDef,
+  type SheetClick,
   type SheetHost,
   type SheetSelection,
 } from "./host";
@@ -22,6 +28,7 @@ export interface PreviewCell {
   format: string;
   bold?: boolean;
   fill?: boolean;
+  muted?: boolean;
   indent?: number;
 }
 
@@ -30,6 +37,7 @@ export interface PreviewSnapshot {
   version: number;
   /** Goes up only when cells or report names change. */
   contentVersion: number;
+  sheetName: string;
   cells: ReadonlyMap<string, PreviewCell>;
   /** Report id -> its block. */
   names: ReadonlyMap<string, Rect>;
@@ -39,8 +47,6 @@ export interface PreviewSnapshot {
   usedCols: number;
 }
 
-const SHEET_ID = "preview-sheet-1";
-const SHEET_NAME = "Sheet1";
 const STORAGE_KEY = "cube.preview.v1";
 const STORAGE_LIMIT = 3000000;
 
@@ -61,6 +67,7 @@ interface Stored {
   names: [string, Rect][];
   settings: [string, string][];
   selection: { row: number; col: number };
+  sheet: number;
 }
 
 export class PreviewHost implements SheetHost {
@@ -70,10 +77,13 @@ export class PreviewHost implements SheetHost {
   private names = new Map<string, Rect>();
   private settings = new Map<string, string>();
   private selection = { row: 1, col: 1 };
+  /** Number of the one sheet that exists; goes up when the sheet is deleted. */
+  private sheet = 1;
   private version = 0;
   private contentVersion = 0;
   private snapshotCache: PreviewSnapshot | null = null;
   private selectionListeners = new Set<(selection: SheetSelection) => void>();
+  private clickListeners = new Set<(click: SheetClick) => void>();
   private viewers = new Set<() => void>();
 
   private readonly persist: boolean;
@@ -96,13 +106,20 @@ export class PreviewHost implements SheetHost {
     };
   }
 
+  onCellClicked(listener: (click: SheetClick) => void): () => void {
+    this.clickListeners.add(listener);
+    return () => {
+      this.clickListeners.delete(listener);
+    };
+  }
+
   async getReportExtent(reportId: string): Promise<Extent | null> {
     const rect = this.names.get(reportId);
     return rect ? this.extent(rect) : null;
   }
 
   async hasContentOutside(target: Extent, previous: Extent | null): Promise<boolean> {
-    const parts = subtract(target, previous);
+    const parts = subtract(target, previous && previous.sheetId === target.sheetId ? previous : null);
     if (parts.length === 0) return false;
     for (const [at, cell] of this.cells) {
       if (cell.value === "") continue;
@@ -126,23 +143,25 @@ export class PreviewHost implements SheetHost {
         this.cells.set(key(anchor.row + r, anchor.col + c), { value, format });
       }
     }
+    const cellAt = (row: number, col: number): PreviewCell => {
+      const at = key(anchor.row + row, anchor.col + col);
+      let cell = this.cells.get(at);
+      if (!cell) {
+        cell = { value: "", format: "General" };
+        this.cells.set(at, cell);
+      }
+      return cell;
+    };
     const each = (rects: Rect[], apply: (cell: PreviewCell) => void) => {
       for (const rect of rects) {
         for (let r = rect.row; r < rect.row + rect.rows; r++) {
-          for (let c = rect.col; c < rect.col + rect.cols; c++) {
-            const at = key(anchor.row + r, anchor.col + c);
-            let cell = this.cells.get(at);
-            if (!cell) {
-              cell = { value: "", format: "General" };
-              this.cells.set(at, cell);
-            }
-            apply(cell);
-          }
+          for (let c = rect.col; c < rect.col + rect.cols; c++) apply(cellAt(r, c));
         }
       }
     };
     each(block.bold, (cell) => (cell.bold = true));
     each(block.fill, (cell) => (cell.fill = true));
+    each(block.muted, (cell) => (cell.muted = true));
     for (const group of block.indents) each(group.rects, (cell) => (cell.indent = group.level));
 
     this.names.set(reportId, target);
@@ -181,13 +200,30 @@ export class PreviewHost implements SheetHost {
 
   // -- Preview only ---------------------------------------------------------
 
-  /** Simulate the user clicking a sheet cell. */
+  /** Simulate moving the selection to a cell without clicking it (arrow keys). */
   select(row: number, col: number): void {
     if (row === this.selection.row && col === this.selection.col) return;
     this.selection = { row, col };
     this.changed(false);
-    const selection = this.currentSelection();
-    for (const listener of Array.from(this.selectionListeners)) listener(selection);
+    this.announceSelection();
+  }
+
+  /**
+   * Simulate a mouse click on a cell: the selection moves there (if it was elsewhere),
+   * and then the click itself is reported, as Excel's single-click event is: also when
+   * the cell was already selected, and only for cells inside a report.
+   */
+  click(row: number, col: number): void {
+    this.select(row, col);
+    const sheet = this.sheet;
+    setTimeout(() => {
+      if (sheet !== this.sheet) return;
+      const report = this.reportAt(row, col);
+      if (!report) return;
+      const cell = this.cells.get(key(row, col));
+      const click: SheetClick = { report, value: cell ? String(cell.value) : "" };
+      for (const listener of Array.from(this.clickListeners)) listener(click);
+    }, 0);
   }
 
   /** Simulate the user typing into a cell (to try the overwrite question). */
@@ -213,15 +249,29 @@ export class PreviewHost implements SheetHost {
     this.changed();
   }
 
+  /**
+   * Simulate deleting the sheet: its cells are gone and every report name points at
+   * nothing, but the report definitions stay in the workbook. A fresh, empty sheet
+   * takes its place and becomes the active one.
+   */
+  deleteSheet(): void {
+    this.cells.clear();
+    this.names.clear();
+    this.sheet++;
+    this.selection = { row: 0, col: 0 };
+    this.changed();
+    this.announceSelection();
+  }
+
   /** Empty the sheet and forget every report: a brand new workbook. */
   reset(): void {
     this.cells.clear();
     this.names.clear();
     this.settings.clear();
+    this.sheet = 1;
     this.selection = { row: 1, col: 1 };
     this.changed();
-    const selection = this.currentSelection();
-    for (const listener of Array.from(this.selectionListeners)) listener(selection);
+    this.announceSelection();
   }
 
   subscribe(viewer: () => void): () => void {
@@ -244,6 +294,7 @@ export class PreviewHost implements SheetHost {
     this.snapshotCache = {
       version: this.version,
       contentVersion: this.contentVersion,
+      sheetName: this.sheetName(),
       cells: this.cells,
       names: this.names,
       selection: this.selection,
@@ -255,20 +306,38 @@ export class PreviewHost implements SheetHost {
 
   // -- internals ------------------------------------------------------------
 
+  private sheetId(): string {
+    return "preview-sheet-" + this.sheet;
+  }
+
+  private sheetName(): string {
+    return "Sheet" + this.sheet;
+  }
+
   private extent(rect: Rect): Extent {
-    return { sheetId: SHEET_ID, sheetName: SHEET_NAME, ...rect };
+    return { sheetId: this.sheetId(), sheetName: this.sheetName(), ...rect };
+  }
+
+  private reportAt(row: number, col: number): SheetSelection["report"] {
+    for (const [id, rect] of this.names) {
+      if (containsCell(rect, row, col)) {
+        return { id, row: row - rect.row, col: col - rect.col, rows: rect.rows, cols: rect.cols };
+      }
+    }
+    return null;
   }
 
   private currentSelection(): SheetSelection {
     const { row, col } = this.selection;
-    let report: SheetSelection["report"] = null;
-    for (const [id, rect] of this.names) {
-      if (containsCell(rect, row, col)) {
-        report = { id, row: row - rect.row, col: col - rect.col, rows: rect.rows, cols: rect.cols };
-        break;
-      }
-    }
-    return { cell: { sheetId: SHEET_ID, sheetName: SHEET_NAME, row, col }, report };
+    return {
+      cell: { sheetId: this.sheetId(), sheetName: this.sheetName(), row, col },
+      report: this.reportAt(row, col),
+    };
+  }
+
+  private announceSelection(): void {
+    const selection = this.currentSelection();
+    for (const listener of Array.from(this.selectionListeners)) listener(selection);
   }
 
   private clearRect(rect: Rect): void {
@@ -301,11 +370,12 @@ export class PreviewHost implements SheetHost {
         names: Array.from(this.names.entries()),
         settings: Array.from(this.settings.entries()),
         selection: this.selection,
+        sheet: this.sheet,
       };
       let text = JSON.stringify(full);
       if (text.length > STORAGE_LIMIT) {
         // Too big to keep: remember the definitions only. After a reload the reports
-        // are listed but have no cells, like a report whose name was deleted.
+        // are listed but have no cells, like a report whose sheet was deleted.
         text = JSON.stringify({ ...full, cells: [], names: [] });
       }
       target.setItem(STORAGE_KEY, text);
@@ -325,6 +395,7 @@ export class PreviewHost implements SheetHost {
       this.names = new Map(stored.names ?? []);
       this.settings = new Map(stored.settings ?? []);
       if (stored.selection) this.selection = stored.selection;
+      if (typeof stored.sheet === "number" && stored.sheet >= 1) this.sheet = stored.sheet;
     } catch {
       // Unreadable: start empty.
     }
@@ -334,7 +405,12 @@ export class PreviewHost implements SheetHost {
 /** A rough rendering of an Excel number format, good enough to eyeball a preview. */
 export function formatForPreview(value: SheetValue, format: string): string {
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
-  if (typeof value === "string") return value;
+  if (typeof value === "string") {
+    // A text format with literal text after the placeholder, such as the filter
+    // cells' arrow: Excel shows the text followed by the literal.
+    const suffix = /^@"([^"]*)"$/.exec(format);
+    return suffix && value !== "" ? value + suffix[1] : value;
+  }
   if (!isFinite(value)) return String(value);
   if (format === "General" || format === "@" || format === "") {
     return String(Math.round(value * 1e10) / 1e10);

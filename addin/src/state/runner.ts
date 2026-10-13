@@ -6,6 +6,10 @@
 //   - Cancel stops the query on the helper and drops the response.
 //   - Sheet writes never overlap; each one finishes before the next starts.
 //
+// It also writes the placeholder a report with no fields leaves at its place on the
+// sheet, and remembers, for each report, which member and which field each cell of the
+// last result stands for.
+//
 // No React in here, so the whole loop can be tested against the mock API and the
 // preview host.
 
@@ -14,14 +18,20 @@ import { ApiFailure, HelperDown, isCancelled } from "../apiErrors";
 import { fitsSheet } from "../sheet/geometry";
 import { SheetError, type CellAddress, type Extent, type ReportDef, type SheetHost } from "../sheet/host";
 import {
+  blockFields,
   buildBlock,
+  columnHeaderAt,
   expandedDescendants,
   memberKey,
+  placeholderBlock,
   type Axis,
+  type Block,
+  type BlockShape,
+  type FieldCell,
   type GridHeaders,
   type MemberHit,
 } from "../sheet/layout";
-import type { ErrorCategory, Grid, MemberRef } from "../types";
+import type { ErrorCategory, Grid, Layout, MemberRef, PlacedField } from "../types";
 import { isEmptyLayout } from "./layout";
 
 /** An error ready to show: a plain sentence, optional technical detail. */
@@ -61,12 +71,20 @@ export interface ReportRuntime {
   stats: Grid["stats"];
   /** N: zero means "No data for this selection." */
   dataRows: number;
+  shape: BlockShape;
+  /** Field behind each filter cell of the block, keyed like `members`. */
+  fieldCells: Map<string, FieldCell>;
+  /** The layout that produced the block: the fields those cells point into. */
+  layout: Layout;
 }
 
 export type RunOutcome =
   | { kind: "written"; extent: Extent; runtime: ReportRuntime }
-  /** The layout has no field in Rows, Columns or Values; any old block was emptied. */
-  | { kind: "empty"; cleared: boolean }
+  /**
+   * The layout has no field in Rows, Columns or Values. `extent` is where the
+   * placeholder was written, or null when the report has no place on a sheet yet.
+   */
+  | { kind: "empty"; extent: Extent | null }
   | { kind: "superseded" }
   | { kind: "cancelled" }
   /** The user said no to overwriting other cells. */
@@ -79,8 +97,10 @@ export interface RunOptions {
   /** Where to put a report that has no cells yet. */
   anchor: CellAddress | null;
   /** When there is neither an extent nor an anchor, use the active cell (if it is
-   *  not inside another report). */
+   *  not inside another report). Never used for a placeholder. */
   useSelection: boolean;
+  /** Put the report at `anchor` even though it has cells elsewhere, which are cleared. */
+  relocate?: boolean;
 }
 
 export interface RunnerDeps {
@@ -140,6 +160,46 @@ export class ReportRunner {
     return runtime ? expandedDescendants(runtime.headers, axis, member) : [];
   }
 
+  /**
+   * The last result of a report, if it still describes the block: null when this
+   * session has not written the report, or when the block has changed size since (rows
+   * or columns were inserted), so that positions can no longer be trusted.
+   */
+  private current(reportId: string, size: { rows: number; cols: number }): ReportRuntime | null {
+    const runtime = this.runtimes.get(reportId);
+    return runtime && runtime.rows === size.rows && runtime.cols === size.cols ? runtime : null;
+  }
+
+  /**
+   * The field behind a filter cell (a page filter's caption or value cell, a row
+   * field's caption, a column field's caption): the cells that open a checklist when
+   * clicked. Null for any other cell; undefined when there is no result to tell by.
+   */
+  buttonAt(
+    reportId: string,
+    at: { row: number; col: number; rows: number; cols: number },
+  ): PlacedField | null | undefined {
+    const runtime = this.current(reportId, at);
+    if (!runtime) return undefined;
+    const cell = runtime.fieldCells.get(memberKey(at.row, at.col));
+    return cell ? runtime.layout[cell.area][cell.index] ?? null : null;
+  }
+
+  /**
+   * The field the pane offers to filter for a selected cell: a filter cell's field, or
+   * the column field whose header row the cell is in. Same null / undefined as above.
+   */
+  fieldAt(
+    reportId: string,
+    at: { row: number; col: number; rows: number; cols: number },
+  ): PlacedField | null | undefined {
+    const button = this.buttonAt(reportId, at);
+    if (button !== null) return button;
+    const runtime = this.current(reportId, at) as ReportRuntime;
+    const header = columnHeaderAt(runtime.shape, at.row, at.col, runtime.layout.columns.length);
+    return header === null ? null : runtime.layout.columns[header] ?? null;
+  }
+
   forget(reportId: string): void {
     this.runtimes.delete(reportId);
   }
@@ -177,17 +237,7 @@ export class ReportRunner {
     try {
       if (isEmptyLayout(def.layout)) {
         flight.stage = "sheet";
-        return await this.inSheetQueue(async () => {
-          const gone = stale();
-          if (gone) return gone;
-          const extent = await this.deps.host.getReportExtent(def.id);
-          if (extent) {
-            await this.deps.host.clearReport(def.id);
-            await this.deps.host.saveReport(def);
-          }
-          this.runtimes.delete(def.id);
-          return { kind: "empty", cleared: extent !== null } as RunOutcome;
-        });
+        return await this.inSheetQueue(() => this.writePlaceholder(def, options, flight, stale));
       }
 
       this.deps.onStage?.("query");
@@ -237,13 +287,68 @@ export class ReportRunner {
     flight: Flight,
     stale: () => RunOutcome | null,
   ): Promise<RunOutcome> {
+    const block = buildBlock(grid, blockFields(def.layout));
+    const placed = await this.place(def, block, options, flight, stale);
+    if ("kind" in placed) return placed;
+    const runtime: ReportRuntime = {
+      rows: block.rows,
+      cols: block.cols,
+      members: block.members,
+      headers: { rowHeaders: grid.rowHeaders, colHeaderRows: grid.colHeaderRows },
+      stats: grid.stats,
+      dataRows: block.shape.dataRows,
+      shape: block.shape,
+      fieldCells: block.fieldCells,
+      layout: def.layout,
+    };
+    this.runtimes.set(def.id, runtime);
+    await this.deps.host.saveReport(def);
+    return { kind: "written", extent: placed, runtime };
+  }
+
+  /**
+   * A report with no fields still shows where it is: one quiet cell, tracked by the
+   * report's name like any block. Written only where the report already has a place
+   * (its old block, or the cell it was put at), never at whatever cell is selected.
+   */
+  private async writePlaceholder(
+    def: ReportDef,
+    options: RunOptions,
+    flight: Flight,
+    stale: () => RunOutcome | null,
+  ): Promise<RunOutcome> {
+    const placed = await this.place(def, placeholderBlock(), { ...options, useSelection: false }, flight, stale);
+    if (!("kind" in placed)) {
+      this.forget(def.id);
+      await this.deps.host.saveReport(def);
+      return { kind: "empty", extent: placed };
+    }
+    if (placed.kind === "needs-anchor") {
+      this.forget(def.id);
+      return { kind: "empty", extent: null };
+    }
+    return placed;
+  }
+
+  /**
+   * Put a block on the sheet for a report: find its place, check it fits, ask before
+   * covering other cells, write. Resolves with the new extent, or with the outcome
+   * that stopped it.
+   */
+  private async place(
+    def: ReportDef,
+    block: Block,
+    options: RunOptions,
+    flight: Flight,
+    stale: () => RunOutcome | null,
+  ): Promise<Extent | RunOutcome> {
     const { host } = this.deps;
     let gone = stale();
     if (gone) return gone;
 
-    const block = buildBlock(grid);
     const previous = await host.getReportExtent(def.id);
-    let anchor: CellAddress | null = previous ?? options.anchor;
+    let anchor: CellAddress | null =
+      options.relocate && options.anchor ? options.anchor : previous ?? options.anchor;
     if (!anchor && options.useSelection) {
       const selection = await host.getSelection();
       if (!selection.report) anchor = selection.cell;
@@ -287,18 +392,7 @@ export class ReportRunner {
     gone = stale();
     if (gone) return gone;
 
-    const extent = await host.writeReport(def.id, anchor, block);
-    const runtime: ReportRuntime = {
-      rows: block.rows,
-      cols: block.cols,
-      members: block.members,
-      headers: { rowHeaders: grid.rowHeaders, colHeaderRows: grid.colHeaderRows },
-      stats: grid.stats,
-      dataRows: block.shape.dataRows,
-    };
-    this.runtimes.set(def.id, runtime);
-    await host.saveReport(def);
-    return { kind: "written", extent, runtime };
+    return await host.writeReport(def.id, anchor, block);
   }
 
   private inSheetQueue<T>(task: () => Promise<T>): Promise<T> {
