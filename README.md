@@ -83,7 +83,7 @@ Your password is kept in the Mac's Keychain. It is never written into a workbook
 | Panel is blank, or Excel says it cannot load the add-in | Run `./install.sh` again, then quit and reopen Excel. |
 | "Can't reach the server" | Connect the VPN. Run `./cube-probe` to see which step fails. |
 | "The server refused the sign-in" | Check the username is `DOMAIN\user` and the password is current. |
-| Sign-in fails although the password is right | Your server may accept only Kerberos sign-in. That is not supported yet; send the `./cube-probe` output. |
+| Sign-in fails although the password is right | Your server may accept only Kerberos sign-in. That is not supported yet. Run `./cube-probe --verbose` and send its output (it shows step names and sizes, never the password). |
 | "Couldn't find the port of instance …" | Ask a Windows colleague for the port and enter the server as `name:port`. |
 | "This view would return … cells" | Add a filter or remove a field. The limit protects Excel from freezing. |
 | macOS asks whether Python may use your keychain or local network | Click **Always Allow** / **Allow**. It is the helper. |
