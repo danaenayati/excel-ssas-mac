@@ -41,6 +41,9 @@ def _serve(directory: Path, port: int) -> int:
         handlers=[handler, logging.StreamHandler(sys.stderr)],
     )
     log = logging.getLogger("cubebridge")
+    # Our own step-by-step lines (names and byte counts, never content) are kept in
+    # the log: they are what explains a connection that does not work.
+    log.setLevel(logging.DEBUG)
     logging.getLogger("spnego").setLevel(logging.WARNING)  # it logs sign-in tokens at DEBUG
 
     paths = certs.paths_in(directory / "certs")

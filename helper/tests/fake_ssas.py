@@ -97,6 +97,8 @@ class FakeSsas:
         self.record_size = record_size
         self.frame_size = frame_size
         self.delay = 0.0
+        self.wrap_tokens = False  # CRLF every 64 characters, as Windows' encoder emits
+        self.final_token_text = ""  # text placed in the last reply's SspiHandshake
         self.drop_after: int | None = None  # close the connection after this many sealed requests
         self.requests: list[str] = []
         self.handshake_options: list[int] = []
@@ -144,9 +146,10 @@ class FakeSsas:
                 except Exception:
                     wire.send_message(x.soap_fault("Logon failure: unknown user name or bad password."), self.record_size)
                     return
-                wire.send_message(
-                    x.authenticate_response(base64.b64encode(out).decode() if out else ""), self.record_size
-                )
+                text = base64.b64encode(out).decode() if out else self.final_token_text
+                if out and self.wrap_tokens:
+                    text = "".join(text[i : i + 64] + "\r\n" for i in range(0, len(text), 64))
+                wire.send_message(x.authenticate_response(text), self.record_size)
             served = 0
             while True:
                 payload, options = wire.read_message()

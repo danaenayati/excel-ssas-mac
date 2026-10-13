@@ -133,6 +133,10 @@ class App:
                     return self._json(200, result)
             raise CubeError("not-found", "The helper does not know that request.")
         except CubeError as exc:
+            # Category and detail go to the log so a failure can be diagnosed from it.
+            # Neither ever holds a password or a sign-in token.
+            if exc.category != "cancelled":
+                log.warning("%s request failed: %s: %s%s", method, exc.category, exc.message, f" [{exc.detail}]" if exc.detail else "")
             return self._json(exc.http_status, {"error": exc.to_json()})
         except Exception:
             log.exception("unhandled error in %s request", method)
@@ -328,7 +332,9 @@ class _Handler(BaseHTTPRequestHandler):
     do_GET = do_POST = do_DELETE = do_PUT = do_PATCH = do_OPTIONS = do_HEAD = _dispatch
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002 - signature is fixed by the base class
-        log.debug("http: " + format, *args)
+        # Silenced: the base class logs the full request line, query string included.
+        # `_dispatch` logs each request by path instead.
+        pass
 
 
 class _Server(ThreadingHTTPServer):

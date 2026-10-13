@@ -345,3 +345,14 @@ def test_deleting_a_connection_does_not_hold_the_api_lock_while_closing(app):
     FakeBackend.instances[-1].close = lambda: seen.append(app._lock.locked())
     app.close()
     assert seen == [False, False]
+
+
+# -- first contact with a real server ------------------------------------------------
+def test_a_failed_request_leaves_its_category_and_detail_in_the_log(app, caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="cubebridge"):
+        call(app, "POST", "/api/connections", {"server": "bi", "username": "u", "password": "wrong"})
+    text = caplog.text
+    assert "auth" in text and "refused the sign-in" in text
+    assert "wrong" not in text  # never the password

@@ -34,8 +34,17 @@ class Parsed:
     rows: list[dict[str, str]] = field(default_factory=list)
     cellset: CellSet = field(default_factory=CellSet)
     session_id: str | None = None
-    handshake_token: bytes | None = None
+    handshake_text: str | None = None
     error: CubeError | None = None
+
+    @property
+    def handshake_token(self) -> bytes | None:
+        """The server's sign-in token, decoded only when asked for.
+
+        The reply to our last token carries nothing we need, so it is never decoded;
+        only a token the handshake is about to use can fail here.
+        """
+        return None if self.handshake_text is None else decode_token(self.handshake_text)
 
 
 def parse(data: bytes, *, during_auth: bool = False, raise_errors: bool = True) -> Parsed:
@@ -78,7 +87,7 @@ def parse(data: bytes, *, during_auth: bool = False, raise_errors: bool = True) 
             elif tag == "Session" and element.get("SessionId"):
                 parsed.session_id = element.get("SessionId")
             elif tag == "SspiHandshake":
-                parsed.handshake_token = _token(element.text)
+                parsed.handshake_text = element.text or ""
     except ET.ParseError as exc:
         raise ProtocolError(f"the response is not valid XML ({exc})") from exc
 
@@ -117,13 +126,30 @@ def _decode_name(name: str) -> str:
     return _ENCODED_CHAR.sub(lambda m: chr(int(m.group(1), 16)), name)
 
 
-def _token(text: str | None) -> bytes:
-    if not text or not text.strip():
+def decode_token(text: str) -> bytes:
+    """Decode a base64 sign-in token as a real server sends it.
+
+    Windows' own encoder breaks base64 into lines (CR LF every 64 characters and at
+    the end), so white space inside the token is normal and is removed first. What
+    is left must be strict base64. If it is not, the error describes the characters
+    that do not belong, never the token itself.
+    """
+    compact = "".join(text.split())
+    if not compact:
         return b""
     try:
-        return base64.b64decode(text.strip(), validate=True)
+        return base64.b64decode(compact + "=" * (-len(compact) % 4), validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise ProtocolError("the server's sign-in token is not valid base64") from exc
+        strangers: dict[str, int] = {}
+        for ch in compact:
+            if not (ch.isascii() and (ch.isalnum() or ch in "+/=")):
+                code = f"U+{ord(ch):04X}"
+                strangers[code] = strangers.get(code, 0) + 1
+        found = ", ".join(f"{code} x{count}" for code, count in sorted(strangers.items())[:12]) or "none (bad length or padding)"
+        raise ProtocolError(
+            f"the server's sign-in token is not valid base64: {len(compact)} characters, "
+            f"not in the base64 alphabet: {found}"
+        ) from exc
 
 
 def _axis(element: ET.Element) -> list[tuple[AxisMember, ...]]:

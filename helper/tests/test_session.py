@@ -208,3 +208,24 @@ def test_a_dropped_connection_is_marked_as_worth_retrying(ntlm_users):
         with pytest.raises(CubeError) as info:
             session.discover("DBSCHEMA_CATALOGS")
         assert info.value.retry is True
+
+
+# -- first contact with a real server ------------------------------------------------
+def test_sign_in_works_when_the_server_wraps_its_tokens_like_windows_does(ntlm_users):
+    user, password = ntlm_users
+    with FakeSsas({"DBSCHEMA_CATALOGS": CATALOGS}) as server:
+        server.wrap_tokens = True
+        session = open_session(server, user, password)
+        assert len(session.discover("DBSCHEMA_CATALOGS")) == 2
+        session.close()
+
+
+def test_whatever_the_last_sign_in_reply_carries_is_not_decoded(ntlm_users):
+    # Once our side is complete there is no further token to read, so text there
+    # that is not base64 must not fail a sign-in the server has accepted.
+    user, password = ntlm_users
+    with FakeSsas({"DBSCHEMA_CATALOGS": CATALOGS}) as server:
+        server.final_token_text = "OK (not base64!)"
+        session = open_session(server, user, password)
+        assert len(session.discover("DBSCHEMA_CATALOGS")) == 2
+        session.close()

@@ -169,3 +169,25 @@ def test_errors_can_be_returned_instead_of_raised_so_the_session_id_survives():
     parsed = xmla.parse(x.inband_error("Query (1, 1) bad"), raise_errors=False)
     assert parsed.error is not None and parsed.error.category == "server"
     assert parsed.session_id == "S-1"
+
+
+# -- first contact with a real server ------------------------------------------------
+def test_token_with_line_breaks_inside_is_decoded():
+    raw = b"NTLMSSP\x00" + bytes(range(256)) * 2
+    encoded = base64.b64encode(raw).decode()
+    wrapped = "\r\n" + "".join(encoded[i : i + 64] + "\r\n" for i in range(0, len(encoded), 64)) + "  "
+    assert "\r\n" in wrapped.strip()
+    assert xmla.parse(x.authenticate_response(wrapped)).handshake_token == raw
+
+
+def test_token_without_padding_is_decoded():
+    assert xmla.parse(x.authenticate_response("QUJDRA")).handshake_token == b"ABCD"
+
+
+def test_a_token_that_really_is_not_base64_is_reported_by_shape_not_content():
+    parsed = xmla.parse(x.authenticate_response("secret!token*value"))  # parsing alone must not fail
+    with pytest.raises(ProtocolError) as info:
+        parsed.handshake_token
+    detail = info.value.detail
+    assert "U+0021" in detail and "U+002A" in detail and "18 characters" in detail
+    assert "secret" not in detail and "token" not in detail.replace("sign-in token", "")
