@@ -139,8 +139,8 @@ Done.
 
 Next:
   1. Quit Excel completely if it is open (Cmd+Q), then open it again.
-  2. In Excel: Insert tab > the small arrow next to "My Add-ins" > Cube Explorer.
-     A "Cube Explorer" button then appears on the Home tab.
+  2. In Excel: Home tab > Add-ins (far right of the ribbon) > Cube Explorer.
+     A "Cube Explorer" button then appears at the far right of the Home tab.
   3. Try it with the built-in "Sample cube" first. It needs no server.
   4. To check your company server, connect the VPN and run:  ./cube-probe
 EOF

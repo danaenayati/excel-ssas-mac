@@ -27,8 +27,13 @@ certificate involved works for `https://localhost` only.
 Then:
 
 1. Quit Excel completely (Cmd+Q) and open it again.
-2. **Insert** tab → the small arrow beside **My Add-ins** → **Cube Explorer**.
-3. A **Cube Explorer** button appears on the **Home** tab. Click it to open the panel.
+2. On the **Home** tab, click **Add-ins** (far right of the ribbon) and choose
+   **Cube Explorer** from the list.
+3. A **Cube Explorer** button then appears at the far right of the **Home** tab. Click
+   it to open the panel.
+
+Older versions of Excel have no Add-ins button on Home. There it is **Insert** → the
+small arrow beside **My Add-ins** → **Cube Explorer**.
 
 To update later, run `./install.sh` again.
 
@@ -87,7 +92,7 @@ Your password is kept in the Mac's Keychain. It is never written into a workbook
 | "Couldn't find the port of instance …" | Ask a Windows colleague for the port and enter the server as `name:port`. |
 | "This view would return … cells" | Add a filter or remove a field. The limit protects Excel from freezing. |
 | macOS asks whether Python may use your keychain or local network | Click **Always Allow** / **Allow**. It is the helper. |
-| Cube Explorer is missing from **My Add-ins** | Quit Excel fully (Cmd+Q), reopen, and look under the arrow beside My Add-ins. |
+| Cube Explorer is not in the **Add-ins** list | Quit Excel fully (Cmd+Q), reopen, and click **Add-ins** on the Home tab again. |
 
 The helper's log is at
 `~/Library/Application Support/CubeBridge/logs/helper.log`. It never contains
