@@ -1,0 +1,10 @@
+#!/bin/bash
+# Tests the connection to your Analysis Services server, step by step.
+# You type the server, username and password here in Terminal; the password is hidden
+# and goes only to your server.
+PYTHON="$HOME/Library/Application Support/CubeBridge/venv/bin/python"
+if [ ! -x "$PYTHON" ]; then
+  echo "Cube Explorer is not installed yet. Run ./install.sh first."
+  exit 1
+fi
+exec "$PYTHON" -m cubebridge probe
