@@ -63,9 +63,14 @@ You can also add a connection from the panel itself with **Add connection**.
    to include.
 3. The result is written into the sheet where your cursor was. The cube calculates
    every number, including totals, so they match what Windows Excel shows.
-4. Click a row or column label, then **Expand** or **Collapse** in the panel to drill.
-5. **Refresh** updates the numbers. The view is saved inside the workbook, so you can
+4. **Filter from the table:** click any cell that shows a small ▾ (a page filter's
+   value, a row field's name or a column field's name). A checklist opens in the
+   panel; tick the items you want and press **Apply**.
+5. Click a row or column label, then **Expand** or **Collapse** in the panel to drill.
+6. **Refresh** updates the numbers. The view is saved inside the workbook, so you can
    reopen the file later and refresh it.
+7. **New report here** starts another report at the selected cell. If a report's sheet
+   was deleted, select a cell and press **Place here** to put it back, fields included.
 
 Your password is kept in the Mac's Keychain. It is never written into a workbook.
 
