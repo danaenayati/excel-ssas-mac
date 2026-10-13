@@ -128,3 +128,19 @@ def test_generated_config_is_valid_json(store):
     store.add(name="A", server="srv", username="u", password="p")
     data = json.loads((store.directory / "config.json").read_text())
     assert set(data) == {"token", "connections"}
+
+
+# -- review fixes --------------------------------------------------------------------
+def test_two_processes_sharing_the_settings_file_do_not_lose_each_others_changes(tmp_path):
+    secrets = MemorySecrets()
+    helper = Store(tmp_path / "app", secrets=secrets)
+    helper.token  # the long-running helper has read the file
+    probe = Store(tmp_path / "app", secrets=secrets)
+    saved = probe.add(name="From probe", server="srv", username="u", password="p")
+
+    assert [c["name"] for c in helper.connections()] == ["Sample cube", "From probe"]
+    helper.add(name="From Excel", server="srv2", username="u", password="p")
+    names = [c["name"] for c in Store(tmp_path / "app", secrets=secrets).connections()]
+    assert names == ["Sample cube", "From probe", "From Excel"]
+    assert helper.password(saved["id"]) == "p"
+    assert helper.token == probe.token

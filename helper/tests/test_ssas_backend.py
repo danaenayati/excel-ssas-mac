@@ -245,3 +245,94 @@ def test_bad_server_text_is_rejected_before_any_network_use():
     with pytest.raises(CubeError) as info:
         SsasBackend("https://bi/olap/msmdpump.dll", "CORP\\dana", "x")
     assert info.value.category == "bad-request"
+
+
+# -- review fixes --------------------------------------------------------------------
+import threading  # noqa: E402
+import time  # noqa: E402
+
+from cubebridge.ssas.session import Session  # noqa: E402
+
+ROW_LAYOUT = Layout.from_json({"values": [{"measure": "[Measures].[Rides]", "caption": "Rides"}]})
+
+
+def test_cancel_with_no_query_running_changes_nothing(backend):
+    backend.catalogs()
+    backend.cancel()
+    assert len(backend.catalogs()) == 2
+    assert backend.server.connections == 1
+
+
+def test_cancel_stops_a_running_query_and_the_next_request_works(backend):
+    backend.catalogs()
+    backend.server.delay = 5.0
+    threading.Timer(0.3, backend.cancel).start()
+    started = time.monotonic()
+    with pytest.raises(CubeError) as info:
+        backend.query("Sales", "Sales", ROW_LAYOUT)
+    assert info.value.category == "cancelled" and time.monotonic() - started < 3
+    backend.server.delay = 0.0
+    assert len(backend.catalogs()) == 2
+
+
+def test_cancel_does_not_hit_a_metadata_call_that_happens_to_be_running(backend):
+    backend.catalogs()
+    backend.server.delay = 0.8
+    threading.Timer(0.2, backend.cancel).start()
+    assert len(backend.catalogs()) == 2  # no query is running, so cancel is a no-op
+    assert backend.server.connections == 1
+
+
+def test_a_query_that_times_out_is_not_silently_sent_again(ntlm_users):
+    user, password = ntlm_users
+
+    def quick_timeout(host, port, username, secret):
+        return Session(host, port, username, secret, io_timeout=0.4, query_timeout=0.4)
+
+    with FakeSsas(dict(RESPONSES)) as server:
+        made = SsasBackend(f"127.0.0.1:{server.port}", user, password, session_factory=quick_timeout)
+        made.catalogs()  # the session is now an established one, the case that used to be retried
+        before = len(server.requests)
+        server.delay = 3.0
+        with pytest.raises(CubeError) as info:
+            made.query("Sales", "Sales", ROW_LAYOUT)
+        assert info.value.category == "unreachable"
+        time.sleep(0.2)
+        assert len(server.requests) == before + 1
+        assert server.connections == 1
+        made.close()
+
+
+def test_closing_during_a_query_returns_promptly(backend):
+    backend.catalogs()
+    backend.server.delay = 5.0
+    worker = threading.Thread(target=lambda: pytest.raises(CubeError, backend.query, "Sales", "Sales", ROW_LAYOUT))
+    worker.start()
+    time.sleep(0.3)
+    started = time.monotonic()
+    backend.close()
+    assert time.monotonic() - started < 2
+    worker.join(3)
+    assert not worker.is_alive()
+
+
+def test_a_named_instance_port_is_looked_up_again_after_a_failed_connect(ntlm_users):
+    user, password = ntlm_users
+    dead = __import__("socket").socket()
+    dead.bind(("127.0.0.1", 0))
+    dead_port = dead.getsockname()[1]
+    dead.close()
+    with FakeSsas(dict(RESPONSES)) as server:
+        ports = iter([dead_port, server.port])
+        calls = []
+
+        def lookup(host, instance):
+            calls.append(instance)
+            return next(ports)
+
+        made = SsasBackend("127.0.0.1\\TAB", user, password, lookup=lookup)
+        with pytest.raises(CubeError):
+            made.catalogs()  # the instance had moved; the stale port is not kept
+        assert len(made.catalogs()) == 2
+        assert calls == ["TAB", "TAB"]
+        made.close()

@@ -14,12 +14,12 @@ import re
 from ..errors import CubeError
 
 _PART = r"\[(?:[^\]\x00-\x1f]|\]\])*\]"
-_UNIQUE_NAME = re.compile(rf"^{_PART}(?:\.{_PART}|\.?&{_PART})*$")
+_UNIQUE_NAME = re.compile(rf"{_PART}(?:\.{_PART}|\.?&{_PART})*")
 MAX_NAME = 1000
 
 
 def validate_unique_name(name: object) -> str:
-    if not isinstance(name, str) or not name or len(name) > MAX_NAME or not _UNIQUE_NAME.match(name):
+    if not isinstance(name, str) or not name or len(name) > MAX_NAME or not _UNIQUE_NAME.fullmatch(name):
         shown = name if isinstance(name, str) else type(name).__name__
         raise CubeError(
             "bad-request",

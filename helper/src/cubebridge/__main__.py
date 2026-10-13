@@ -41,6 +41,7 @@ def _serve(directory: Path, port: int) -> int:
         handlers=[handler, logging.StreamHandler(sys.stderr)],
     )
     log = logging.getLogger("cubebridge")
+    logging.getLogger("spnego").setLevel(logging.WARNING)  # it logs sign-in tokens at DEBUG
 
     paths = certs.paths_in(directory / "certs")
     if not paths.cert.exists() or not paths.key.exists():

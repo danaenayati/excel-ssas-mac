@@ -253,3 +253,23 @@ def test_result_over_the_cell_limit_is_refused():
         build_grid(CellSet(axes=[cols, rows], cells={}), layout(rows=[field(CITY, "City")]), cell_limit=100)
     assert info.value.category == "too-large"
     assert "110" in info.value.message
+
+
+# -- review fixes --------------------------------------------------------------------
+def test_pathological_format_string_is_handled_in_linear_time():
+    import time
+
+    started = time.monotonic()
+    assert to_excel("E+0000" * 19 + "a") == "General"
+    assert to_excel("0.00E+00;-0.00E+00") == "0.00E+00;-0.00E+00"
+    assert to_excel("0.00E+") == "General" and to_excel("0E0") == "General"
+    assert time.monotonic() - started < 0.5
+
+
+def test_unselected_filter_without_an_all_member_is_not_labelled_all():
+    cs = CellSet(axes=[[(measure("Rides"),)]], cells=cells(1))
+    grid = build_grid(cs, layout(filters=[field("[Scenario].[Scenario]", "Scenario", all_member=False), field(DATE, "Calendar")]))
+    assert grid["filterRows"] == [
+        {"caption": "Scenario", "value": "(Default)"},
+        {"caption": "Calendar", "value": "All"},
+    ]

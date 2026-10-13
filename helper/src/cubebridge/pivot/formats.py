@@ -8,7 +8,7 @@ then still holds the right number; only its display is plain.
 
 from __future__ import annotations
 
-import re
+from functools import lru_cache
 
 GENERAL = "General"
 
@@ -34,12 +34,36 @@ _NAMED = {
 }
 
 # Outside quoted literals, only digit placeholders, separators, signs and common
-# currency symbols are allowed. Letters outside quotes mean date tokens or literal
-# text, whose rules differ between VB and Excel.
-_SAFE_UNQUOTED = re.compile(r"^(?:[#0?.,%;()+\- $€£¥﷼]|E[+-]0+|\"[^\"\n]*\")*$")
+# currency symbols are allowed, plus an exponent (E+00). Letters outside quotes mean
+# date tokens or literal text, whose rules differ between VB and Excel.
+_PLAIN = frozenset("#0?.,%;()+- $€£¥﷼")
 _MAX = 120
 
 
+def _is_safe(text: str) -> bool:
+    """One pass, no backtracking: a cube can put anything in a format string."""
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            end = text.find('"', i + 1)
+            if end < 0:
+                return False
+            i = end + 1
+        elif ch == "E":
+            if i + 2 >= n or text[i + 1] not in "+-" or text[i + 2] != "0":
+                return False
+            i += 3
+            while i < n and text[i] == "0":
+                i += 1
+        elif ch in _PLAIN:
+            i += 1
+        else:
+            return False
+    return True
+
+
+@lru_cache(maxsize=2048)
 def to_excel(format_string: str | None) -> str:
     text = (format_string or "").strip()
     named = _NAMED.get(text.lower())
@@ -52,7 +76,7 @@ def to_excel(format_string: str | None) -> str:
     if sections is None:
         return GENERAL
     kept = ";".join(sections[:3])
-    if not kept or not _SAFE_UNQUOTED.match(kept):
+    if not kept or not _is_safe(kept):
         return GENERAL
     return kept
 

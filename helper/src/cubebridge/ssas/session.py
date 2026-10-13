@@ -72,7 +72,10 @@ class Session:
 
     @property
     def is_open(self) -> bool:
-        return self._channel is not None and self._context is not None
+        channel = self._channel
+        # An aborted channel has had its socket shut down, whether or not a request
+        # was running at the time, so the session is finished either way.
+        return channel is not None and not channel.aborted and self._context is not None
 
     # -- lifecycle ---------------------------------------------------------------
     def open(self) -> None:
@@ -89,6 +92,9 @@ class Session:
                 raise
 
     def close(self) -> None:
+        # The lock is held for a whole round trip. Abort first so a running query
+        # ends now instead of making close() wait for it.
+        self.abort()
         with self._lock:
             self._close()
 
@@ -126,8 +132,9 @@ class Session:
 
     def _roundtrip(self, build: Callable[[str | None], bytes], timeout: float) -> xmla.Parsed:
         with self._lock:
-            if self._channel is None or self._reader is None or self._context is None:
-                raise CubeError("unreachable", "The connection to the server is closed.")
+            if self._channel is None or self._reader is None or self._context is None or self._channel.aborted:
+                self._close()
+                raise CubeError("unreachable", "The connection to the server is closed.", retry=True)
             try:
                 self._channel.set_timeout(timeout)
                 payload = build(self._session_id)
@@ -153,9 +160,13 @@ class Session:
                 # no longer trustworthy.
                 self._close()
                 raise
-            parsed = xmla.parse(plain)  # a server fault leaves the session usable
+            # A server fault leaves the session usable. Keep the session id before
+            # raising it: the failed request may be the one that began the session.
+            parsed = xmla.parse(plain, raise_errors=False)
             if parsed.session_id and not self._session_id:
                 self._session_id = parsed.session_id
+            if parsed.error is not None:
+                raise parsed.error
             return parsed
 
     # -- authentication ----------------------------------------------------------

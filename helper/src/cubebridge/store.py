@@ -6,11 +6,14 @@ are never written there: they go to the macOS Keychain through `keyring`.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import secrets as token_source
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
@@ -71,19 +74,37 @@ class MemorySecrets:
 
 
 class Store:
+    """The file is re-read on every use and changed under a file lock.
+
+    Two processes share it: the long-running helper and the `probe` command, which
+    can save a connection. Neither may work from a copy it read earlier.
+    """
+
     def __init__(self, directory: Path, secrets: Secrets | None = None) -> None:
         self.directory = Path(directory)
         self._secrets = secrets or KeychainSecrets()
         self._lock = threading.Lock()
-        self._data: dict | None = None
+        self._data: dict = {}
+        self._token: str | None = None  # never changes once created, so safe to keep
 
     @property
     def _path(self) -> Path:
         return self.directory / "config.json"
 
+    @contextmanager
+    def _locked(self) -> Iterator[dict]:
+        """Hold the thread lock and the cross-process file lock, and yield fresh data."""
+        with self._lock:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            os.chmod(self.directory, 0o700)
+            with open(self.directory / ".lock", "a") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                try:
+                    yield self._load()
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+
     def _load(self) -> dict:
-        if self._data is not None:
-            return self._data
         if self._path.exists():
             try:
                 data = json.loads(self._path.read_text(encoding="utf-8"))
@@ -118,12 +139,14 @@ class Store:
 
     @property
     def token(self) -> str:
-        with self._lock:
-            return self._load()["token"]
+        if self._token is None:
+            with self._locked() as data:
+                self._token = data["token"]
+        return self._token
 
     def connections(self) -> list[dict]:
-        with self._lock:
-            return [dict(DEMO_CONNECTION)] + [dict(c) for c in self._load()["connections"]]
+        with self._locked() as data:
+            return [dict(DEMO_CONNECTION)] + [dict(c) for c in data["connections"]]
 
     def get(self, connection_id: str) -> dict:
         for connection in self.connections():
@@ -139,17 +162,16 @@ class Store:
             "server": server,
             "username": username,
         }
-        with self._lock:
+        with self._locked() as data:
             self._secrets.set(connection["id"], password)
-            self._load()["connections"].append(connection)
+            data["connections"].append(connection)
             self._save()
         return dict(connection)
 
     def delete(self, connection_id: str) -> None:
         if connection_id == DEMO_ID:
             raise CubeError("bad-request", "The sample cube is built in and cannot be removed.")
-        with self._lock:
-            data = self._load()
+        with self._locked() as data:
             remaining = [c for c in data["connections"] if c["id"] != connection_id]
             if len(remaining) == len(data["connections"]):
                 raise CubeError("not-found", "That connection no longer exists on this Mac.")

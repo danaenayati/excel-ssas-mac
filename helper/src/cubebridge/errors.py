@@ -39,13 +39,16 @@ HTTP_STATUS = {
 
 
 class CubeError(Exception):
-    def __init__(self, category: str, message: str, detail: str | None = None) -> None:
+    def __init__(self, category: str, message: str, detail: str | None = None, *, retry: bool = False) -> None:
         if category not in CATEGORIES:
             raise ValueError(f"unknown error category {category!r}")
         super().__init__(message)
         self.category = category
         self.message = message
         self.detail = detail
+        # True only when the connection itself went away, so the same request may
+        # succeed on a new one. A timeout is not that: the server is still working.
+        self.retry = retry
 
     @property
     def http_status(self) -> int:

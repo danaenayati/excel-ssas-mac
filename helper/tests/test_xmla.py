@@ -153,3 +153,19 @@ def test_handshake_token_is_extracted_and_empty_token_is_empty():
 def test_garbage_is_a_protocol_error_not_an_empty_result():
     with pytest.raises(ProtocolError):
         xmla.parse(b"\x9f\x00\x12 not xml at all")
+
+
+# -- review fixes --------------------------------------------------------------------
+def test_a_non_numeric_cell_ordinal_is_a_protocol_error():
+    bad = x.cellset(
+        axes=[x.axis("Axis0", [[x.member(MEASURES, "[Measures].[M]", "M", 0)]])],
+        cells=['<Cell CellOrdinal="abc"><Value xsi:type="xsd:int">1</Value></Cell>'],
+    )
+    with pytest.raises(ProtocolError):
+        xmla.parse(bad)
+
+
+def test_errors_can_be_returned_instead_of_raised_so_the_session_id_survives():
+    parsed = xmla.parse(x.inband_error("Query (1, 1) bad"), raise_errors=False)
+    assert parsed.error is not None and parsed.error.category == "server"
+    assert parsed.session_id == "S-1"

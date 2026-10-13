@@ -21,7 +21,7 @@ _EXT_NS = "http://schemas.microsoft.com/analysisservices/2003/ext"
 
 # Restriction and property names become element names, which cannot be made safe by
 # escaping: they are validated instead.
-_ELEMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ELEMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def authenticate(token_b64: str) -> bytes:
@@ -75,7 +75,7 @@ def _elements(values: Mapping[str, str] | None) -> str:
         return ""
     parts = []
     for name, value in values.items():
-        if not _ELEMENT_NAME.match(name):
+        if not _ELEMENT_NAME.fullmatch(name):
             raise ValueError(f"invalid XMLA element name: {name!r}")
         parts.append(f"<{name}>{escape(str(value))}</{name}>")
     return "".join(parts)

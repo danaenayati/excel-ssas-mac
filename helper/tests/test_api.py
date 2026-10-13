@@ -317,3 +317,31 @@ def test_real_backend_through_the_api(tmp_path, ntlm_users):
         status, members = call(real, "POST", f"{base}/members", {"catalog": "Sales", "cube": "Sales", "hierarchy": "[Geo].[City]"})
         assert status == 200 and [m["caption"] for m in members["members"]] == ["Tehran", "Shiraz", "Tabriz"]
         real.close()
+
+
+# -- review fixes --------------------------------------------------------------------
+@pytest.mark.parametrize("target", ["http://[", "//[::1", "/api/\ud800"])
+def test_a_malformed_request_target_still_gets_a_response(app, target):
+    status, _headers, _body = app.handle("GET", target, {"Host": HOST, "X-Cube-Token": app.store.token}, b"")
+    assert 400 <= status < 500
+
+
+def test_text_that_cannot_be_encoded_does_not_break_the_response(app):
+    body = json.dumps({"catalog": "\ud800", "cube": CUBE, "layout": {}}).encode()
+    status, _headers, payload = app.handle(
+        "POST", "/api/connections/demo/query", {"Host": HOST, "X-Cube-Token": app.store.token}, body
+    )
+    assert status == 404 and b"error" in payload
+
+
+def test_deleting_a_connection_does_not_hold_the_api_lock_while_closing(app):
+    _, created = call(app, "POST", "/api/connections", {"server": "bi", "username": "u", "password": "p"})
+    backend = FakeBackend.instances[0]
+    seen = []
+    backend.close = lambda: seen.append(app._lock.locked())
+    call(app, "DELETE", f"/api/connections/{created['id']}")
+    assert seen == [False]
+    _, again = call(app, "POST", "/api/connections", {"server": "bi", "username": "u", "password": "p"})
+    FakeBackend.instances[-1].close = lambda: seen.append(app._lock.locked())
+    app.close()
+    assert seen == [False, False]

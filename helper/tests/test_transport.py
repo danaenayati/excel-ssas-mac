@@ -99,3 +99,12 @@ def test_send_message_writes_one_record_with_the_given_options():
     header = dime.decode_header(bytes(channel.sent[:12]))
     assert (header.mb, header.me, header.data_len) == (True, True, 4)
     assert bytes(channel.sent[12:16]) == dime.OPTIONS_NEGOTIATED
+
+
+# -- review fixes --------------------------------------------------------------------
+def test_a_stream_of_empty_records_is_refused():
+    empty = dime.encode_record(b"", mb=True, me=False, cf=True) + dime.encode_record(
+        b"", options=b"", type_=b"", mb=False, me=False, cf=True, type_t=0
+    ) * 5000
+    with pytest.raises(ProtocolError):
+        MessageReader(ScriptedChannel(empty)).read_message()

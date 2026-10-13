@@ -3,6 +3,10 @@
 Metadata comes from the standard MDSCHEMA rowsets; member lists and pivot results
 come from MDX. One session is kept open and reused. If the server has dropped it
 (idle timeout, VPN reconnect), the request is retried once on a fresh connection.
+
+Cancelling is aimed at queries only. It shuts the shared connection down, so a
+metadata request that happened to be on it is quietly repeated, while the query
+reports "cancelled". A cancel that arrives when no query is running does nothing.
 """
 
 from __future__ import annotations
@@ -46,7 +50,12 @@ class SsasBackend:
         self._lookup = lookup
         self._endpoint: tuple[str, int] | None = None
         self._session: Session | None = None
-        self._lock = threading.Lock()
+        self._pending: Session | None = None  # being opened; cancel and close can reach it
+        self._closed = False
+        self._lock = threading.Lock()  # guards opening and replacing the session
+        self._state = threading.Lock()  # guards the two counters below
+        self._active_queries = 0
+        self._cancel_epoch = 0  # bumped by every cancel that had a query to stop
         # (catalog, cube) -> {hierarchy unique name: All member or None}
         self._all_members: dict[tuple[str, str], dict[str, str | None]] = {}
 
@@ -54,32 +63,64 @@ class SsasBackend:
     def _open_session(self) -> tuple[Session, bool]:
         """Return a usable session and whether it had to be opened just now."""
         with self._lock:
+            if self._closed:
+                raise CubeError("unreachable", "This connection has been removed.")
             if self._session is not None and self._session.is_open:
                 return self._session, False
             if self._endpoint is None:
                 self._endpoint = resolve.endpoint(self._target, self._lookup)
             session = self._session_factory(self._endpoint[0], self._endpoint[1], self._username, self._password)
-            session.open()
+            self._pending = session
+            try:
+                session.open()
+            except CubeError as exc:
+                if exc.category == "unreachable" and self._target.instance:
+                    # A named instance gets a new port when the service restarts.
+                    self._endpoint = None
+                raise
+            finally:
+                self._pending = None
             self._session = session
             return session, True
 
-    def _call(self, request: Callable[[Session], object]):
-        session, fresh = self._open_session()
-        try:
-            return request(session)
-        except CubeError as exc:
-            if exc.category != "unreachable" or fresh:
-                raise
-        # The connection we had been holding was dead. Try once more on a new one.
-        session, _ = self._open_session()
-        return request(session)
+    def _call(self, request: Callable[[Session], object], *, epoch: int | None = None):
+        """Run one request. `epoch` is given for queries: the cancel count at their start."""
+        retried = False
+        while True:
+            fresh = True
+            try:
+                session, fresh = self._open_session()
+                if epoch is not None and self._cancel_epoch != epoch:
+                    raise CubeError("cancelled", "The query was cancelled.")
+                return request(session)
+            except CubeError as exc:
+                if epoch is not None and self._cancel_epoch != epoch:
+                    raise CubeError("cancelled", "The query was cancelled.") from exc
+                # Repeat once when the connection we had been holding was dead, or when
+                # a cancel aimed at a query shut it down under a metadata request.
+                # Never after a timeout: the server may still be working on it.
+                stale_connection = exc.retry and not fresh
+                collateral_cancel = exc.category == "cancelled" and epoch is None
+                if retried or not (stale_connection or collateral_cancel):
+                    raise
+                retried = True
 
     def cancel(self) -> None:
-        session = self._session
-        if session is not None:
-            session.abort()
+        with self._state:
+            if self._active_queries == 0:
+                return
+            self._cancel_epoch += 1
+        for session in (self._session, self._pending):
+            if session is not None:
+                session.abort()
 
     def close(self) -> None:
+        self._closed = True
+        # Abort first: the session lock is held for a whole round trip, and waiting
+        # for a long query to finish is not what "remove this connection" means.
+        for session in (self._session, self._pending):
+            if session is not None:
+                session.abort()
         with self._lock:
             if self._session is not None:
                 self._session.close()
@@ -199,4 +240,11 @@ class SsasBackend:
 
     def query(self, catalog: str, cube: str, layout: Layout) -> tuple[CellSet, str]:
         text = mdx.build_query(cube, layout)
-        return self._call(lambda s: s.execute(text, catalog)), text
+        with self._state:
+            self._active_queries += 1
+            epoch = self._cancel_epoch
+        try:
+            return self._call(lambda s: s.execute(text, catalog), epoch=epoch), text
+        finally:
+            with self._state:
+                self._active_queries -= 1

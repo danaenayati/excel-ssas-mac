@@ -12,6 +12,7 @@ from ..errors import CubeError, ProtocolError
 from . import dime
 
 MAX_MESSAGE = 256 * 1024 * 1024
+MAX_EMPTY_RECORDS = 1000
 
 
 class Channel(Protocol):
@@ -27,7 +28,7 @@ class SocketChannel:
         self._aborted = False
         try:
             self._sock = socket.create_connection((host, port), timeout=connect_timeout)
-        except socket.gaierror as exc:
+        except (socket.gaierror, UnicodeError) as exc:
             raise CubeError(
                 "unreachable",
                 f"The server name '{host}' could not be found. Check the name, and that the VPN is connected.",
@@ -85,7 +86,7 @@ class SocketChannel:
     def _io_error(self, message: str, exc: OSError) -> CubeError:
         if self._aborted:
             return CubeError("cancelled", "The query was cancelled.")
-        return CubeError("unreachable", message, str(exc))
+        return CubeError("unreachable", message, str(exc), retry=True)
 
 
 def send_message(channel: Channel, payload: bytes, options: bytes) -> None:
@@ -108,10 +109,16 @@ class MessageReader:
     def read_message(self) -> bytes:
         chunks: list[bytes] = []
         total = 0
+        empty_records = 0
         first = True
         while True:
             header = dime.decode_header(self._read_exact(dime.HEADER_LEN))
             total += header.data_len
+            if header.data_len == 0 and not header.me:
+                # Records that carry nothing never reach the size limit below.
+                empty_records += 1
+                if empty_records > MAX_EMPTY_RECORDS:
+                    raise ProtocolError("the server sent a long run of empty records")
             if total > self._max:
                 raise ProtocolError(
                     f"the server announced a response of more than {self._max // (1024 * 1024)} MB"
@@ -145,6 +152,7 @@ class MessageReader:
                     "unreachable",
                     "The server closed the connection.",
                     "connection closed before a complete message arrived",
+                    retry=True,
                 )
             self._buf += chunk
         out = bytes(self._buf[self._pos : self._pos + n])

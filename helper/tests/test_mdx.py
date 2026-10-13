@@ -170,10 +170,6 @@ def test_single_member_filter_goes_in_where():
     assert text.endswith("FROM [Sales] WHERE ([Service].[Type].&[1])" + TAIL)
 
 
-def test_filter_without_selection_adds_nothing():
-    assert query(filters=[field(SERVICE)]) == query()
-
-
 def test_multi_member_filter_becomes_a_subselect():
     members = ["[Service].[Type].&[1]", "[Service].[Type].&[2]"]
     text = query(rows=[field(CITY)], filters=[field(SERVICE, members=members)])
@@ -227,3 +223,20 @@ def test_members_query_top_level_children_and_search():
         "SELECT {} ON COLUMNS, Head(Filter({[Geo].[City].AllMembers}, "
         'InStr(1, LCase([Geo].[City].CurrentMember.Member_Caption), "teh""ran") > 0), 51) ON ROWS FROM [Sales]'
     )
+
+
+# -- review fixes --------------------------------------------------------------------
+@pytest.mark.parametrize("name", ["[Measures]\n", "[D].[H]\n", "[A].[B]\r", "\n[A]"])
+def test_a_trailing_or_leading_line_break_is_rejected(name):
+    with pytest.raises(CubeError):
+        validate_unique_name(name)
+
+
+def test_filter_showing_all_slices_on_the_all_member_explicitly():
+    # The sheet says "All", so the query must not fall back to the cube's default member.
+    text = query(rows=[field(CITY)], filters=[field(SERVICE)])
+    assert text.endswith("FROM [Sales] WHERE ([Service].[Type].[All])" + TAIL)
+
+
+def test_filter_without_all_member_and_without_selection_adds_nothing():
+    assert query(filters=[field("[Scenario].[Scenario]", all_member=None)]) == query()

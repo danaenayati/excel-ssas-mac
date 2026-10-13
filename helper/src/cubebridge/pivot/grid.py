@@ -163,7 +163,8 @@ def _measure_caption(tup: tuple[AxisMember, ...], layout: Layout) -> str:
 
 def _filter_text(placed: PlacedField) -> str:
     if not placed.members:
-        return "All"
+        # Without an All member the cube applies the hierarchy's own default.
+        return "All" if placed.all_member else "(Default)"
     if len(placed.members) > 1:
         return "(Multiple Items)"
     if placed.member_captions:

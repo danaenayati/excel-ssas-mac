@@ -137,10 +137,33 @@ def run(server: str, username: str, password: str, out: Printer = print) -> bool
         backend.close()
 
 
+def enable_verbose(stream=None) -> Callable[[], None]:
+    """Print this package's own step logging. Returns a function that undoes it.
+
+    Only the "cubebridge" logger is switched on, never the root logger: the sign-in
+    library logs every NTLM message at DEBUG, and those are enough to attack the
+    password offline. Our own lines carry step names and byte counts only.
+    """
+    logger = logging.getLogger("cubebridge")
+    handler = logging.StreamHandler(stream or sys.stdout)
+    handler.setFormatter(logging.Formatter("    [%(name)s] %(message)s"))
+    previous = (logger.level, logger.propagate)
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    logging.getLogger("spnego").setLevel(logging.WARNING)
+
+    def undo() -> None:
+        logger.removeHandler(handler)
+        logger.setLevel(previous[0])
+        logger.propagate = previous[1]
+
+    return undo
+
+
 def main(verbose: bool = False) -> int:
     if verbose:
-        # Sizes and step names only: no passwords, no sign-in tokens, no cube data.
-        logging.basicConfig(level=logging.DEBUG, format="    [%(name)s] %(message)s", stream=sys.stdout)
+        enable_verbose()
     print("Cube connection test")
     print("Nothing here is sent anywhere except to your own server.\n")
     try:

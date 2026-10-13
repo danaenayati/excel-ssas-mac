@@ -82,3 +82,11 @@ def test_lookup_failure_becomes_an_instance_error_with_the_workaround():
     with pytest.raises(CubeError) as info:
         resolve.instance_port("127.0.0.1", "TAB", redirector_port=1, timeout=1)
     assert info.value.category == "instance"
+
+
+# -- review fixes --------------------------------------------------------------------
+@pytest.mark.parametrize("text", ["bi..corp", ".bi", "bi.", "bi-.corp", "host\\INST\nX"])
+def test_malformed_host_names_are_rejected_up_front(text):
+    with pytest.raises(CubeError) as info:
+        resolve.parse_server(text)
+    assert info.value.category == "bad-request"

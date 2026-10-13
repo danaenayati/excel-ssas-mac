@@ -114,9 +114,12 @@ class App:
     # -- entry point -------------------------------------------------------------
     def handle(self, method: str, target: str, headers: dict[str, str], body: bytes) -> Response:
         headers = {name.lower(): value for name, value in headers.items()}
-        parts = urlsplit(target)
-        path = unquote(parts.path)
         try:
+            try:
+                parts = urlsplit(target)
+                path = unquote(parts.path)
+            except ValueError as exc:
+                raise _bad("The request address is not valid.") from exc
             self._check_host(headers)
             if not path.startswith("/api/"):
                 return self._static(method, path)
@@ -132,7 +135,7 @@ class App:
         except CubeError as exc:
             return self._json(exc.http_status, {"error": exc.to_json()})
         except Exception:
-            log.exception("unhandled error in %s %s", method, path)
+            log.exception("unhandled error in %s request", method)
             error = CubeError("internal", "Something went wrong inside the helper. See its log for details.")
             return self._json(500, {"error": error.to_json()})
 
@@ -155,7 +158,11 @@ class App:
     # -- responses ---------------------------------------------------------------
     @staticmethod
     def _json(status: int, data: object) -> Response:
-        payload = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        # backslashreplace: text that is not valid Unicode (a lone surrogate echoed
+        # back in an error message) must not stop a response from being sent.
+        payload = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode(
+            "utf-8", "backslashreplace"
+        )
         return status, {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store"}, payload
 
     @staticmethod
@@ -212,9 +219,10 @@ class App:
 
     def close(self) -> None:
         with self._lock:
-            for backend in self._backends.values():
-                backend.close()
+            backends = list(self._backends.values())
             self._backends.clear()
+        for backend in backends:  # outside the lock: closing may wait on the network
+            backend.close()
 
     # -- routes ------------------------------------------------------------------
     def _status(self, **_):

@@ -46,6 +46,10 @@ def build_query(cube: str, layout: Layout) -> str:
             slicer.append(placed.members[0])
         elif placed.members:
             source = _subselect(placed, source)
+        elif placed.all_member:
+            # The sheet shows "All" for this filter. Say so explicitly, or the cube
+            # would apply the hierarchy's default member, which need not be All.
+            slicer.append(placed.all_member)
 
     where = f" WHERE ({', '.join(slicer)})" if slicer else ""
     return f"SELECT {', '.join(axes)} FROM {source}{where} {CELL_PROPERTIES}"

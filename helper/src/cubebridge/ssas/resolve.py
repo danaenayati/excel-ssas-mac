@@ -23,8 +23,9 @@ from .transport import MessageReader, SocketChannel, send_message
 DEFAULT_PORT = 2383
 REDIRECTOR_PORT = 2382
 
-_HOST = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$")
-_INSTANCE = re.compile(r"^[A-Za-z0-9_$#-]{1,64}$")
+_LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
+_HOST = re.compile(rf"{_LABEL}(?:\.{_LABEL})*")
+_INSTANCE = re.compile(r"[A-Za-z0-9_$#-]{1,64}")
 _URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 
@@ -51,14 +52,14 @@ def parse_server(text: str) -> Target:
     host, port, instance = text, None, None
     if "\\" in text:
         host, _, instance = text.partition("\\")
-        if not _INSTANCE.match(instance):
+        if not _INSTANCE.fullmatch(instance):
             raise _bad("The instance name after the backslash is not valid.")
     elif ":" in text:
         host, _, port_text = text.partition(":")
         if not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
             raise _bad("The port after the colon must be a number between 1 and 65535.")
         port = int(port_text)
-    if not _HOST.match(host):
+    if len(host) > 253 or not _HOST.fullmatch(host):
         raise _bad("The server name is not valid. Use the name you type in Windows Excel.")
     return Target(host=host, port=port, instance=instance)
 

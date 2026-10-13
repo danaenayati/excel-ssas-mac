@@ -58,3 +58,24 @@ def test_unknown_host_and_bad_server_text():
     lines.clear()
     assert probe.run("https://bi/olap", "CORP\\dana", "x", lines.append) is False
     assert "NOT VALID" in "\n".join(lines)
+
+
+# -- review fixes --------------------------------------------------------------------
+def test_verbose_output_never_contains_sign_in_tokens(ntlm_users):
+    import io
+    import logging
+
+    user, password = ntlm_users
+    stream = io.StringIO()
+    undo = probe.enable_verbose(stream)
+    try:
+        with FakeSsas(responses()) as server:
+            assert probe.run(f"127.0.0.1:{server.port}", user, password, lambda _line: None) is True
+    finally:
+        undo()
+    text = stream.getvalue()
+    assert "sign-in complete" in text  # our own step logging is on
+    assert "TlRMTVNTUA" not in text  # base64 of "NTLMSSP": the library's token dump is not
+    assert password not in text
+    assert logging.getLogger().level != logging.DEBUG
+    assert not logging.getLogger("spnego").isEnabledFor(logging.DEBUG)

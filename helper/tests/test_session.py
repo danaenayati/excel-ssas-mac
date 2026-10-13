@@ -142,3 +142,69 @@ def test_requests_on_a_closed_session_fail_cleanly(ntlm_users):
         with pytest.raises(CubeError) as info:
             session.discover("DBSCHEMA_CATALOGS")
         assert info.value.category == "unreachable"
+
+
+# -- review fixes --------------------------------------------------------------------
+def test_an_aborted_session_is_no_longer_open(ntlm_users):
+    user, password = ntlm_users
+    with FakeSsas({"DBSCHEMA_CATALOGS": CATALOGS}) as server:
+        session = open_session(server, user, password)
+        session.abort()  # nothing was running; the socket is shut down all the same
+        assert not session.is_open
+
+
+def test_close_does_not_wait_for_a_running_query(ntlm_users):
+    user, password = ntlm_users
+    with FakeSsas({"SELECT": ONE_CELL}) as server:
+        session = open_session(server, user, password)
+        server.delay = 5.0
+        errors = []
+
+        def run():
+            try:
+                session.execute("SELECT slow", catalog="Sales")
+            except CubeError as exc:
+                errors.append(exc.category)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        time.sleep(0.3)
+        started = time.monotonic()
+        session.close()
+        assert time.monotonic() - started < 2
+        worker.join(3)
+        assert errors and errors[0] in ("cancelled", "unreachable")
+
+
+def test_session_id_is_kept_even_when_the_first_request_fails(ntlm_users):
+    user, password = ntlm_users
+    responses = {"DBSCHEMA_CATALOGS": CATALOGS, "SELECT": x.inband_error("Query (1, 1) bad")}
+    with FakeSsas(responses) as server:
+        session = open_session(server, user, password)
+        with pytest.raises(CubeError):
+            session.execute("SELECT x", catalog="Sales")
+        session.discover("DBSCHEMA_CATALOGS")
+        session.close()
+    assert "<BeginSession" in server.requests[0]
+    assert 'SessionId="S-1"' in server.requests[1] and "<BeginSession" not in server.requests[1]
+
+
+def test_a_read_timeout_is_marked_as_not_worth_retrying(ntlm_users):
+    user, password = ntlm_users
+    with FakeSsas({"DBSCHEMA_CATALOGS": CATALOGS}) as server:
+        session = Session("127.0.0.1", server.port, user, password, connect_timeout=5, io_timeout=0.4)
+        session.open()
+        server.delay = 3.0
+        with pytest.raises(CubeError) as info:
+            session.discover("DBSCHEMA_CATALOGS")
+        assert info.value.category == "unreachable" and info.value.retry is False
+
+
+def test_a_dropped_connection_is_marked_as_worth_retrying(ntlm_users):
+    user, password = ntlm_users
+    with FakeSsas({"DBSCHEMA_CATALOGS": CATALOGS}) as server:
+        session = open_session(server, user, password)
+        server.drop_after = 0
+        with pytest.raises(CubeError) as info:
+            session.discover("DBSCHEMA_CATALOGS")
+        assert info.value.retry is True

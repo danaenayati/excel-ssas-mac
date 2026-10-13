@@ -35,10 +35,15 @@ class Parsed:
     cellset: CellSet = field(default_factory=CellSet)
     session_id: str | None = None
     handshake_token: bytes | None = None
+    error: CubeError | None = None
 
 
-def parse(data: bytes, *, during_auth: bool = False) -> Parsed:
-    """Parse one response. Raises CubeError if the server reported an error."""
+def parse(data: bytes, *, during_auth: bool = False, raise_errors: bool = True) -> Parsed:
+    """Parse one response.
+
+    A server-reported error is raised, or with `raise_errors=False` returned as
+    `Parsed.error` so the caller can first read what else the response carried.
+    """
     parsed = Parsed()
     axes: dict[str, list[tuple[AxisMember, ...]]] = {}
     errors: list[str] = []
@@ -59,6 +64,8 @@ def parse(data: bytes, *, during_auth: bool = False) -> Parsed:
             elif tag == "Cell" and parent_tag == "CellData":
                 ordinal = element.get("CellOrdinal")
                 if ordinal is not None:
+                    if not ordinal.isdigit():
+                        raise ProtocolError(f"cell ordinal {ordinal[:20]!r} is not a number")
                     parsed.cellset.cells[int(ordinal)] = _cell(element)
                 parent.remove(element)
             elif tag == "Axis" and parent_tag == "Axes":
@@ -76,7 +83,10 @@ def parse(data: bytes, *, during_auth: bool = False) -> Parsed:
         raise ProtocolError(f"the response is not valid XML ({exc})") from exc
 
     if errors:
-        raise _server_error(next((e for e in errors if e), "The server reported an error."), during_auth)
+        parsed.error = _server_error(next((e for e in errors if e), "The server reported an error."), during_auth)
+        if raise_errors:
+            raise parsed.error
+        return parsed
 
     index = 0
     while f"Axis{index}" in axes:
