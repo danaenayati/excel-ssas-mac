@@ -120,8 +120,9 @@ loop can be tried and tested off VPN.
 - Passwords live only in the macOS Keychain. They are never logged, never sent to the
   pane after entry, never written to the workbook.
 - The SSAS layer is read-only by construction: it can build Discover and Execute
-  statements only. MDX sent to the server comes from the generator, plus an optional
-  user-typed MDX box that goes through Execute (queries only).
+  requests only, and the only statements it executes are SELECTs produced by the MDX
+  generator. Every name placed into MDX is validated as a bracketed identifier, so a
+  crafted report definition in a workbook cannot inject other statements.
 
 ## Errors
 

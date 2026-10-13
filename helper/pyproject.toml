@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cubebridge"
+version = "0.1.0"
+description = "Local helper that connects Excel for Mac to SQL Server Analysis Services"
+requires-python = ">=3.11"
+dependencies = [
+  "pyspnego>=0.10",
+  "keyring>=24",
+  "cryptography>=42",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cubebridge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-q"
