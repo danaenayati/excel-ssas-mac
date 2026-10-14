@@ -3,6 +3,8 @@
 // Excel's own PivotTable menus on Windows, which is what the user knows.
 
 import type {
+  DateFilter,
+  DateOperator,
   FieldSort,
   LabelFilter,
   LabelOperator,
@@ -267,3 +269,130 @@ export function checkEmptyCellText(text: string): Checked<string> {
   if (text.length > 20) return fail("Use at most 20 characters.");
   return { ok: true, value: text };
 }
+
+// ---------------------------------------------------------------------------
+// Date Filters, groups, calculated items and calculated measures.
+// ---------------------------------------------------------------------------
+
+/** Excel's Date Filters menu, in its order. `form` choices ask for dates. */
+export const DATE_FORM_OPERATORS: OperatorChoice<"equals" | "before" | "after" | "between">[] = [
+  { operator: "equals", label: "Equals…", phrase: "is on", two: false },
+  { operator: "before", label: "Before…", phrase: "is before", two: false },
+  { operator: "after", label: "After…", phrase: "is after", two: false },
+  { operator: "between", label: "Between…", phrase: "is between", two: true },
+];
+
+/** The dynamic choices, in groups as Excel separates them. */
+export const DATE_DYNAMIC_GROUPS: { operator: DateOperator; label: string }[][] = [
+  [
+    { operator: "tomorrow", label: "Tomorrow" },
+    { operator: "today", label: "Today" },
+    { operator: "yesterday", label: "Yesterday" },
+  ],
+  [
+    { operator: "nextWeek", label: "Next Week" },
+    { operator: "thisWeek", label: "This Week" },
+    { operator: "lastWeek", label: "Last Week" },
+  ],
+  [
+    { operator: "nextMonth", label: "Next Month" },
+    { operator: "thisMonth", label: "This Month" },
+    { operator: "lastMonth", label: "Last Month" },
+  ],
+  [
+    { operator: "nextQuarter", label: "Next Quarter" },
+    { operator: "thisQuarter", label: "This Quarter" },
+    { operator: "lastQuarter", label: "Last Quarter" },
+  ],
+  [
+    { operator: "nextYear", label: "Next Year" },
+    { operator: "thisYear", label: "This Year" },
+    { operator: "lastYear", label: "Last Year" },
+  ],
+  [{ operator: "yearToDate", label: "Year to Date" }],
+];
+
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/** "All Dates in the Period": Quarter 1 to 4, then January to December. */
+export const DATE_PERIODS: { operator: DateOperator; label: string }[] = [
+  ...[1, 2, 3, 4].map((q) => ({ operator: `quarter${q}` as DateOperator, label: `Quarter ${q}` })),
+  ...MONTHS.map((month, i) => ({ operator: `month${i + 1}` as DateOperator, label: month })),
+];
+
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+function isRealDate(text: string): boolean {
+  const match = ISO_DATE.exec(text);
+  if (!match) return false;
+  const [y, m, d] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const date = new Date(Date.UTC(y, m - 1, d));
+  return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d;
+}
+
+/** The date filter the form describes, or what is wrong with it. */
+export function checkDateFilter(input: {
+  operator: "equals" | "before" | "after" | "between";
+  value: string;
+  value2: string;
+}): Checked<DateFilter> {
+  const first = input.value.trim();
+  if (!isRealDate(first)) return fail("Choose a date.");
+  if (input.operator !== "between") return { ok: true, value: { operator: input.operator, value: first } };
+  const second = input.value2.trim();
+  if (!isRealDate(second)) return fail("Choose the last date as well.");
+  if (first > second) return fail("The first date must not be after the last one.");
+  return { ok: true, value: { operator: "between", value: first, value2: second } };
+}
+
+/** The state shown next to "Date Filters": "Between 2026-01-01 and 2026-01-31", "This Month". */
+export function describeDateFilter(filter: DateFilter): string {
+  const form = DATE_FORM_OPERATORS.find((c) => c.operator === filter.operator);
+  if (form) {
+    const phrase = form.label.replace("…", "");
+    return filter.operator === "between" ? `${phrase} ${filter.value} and ${filter.value2}` : `${phrase} ${filter.value}`;
+  }
+  for (const group of DATE_DYNAMIC_GROUPS) {
+    const found = group.find((c) => c.operator === filter.operator);
+    if (found) return found.label;
+  }
+  const period = DATE_PERIODS.find((c) => c.operator === filter.operator);
+  return period ? `All dates in ${period.label}` : filter.operator;
+}
+
+/** Longest name of a group, calculated item or calculated measure. */
+export const MAX_NEW_NAME = 100;
+/** Longest formula the helper accepts. */
+export const MAX_FORMULA = 2000;
+
+/** A name for something new: not empty, not too long, not taken (case is ignored). */
+export function checkNewName(name: string, taken: readonly string[], what: string): Checked<string> {
+  const trimmed = name.trim();
+  if (trimmed === "") return fail(`Give the ${what} a name.`);
+  if (trimmed.length > MAX_NEW_NAME) return fail(`The name can be at most ${MAX_NEW_NAME} characters long.`);
+  if (/[\u0000-\u001f]/.test(trimmed)) return fail("The name contains characters that are not allowed.");
+  const lower = trimmed.toLowerCase();
+  if (taken.some((t) => t.toLowerCase() === lower)) return fail(`Something in this report is already called “${trimmed}”.`);
+  return { ok: true, value: trimmed };
+}
+
+/** A formula as the helper will take it: not empty, not too long, no ';'. The cube checks the rest. */
+export function checkFormula(formula: string): Checked<string> {
+  const text = formula.trim();
+  if (text === "") return fail("Type a formula.");
+  if (text.length > MAX_FORMULA) return fail(`The formula can be at most ${MAX_FORMULA.toLocaleString("en-US")} characters long.`);
+  if (text.indexOf(";") >= 0) return fail("A formula cannot contain ';'.");
+  return { ok: true, value: text };
+}
+
+/** Number formats offered for a calculated measure: cube format strings, as Windows' MDX dialog offers. */
+export const CALCULATED_FORMATS: { label: string; format: string }[] = [
+  { label: "Default", format: "" },
+  { label: "Number (1,234)", format: "#,##0" },
+  { label: "Number (1,234.56)", format: "#,##0.00" },
+  { label: "Percentage (12.34%)", format: "0.00%" },
+  { label: "Currency", format: "Currency" },
+];

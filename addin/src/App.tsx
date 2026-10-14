@@ -14,6 +14,7 @@ import { Menu, type MenuEntry } from "./components/Menu";
 import { PreviewSheet } from "./components/PreviewSheet";
 import { StatusBar, type Drill } from "./components/StatusBar";
 import { CopyButton, Dialog, ErrorNote, Icon, Spinner } from "./components/common";
+import { CalculatedItemDialog, CalculatedMeasureDialog, GroupDialog } from "./components/CalculationDialogs";
 import { NumberFormatDialog } from "./components/NumberFormatDialog";
 import { ShowAsDialog } from "./components/ShowAsDialog";
 import { rectA1 } from "./sheet/geometry";
@@ -33,9 +34,11 @@ import {
   findField,
   grandTotalsShown,
   isEmptyLayout,
+  calculatedMeasureName,
   layoutReducer,
   locate,
   needsBaseField,
+  valueIndex,
   selectionSummary,
   type BooleanOption,
   type LayoutAction,
@@ -50,6 +53,7 @@ import {
 } from "./state/runner";
 import { useCached, type Cache } from "./state/useCached";
 import type {
+  CalculatedMeasure,
   Catalog,
   Connection,
   Cube,
@@ -76,7 +80,10 @@ type Question =
   | { kind: "reset"; what: "database" | "cube"; apply: () => void }
   | { kind: "query"; mdx: string }
   | { kind: "numberFormat"; measure: string; caption: string; current: string }
-  | { kind: "showAs"; measure: string; showAs: ShowValuesAs };
+  | { kind: "showAs"; measure: string; showAs: ShowValuesAs }
+  | { kind: "groups"; hierarchy: string }
+  | { kind: "calculatedItems"; hierarchy: string }
+  | { kind: "calculatedMeasure"; measure: CalculatedMeasure | null };
 
 /** Pause between a layout change and its query, so that ticking three fields is one query. */
 const DEBOUNCE_MS = 400;
@@ -873,6 +880,18 @@ export function App({ api, host, mock }: Props) {
     current.revision > 0 &&
     !(ran !== null && ran.id === current.def.id && ran.revision === current.revision);
   const pickerField = def && picker ? findField(def.layout, picker) : null;
+  /** The cube's measures and the report's calculated measures: what sorts and filters can use. */
+  const allMeasures = [
+    ...(fields.data ? fields.data.measures : []),
+    ...(def?.layout.calculatedMeasures ?? []).map((m) => ({
+      uniqueName: calculatedMeasureName(m.name),
+      caption: m.name,
+      group: "",
+      folder: "",
+    })),
+  ];
+  const isDateField = (hierarchy: string): boolean =>
+    Boolean(fields.data && fields.data.dimensions.some((d) => d.hierarchies.some((h) => h.uniqueName === hierarchy && h.isDate)));
   const pickerPlace = def && picker ? locate(def.layout, picker) : null;
   const pickerArea = pickerPlace ? pickerPlace.area : null;
 
@@ -1103,11 +1122,27 @@ export function App({ api, host, mock }: Props) {
           search={search}
           onSearch={setSearch}
           onToggleMeasure={(measure, on) =>
-            act(on ? { type: "addMeasure", measure } : { type: "remove", name: measure.uniqueName })
+            act(on ? { type: "addMeasure", measure } : { type: "removeMeasure", measure: measure.uniqueName })
           }
           onToggleHierarchy={(hierarchy, on) =>
             act(on ? { type: "addHierarchy", hierarchy } : { type: "remove", name: hierarchy.uniqueName })
           }
+          onToggleKpi={(kpi, part, on) =>
+            act(on ? { type: "addKpi", kpi, part } : { type: "remove", name: `kpi:${kpi.name}:${part}` })
+          }
+          onToggleSet={(set, on) => {
+            if (!set.hierarchy) return;
+            act(
+              on
+                ? { type: "addSet", set: { uniqueName: set.uniqueName, caption: set.caption, hierarchy: set.hierarchy, allMember: set.allMember } }
+                : { type: "remove", name: set.hierarchy },
+            );
+          }}
+          onToggleCalculated={(measure, on) => {
+            const name = calculatedMeasureName(measure.name);
+            act(on ? { type: "addMeasure", measure: { uniqueName: name, caption: measure.name } } : { type: "removeMeasure", measure: name });
+          }}
+          onEditCalculated={(measure) => setQuestion({ kind: "calculatedMeasure", measure })}
         />
 
         <Areas
@@ -1116,7 +1151,7 @@ export function App({ api, host, mock }: Props) {
           onFilter={setPicker}
           onShowAsForm={(measure, showAs) => setQuestion({ kind: "showAs", measure, showAs })}
           onCustomFormat={(measure) => {
-            const value = def.layout.values.find((v) => v.measure === measure);
+            const value = def.layout.values[valueIndex(def.layout.values, measure)];
             if (value) {
               setQuestion({
                 kind: "numberFormat",
@@ -1226,7 +1261,16 @@ export function App({ api, host, mock }: Props) {
         {mock && <p className="strip">Sample data only. Not connected to the helper.</p>}
         {body}
 
-        {pickerField && def && connection && (
+        {pickerField && pickerField.set && (
+          <Dialog title={pickerField.caption} onCancel={() => setPicker(null)} buttons={[{ label: "OK", primary: true, run: () => setPicker(null) }]}>
+            <p>
+              &ldquo;{pickerField.caption}&rdquo; is a set defined in the cube. Its items are the set&rsquo;s own, so they
+              cannot be filtered or sorted here, as in Excel.
+            </p>
+          </Dialog>
+        )}
+
+        {pickerField && !pickerField.set && def && connection && (
           <MemberPicker
             key={pickerField.hierarchy}
             api={api}
@@ -1242,7 +1286,7 @@ export function App({ api, host, mock }: Props) {
             menu={
               pickerArea === "rows" || pickerArea === "columns"
                 ? {
-                    measures: fields.data ? fields.data.measures : [],
+                    measures: allMeasures,
                     defaultMeasure:
                       def.layout.values.length > 0
                         ? def.layout.values[0].measure
@@ -1254,14 +1298,83 @@ export function App({ api, host, mock }: Props) {
                       setPicker(null);
                       act(action);
                     },
+                    isDate: isDateField(pickerField.hierarchy),
+                    onGroups: () => {
+                      setPicker(null);
+                      setQuestion({ kind: "groups", hierarchy: pickerField.hierarchy });
+                    },
+                    onCalculatedItems: () => {
+                      setPicker(null);
+                      setQuestion({ kind: "calculatedItems", hierarchy: pickerField.hierarchy });
+                    },
                   }
                 : undefined
             }
           />
         )}
 
+        {question && question.kind === "groups" && def && connection && (() => {
+          const field = findField(def.layout, question.hierarchy);
+          if (!field) return null;
+          return (
+            <GroupDialog
+              api={api}
+              connectionId={connection.id}
+              catalog={def.catalog}
+              cube={def.cube}
+              field={field}
+              onCancel={() => setQuestion(null)}
+              onApply={(items) => {
+                setQuestion(null);
+                act({ type: "setCustomItems", hierarchy: field.hierarchy, items });
+              }}
+            />
+          );
+        })()}
+
+        {question && question.kind === "calculatedItems" && def && connection && (() => {
+          const field = findField(def.layout, question.hierarchy);
+          if (!field) return null;
+          return (
+            <CalculatedItemDialog
+              api={api}
+              connectionId={connection.id}
+              catalog={def.catalog}
+              cube={def.cube}
+              field={field}
+              value={def.layout.values.find((v) => !v.kpi && (v.showAs ?? "normal") === "normal") ?? null}
+              onCancel={() => setQuestion(null)}
+              onApply={(items) => {
+                setQuestion(null);
+                act({ type: "setCustomItems", hierarchy: field.hierarchy, items });
+              }}
+            />
+          );
+        })()}
+
+        {question && question.kind === "calculatedMeasure" && def && connection && (
+          <CalculatedMeasureDialog
+            api={api}
+            connectionId={connection.id}
+            catalog={def.catalog}
+            cube={def.cube}
+            measures={fields.data ? fields.data.measures : []}
+            existing={def.layout.calculatedMeasures ?? []}
+            editing={question.measure}
+            onCancel={() => setQuestion(null)}
+            onSave={(measure, previousName) => {
+              setQuestion(null);
+              act({ type: "setCalculatedMeasure", measure, previousName });
+            }}
+            onDelete={(name) => {
+              setQuestion(null);
+              act({ type: "removeCalculatedMeasure", name });
+            }}
+          />
+        )}
+
         {question && question.kind === "showAs" && def && connection && (() => {
-          const value = def.layout.values.find((v) => v.measure === question.measure);
+          const value = def.layout.values[valueIndex(def.layout.values, question.measure)];
           if (!value) return null;
           return (
             <ShowAsDialog

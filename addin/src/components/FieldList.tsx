@@ -1,11 +1,13 @@
-// The field list: measures grouped by measure group then display folder, and
-// dimensions with their hierarchies. A ticked measure is in Values; a ticked hierarchy
-// is in Rows, Columns or Filters. Rows can also be dragged onto an area.
+// The field list: the report's calculated measures, the cube's measures grouped by
+// measure group then display folder, its KPIs (Value, Goal, Status, Trend each), and
+// dimensions with their hierarchies and named sets. A ticked measure or KPI part is in
+// Values; a ticked hierarchy or set is in Rows, Columns or Filters. Measures and
+// hierarchies can also be dragged onto an area.
 
 import { useEffect, useMemo, useState } from "react";
-import { AREA_LABELS, locate } from "../state/layout";
+import { AREA_LABELS, KPI_PART_LABELS, calculatedMeasureName, findField, locate, valueIndex } from "../state/layout";
 import type { UiError } from "../state/runner";
-import type { Fields, Hierarchy, Layout, Measure } from "../types";
+import type { CalculatedMeasure, Fields, Hierarchy, Kpi, KpiPart, Layout, Measure, NamedSet } from "../types";
 import { cx } from "../util";
 import { ErrorNote, Icon, Spinner } from "./common";
 import { endDrag, startDrag } from "./drag";
@@ -14,7 +16,7 @@ interface Branch {
   type: "branch";
   id: string;
   label: string;
-  icon: "measure" | "table" | "folder";
+  icon: "measure" | "table" | "folder" | "kpi" | "set" | "calc";
   children: Entry[];
 }
 interface MeasureLeaf {
@@ -27,7 +29,24 @@ interface HierarchyLeaf {
   id: string;
   hierarchy: Hierarchy;
 }
-type Entry = Branch | MeasureLeaf | HierarchyLeaf;
+interface KpiLeaf {
+  type: "kpi";
+  id: string;
+  kpi: Kpi;
+  part: KpiPart;
+}
+interface SetLeaf {
+  type: "set";
+  id: string;
+  set: NamedSet;
+}
+interface CalculatedLeaf {
+  type: "calculated";
+  id: string;
+  measure: CalculatedMeasure;
+}
+type Leaf = MeasureLeaf | HierarchyLeaf | KpiLeaf | SetLeaf | CalculatedLeaf;
+type Entry = Branch | Leaf;
 
 /** Display folders nest with "\"; a field listed in several (";") is shown in the first. */
 function folderPath(folder: string): string[] {
@@ -60,8 +79,16 @@ function sortFoldersLast(branch: Branch): void {
   branch.children = [...leaves, ...folders];
 }
 
-export function buildFieldTree(fields: Fields): Branch[] {
+export function buildFieldTree(fields: Fields, calculated: readonly CalculatedMeasure[] = []): Branch[] {
   const roots: Branch[] = [];
+  // Always listed, so that "New Calculated Measure…" has a home.
+  roots.push({
+    type: "branch",
+    id: "c:",
+    label: "Calculated Measures",
+    icon: "calc",
+    children: calculated.map((measure) => ({ type: "calculated", id: `c:${measure.name}`, measure })),
+  });
   const groups = new Map<string, Branch>();
   for (const measure of fields.measures) {
     let group = groups.get(measure.group);
@@ -82,6 +109,25 @@ export function buildFieldTree(fields: Fields): Branch[] {
       measure,
     });
   }
+  const kpis = fields.kpis ?? [];
+  if (kpis.length > 0) {
+    const branch: Branch = { type: "branch", id: "k:", label: "KPIs", icon: "kpi", children: [] };
+    for (const kpi of kpis) {
+      const own: Branch = { type: "branch", id: `k:${kpi.name}`, label: kpi.caption, icon: "kpi", children: [] };
+      for (const part of kpi.parts) own.children.push({ type: "kpi", id: `kpi:${kpi.name}:${part}`, kpi, part });
+      branchFor(branch, folderPath(kpi.folder)).children.push(own);
+    }
+    roots.push(branch);
+  }
+  const sets = fields.sets ?? [];
+  const setsOf = (dimension: string) => sets.filter((s) => s.dimension === dimension);
+  const setBranch = (id: string, list: NamedSet[]): Branch => {
+    const branch: Branch = { type: "branch", id, label: "Sets", icon: "set", children: [] };
+    for (const set of list) {
+      branchFor(branch, folderPath(set.folder)).children.push({ type: "set", id: `s:${set.uniqueName}`, set });
+    }
+    return branch;
+  };
   for (const dimension of fields.dimensions) {
     if (dimension.hierarchies.length === 0) continue;
     const branch: Branch = {
@@ -98,15 +144,78 @@ export function buildFieldTree(fields: Fields): Branch[] {
         hierarchy,
       });
     }
+    const own = setsOf(dimension.uniqueName);
+    if (own.length > 0) branch.children.push(setBranch(`ds:${dimension.uniqueName}`, own));
     roots.push(branch);
   }
+  const loose = sets.filter((s) => !fields.dimensions.some((d) => d.uniqueName === s.dimension && d.hierarchies.length > 0));
+  if (loose.length > 0) roots.push(setBranch("s:", loose));
   roots.forEach(sortFoldersLast);
   return roots;
 }
 
-function captionOf(entry: MeasureLeaf | HierarchyLeaf): string {
-  return entry.type === "measure" ? entry.measure.caption : entry.hierarchy.caption;
+function captionOf(entry: Leaf): string {
+  switch (entry.type) {
+    case "measure":
+      return entry.measure.caption;
+    case "hierarchy":
+      return entry.hierarchy.caption;
+    case "kpi":
+      return `${entry.kpi.caption} ${KPI_PART_LABELS[entry.part]}`;
+    case "set":
+      return entry.set.caption;
+    case "calculated":
+      return entry.measure.name;
+  }
 }
+
+/** Whether a leaf is in the report, where, and whether it can be ticked now. */
+function leafState(entry: Leaf, layout: Layout): { placed: string | null; checked: boolean; disabled: string | null } {
+  switch (entry.type) {
+    case "measure":
+    case "calculated": {
+      const name = entry.type === "measure" ? entry.measure.uniqueName : calculatedMeasureName(entry.measure.name);
+      const on = valueIndex(layout.values, name) >= 0;
+      return { placed: null, checked: on, disabled: null };
+    }
+    case "kpi":
+      return { placed: null, checked: valueIndex(layout.values, entry.id) >= 0, disabled: null };
+    case "hierarchy": {
+      const field = findField(layout, entry.hierarchy.uniqueName);
+      if (field && field.set) {
+        return { placed: null, checked: false, disabled: `The set \u201c${field.caption}\u201d is using this field.` };
+      }
+      const place = locate(layout, entry.hierarchy.uniqueName);
+      return { placed: place ? AREA_LABELS[place.area] : null, checked: place !== null, disabled: null };
+    }
+    case "set": {
+      if (!entry.set.hierarchy) {
+        return {
+          placed: null,
+          checked: false,
+          disabled: "This set\u2019s items come from several fields. Cube Explorer can show sets of one field only.",
+        };
+      }
+      const field = findField(layout, entry.set.hierarchy);
+      if (field && field.set === entry.set.uniqueName) {
+        const place = locate(layout, entry.set.hierarchy);
+        return { placed: place ? AREA_LABELS[place.area] : null, checked: true, disabled: null };
+      }
+      if (field) {
+        return { placed: null, checked: false, disabled: `\u201c${field.caption}\u201d already uses this set\u2019s field.` };
+      }
+      return { placed: null, checked: false, disabled: null };
+    }
+  }
+}
+
+const LEAF_ICONS: Record<Leaf["type"], "attribute" | "hierarchy" | "kpi" | "set" | "calc" | null> = {
+  measure: null,
+  hierarchy: "attribute",
+  kpi: null,
+  set: "set",
+  calculated: null,
+};
 
 /** Keep the leaves whose caption contains `needle`, and the branches above them. */
 export function filterFieldTree(entries: Entry[], needle: string): Entry[] {
@@ -144,11 +253,17 @@ interface Props {
   onSearch: (text: string) => void;
   onToggleMeasure: (measure: Measure, on: boolean) => void;
   onToggleHierarchy: (hierarchy: Hierarchy, on: boolean) => void;
+  onToggleKpi: (kpi: Kpi, part: KpiPart, on: boolean) => void;
+  onToggleSet: (set: NamedSet, on: boolean) => void;
+  onToggleCalculated: (measure: CalculatedMeasure, on: boolean) => void;
+  /** Open the calculated measure dialog: a new one (null), or this one to edit. */
+  onEditCalculated: (measure: CalculatedMeasure | null) => void;
 }
 
 export function FieldList(props: Props) {
   const { fields, layout, search } = props;
-  const tree = useMemo(() => (fields ? buildFieldTree(fields) : []), [fields]);
+  const calculated = layout.calculatedMeasures;
+  const tree = useMemo(() => (fields ? buildFieldTree(fields, calculated ?? []) : []), [fields, calculated]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
@@ -156,7 +271,9 @@ export function FieldList(props: Props) {
     setCollapsed(
       new Set(total > AUTO_COLLAPSE_ABOVE ? tree.filter((b) => b.icon === "table").map((b) => b.id) : []),
     );
-  }, [tree]);
+    // Only when the cube changes: a new calculated measure must not fold the list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fields]);
 
   const needle = search.trim().toLowerCase();
   const visible = useMemo(() => filterFieldTree(tree, needle), [tree, needle]);
@@ -188,48 +305,83 @@ export function FieldList(props: Props) {
               <Icon name={entry.icon} className="kind" />
               <span className="field-caption">{entry.label}</span>
             </button>
-            {open && <ul role="group">{render(entry.children, depth + 1)}</ul>}
+            {open && (
+              <ul role="group">
+                {render(entry.children, depth + 1)}
+                {entry.id === "c:" && needle === "" && (
+                  <li role="treeitem">
+                    <button
+                      type="button"
+                      className="field-row leaf action-row"
+                      style={{ paddingLeft: 6 + (depth + 1) * 14 }}
+                      onClick={() => props.onEditCalculated(null)}
+                    >
+                      <Icon name="plus" className="kind" />
+                      <span className="field-caption">New Calculated Measure…</span>
+                    </button>
+                  </li>
+                )}
+              </ul>
+            )}
           </li>
         );
       }
-      const isMeasure = entry.type === "measure";
-      const name = entry.id;
       const caption = captionOf(entry);
-      const place = locate(layout, name);
-      return (
-        <li key={entry.id} role="treeitem" aria-selected={place !== null}>
-          <label
-            className={cx("field-row leaf", place !== null && "placed")}
-            style={indent}
-            title={caption}
-            draggable
-            onDragStart={(event) =>
-              startDrag(event, {
-                kind: isMeasure ? "measure" : "hierarchy",
-                name,
-                caption,
-                allMember: entry.type === "hierarchy" ? entry.hierarchy.allMember : null,
-              })
+      const state = leafState(entry, layout);
+      // Measures, calculated measures and hierarchies can be dragged onto an area.
+      const drag =
+        entry.type === "measure" || entry.type === "calculated"
+          ? {
+              kind: "measure" as const,
+              name: entry.type === "measure" ? entry.measure.uniqueName : calculatedMeasureName(entry.measure.name),
+              caption,
+              allMember: null,
             }
-            onDragEnd={endDrag}
+          : entry.type === "hierarchy"
+            ? { kind: "hierarchy" as const, name: entry.hierarchy.uniqueName, caption, allMember: entry.hierarchy.allMember }
+            : null;
+      const toggle = (on: boolean) => {
+        if (entry.type === "measure") props.onToggleMeasure(entry.measure, on);
+        else if (entry.type === "hierarchy") props.onToggleHierarchy(entry.hierarchy, on);
+        else if (entry.type === "kpi") props.onToggleKpi(entry.kpi, entry.part, on);
+        else if (entry.type === "set") props.onToggleSet(entry.set, on);
+        else props.onToggleCalculated(entry.measure, on);
+      };
+      const icon =
+        entry.type === "hierarchy" && entry.hierarchy.kind === "user" ? "hierarchy" : LEAF_ICONS[entry.type];
+      return (
+        <li key={entry.id} role="treeitem" aria-selected={state.checked}>
+          <label
+            className={cx("field-row leaf", state.checked && "placed", state.disabled !== null && "unavailable")}
+            style={indent}
+            title={state.disabled ?? caption}
+            draggable={drag !== null && state.disabled === null}
+            onDragStart={drag ? (event) => startDrag(event, drag) : undefined}
+            onDragEnd={drag ? endDrag : undefined}
           >
             <input
               type="checkbox"
-              checked={place !== null}
-              onChange={(event) =>
-                entry.type === "measure"
-                  ? props.onToggleMeasure(entry.measure, event.target.checked)
-                  : props.onToggleHierarchy(entry.hierarchy, event.target.checked)
-              }
+              checked={state.checked}
+              disabled={state.disabled !== null}
+              onChange={(event) => toggle(event.target.checked)}
             />
-            {!isMeasure && (
-              <Icon
-                name={entry.type === "hierarchy" && entry.hierarchy.kind === "user" ? "hierarchy" : "attribute"}
-                className="kind"
-              />
+            {icon && <Icon name={icon} className="kind" />}
+            <span className="field-caption">{entry.type === "kpi" ? KPI_PART_LABELS[entry.part] : caption}</span>
+            {state.placed !== null && <span className="field-area">{state.placed}</span>}
+            {entry.type === "calculated" && (
+              <button
+                type="button"
+                className="icon-button tiny"
+                aria-label={`Edit ${caption}`}
+                title="Edit or delete this calculated measure"
+                onClick={(event) => {
+                  event.preventDefault();
+                  props.onEditCalculated(entry.measure);
+                }}
+              >
+                <Icon name="more" />
+              </button>
             )}
-            <span className="field-caption">{caption}</span>
-            {place !== null && !isMeasure && <span className="field-area">{AREA_LABELS[place.area]}</span>}
           </label>
         </li>
       );

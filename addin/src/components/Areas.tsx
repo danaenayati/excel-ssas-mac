@@ -21,6 +21,8 @@ import {
   isFiltered,
   locate,
   selectionSummary,
+  valueKey,
+  valueLabels,
   type Area,
   type FieldArea,
   type LayoutAction,
@@ -72,7 +74,9 @@ const SHOW_AS_MARKS: Record<ShowValuesAs, string> = {
 
 function chipsOf(layout: Layout, area: Area): ChipInfo[] {
   if (area === "values") {
-    return layout.values.map((v) => ({ name: v.measure, caption: v.caption, field: null, value: v }));
+    // Copies of one measure are told apart by their key, and by "Rides 2" on the chip.
+    const labels = valueLabels(layout.values);
+    return layout.values.map((v, i) => ({ name: valueKey(layout.values, i), caption: labels[i], field: null, value: v }));
   }
   return layout[area].map((f) => ({ name: f.hierarchy, caption: f.caption, field: f, value: null }));
 }
@@ -138,18 +142,21 @@ export function Areas({ layout, dispatch, onFilter, onCustomFormat, onShowAsForm
       },
     ];
     if (area !== "values") {
+      const isSet = Boolean(chip.field && chip.field.set);
       items.push("separator");
       for (const target of FIELD_AREAS) {
-        if (target === area) continue;
+        if (target === area || (isSet && target === "filters")) continue;
         items.push({
           label: `Move to ${AREA_LABELS[target]}`,
           run: () => dispatch({ type: "move", name, area: target }),
         });
       }
-      items.push("separator", {
-        label: area === "filters" ? "Filter members…" : "Sort and Filter…",
-        run: () => onFilter(name),
-      });
+      if (!isSet) {
+        items.push("separator", {
+          label: area === "filters" ? "Filter members…" : "Sort and Filter…",
+          run: () => onFilter(name),
+        });
+      }
       if (chip.field && isFiltered(chip.field)) {
         items.push({ label: "Clear Filter", run: () => dispatch({ type: "clearFilters", hierarchy: name }) });
       }
@@ -158,10 +165,17 @@ export function Areas({ layout, dispatch, onFilter, onCustomFormat, onShowAsForm
       const hasAxisFields = layout.rows.length + layout.columns.length > 0;
       const showAs = value.showAs ?? "normal";
       const format = value.numberFormat ?? null;
+      if (!value.kpi) {
+        items.push("separator", {
+          label: "Duplicate",
+          run: () => dispatch({ type: "duplicateValue", key: name }),
+        });
+      }
       items.push(
         "separator",
         {
           label: "Show Values As",
+          disabled: Boolean(value.kpi),
           submenu: [
             ...(hasAxisFields
               ? []

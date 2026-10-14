@@ -1,16 +1,22 @@
 // The top of the panel for a Rows or Columns field, as in Excel's Row Labels / Column
-// Labels dropdown on Windows: sorting, Label Filters, Value Filters, and clearing every
-// filter of the field. The item checklist follows below it (MemberPicker). Each choice
-// applies at once and closes the panel, as Excel's menu does.
+// Labels dropdown on Windows: sorting, Label Filters (Date Filters for a date field),
+// Value Filters, groups and calculated items, and clearing every filter of the field.
+// The item checklist follows below it (MemberPicker). Each choice applies at once and
+// closes the panel, as Excel's menu does.
 
 import { useState, type FormEvent, type ReactNode } from "react";
 import {
+  DATE_DYNAMIC_GROUPS,
+  DATE_FORM_OPERATORS,
+  DATE_PERIODS,
   LABEL_OPERATORS,
   TOP_LABEL,
   VALUE_OPERATORS,
+  checkDateFilter,
   checkLabelFilter,
   checkTopFilter,
   checkValueFilter,
+  describeDateFilter,
   describeLabelFilter,
   describeSort,
   describeValueFilter,
@@ -34,6 +40,11 @@ interface Props {
    * result to go by.
    */
   expandable: { members: string[]; anyChildren: boolean } | null;
+  /** The field's items are dates: Date Filters take the place of Label Filters, as in Excel. */
+  isDate?: boolean;
+  /** Open the dialogs for this field's groups and calculated items. */
+  onGroups?: () => void;
+  onCalculatedItems?: () => void;
 }
 
 type Mode =
@@ -43,7 +54,10 @@ type Mode =
   | { kind: "label"; operator: LabelOperator }
   | { kind: "values" }
   | { kind: "value"; operator: ValueOperator }
-  | { kind: "top" };
+  | { kind: "top" }
+  | { kind: "dates" }
+  | { kind: "periods" }
+  | { kind: "date"; operator: "equals" | "before" | "after" | "between" };
 
 function MenuButton(props: {
   children: ReactNode;
@@ -111,7 +125,8 @@ function MeasureSelect(props: {
   );
 }
 
-export function FieldMenu({ field, measures, defaultMeasure, onAction, expandable }: Props) {
+export function FieldMenu(props: Props) {
+  const { field, measures, defaultMeasure, onAction, expandable } = props;
   const [mode, setMode] = useState<Mode>({ kind: "menu" });
   const [error, setError] = useState<string | null>(null);
   const caption = (name: string) => measures.find((m) => m.uniqueName === name)?.caption ?? name;
@@ -129,6 +144,9 @@ export function FieldMenu({ field, measures, defaultMeasure, onAction, expandabl
   const [count, setCount] = useState(isTop && value ? String(value.value) : "10");
   const [topBy, setTopBy] = useState<"items" | "percent" | "sum">(isTop && value ? value.topBy ?? "items" : "items");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">(field.sort ? field.sort.order : "asc");
+  const dated = field.dateFilter ?? null;
+  const [date1, setDate1] = useState(dated && dated.value ? dated.value : "");
+  const [date2, setDate2] = useState(dated && dated.value2 ? dated.value2 : "");
   const [sortMeasure, setSortMeasure] = useState(
     field.sort && field.sort.by === "measure" && field.sort.measure ? field.sort.measure : defaultMeasure,
   );
@@ -334,9 +352,66 @@ export function FieldMenu({ field, measures, defaultMeasure, onAction, expandabl
     );
   }
 
+  if (mode.kind === "date") {
+    const choice = DATE_FORM_OPERATORS.find((c) => c.operator === mode.operator) ?? DATE_FORM_OPERATORS[0];
+    const submit = (event: FormEvent) => {
+      event.preventDefault();
+      const checked = checkDateFilter({ operator: choice.operator, value: date1, value2: date2 });
+      if (!checked.ok) {
+        setError(checked.message);
+        return;
+      }
+      onAction({ type: "setDateFilter", hierarchy, filter: checked.value });
+    };
+    return (
+      <form className="fm-form" onSubmit={submit} aria-label="Date filter">
+        <h3 className="fm-title">Date Filter ({field.caption})</h3>
+        <p className="fm-text">Show items for which the date</p>
+        <select
+          className="select"
+          aria-label="Condition"
+          value={choice.operator}
+          onChange={(e) => go({ kind: "date", operator: e.target.value as typeof choice.operator })}
+        >
+          {DATE_FORM_OPERATORS.map((c) => (
+            <option key={c.operator} value={c.operator}>
+              {c.phrase}
+            </option>
+          ))}
+        </select>
+        <input className="input" type="date" value={date1} onChange={(e) => setDate1(e.target.value)} aria-label="Date" autoFocus />
+        {choice.two && (
+          <>
+            <span className="fm-text">and</span>
+            <input className="input" type="date" value={date2} onChange={(e) => setDate2(e.target.value)} aria-label="Last date" />
+          </>
+        )}
+        {error && <p className="fm-error">{error}</p>}
+        <FormButtons onCancel={back} />
+      </form>
+    );
+  }
+
   // ---- the menu ----------------------------------------------------------
 
+  if (field.set) {
+    return (
+      <section className="fm" aria-label={field.caption}>
+        <p className="fm-text">
+          &ldquo;{field.caption}&rdquo; is a set defined in the cube: its items are the set&rsquo;s own, so it has no
+          sorting or filters here.
+        </p>
+      </section>
+    );
+  }
+
+  const datesOpen = mode.kind === "dates" || mode.kind === "periods";
+  const periodsOpen = mode.kind === "periods";
+  const setDate = (filter: Parameters<typeof describeDateFilter>[0] | null) =>
+    onAction({ type: "setDateFilter", hierarchy, filter });
   const labelsOpen = mode.kind === "labels";
+  const groups = (field.customItems ?? []).filter((i) => i.members && i.members.length > 0).length;
+  const formulas = (field.customItems ?? []).filter((i) => i.formula).length;
   const valuesOpen = mode.kind === "values";
   return (
     <section className="fm" aria-label={`Sort and filter ${field.caption}`}>
@@ -361,6 +436,60 @@ export function FieldMenu({ field, measures, defaultMeasure, onAction, expandabl
       </MenuButton>
 
       <div className="fm-sep" role="separator" />
+
+      {props.isDate && (
+        <MenuButton expanded={datesOpen} onClick={() => go(datesOpen ? { kind: "menu" } : { kind: "dates" })}>
+          Date Filters
+          {dated && <span className="fm-state">{describeDateFilter(dated)}</span>}
+        </MenuButton>
+      )}
+      {props.isDate && datesOpen && (
+        <div className="fm-sub" role="group" aria-label="Date Filters">
+          <MenuButton indent disabled={!dated} onClick={() => setDate(null)}>
+            Clear Date Filter
+          </MenuButton>
+          {DATE_FORM_OPERATORS.map((c) => (
+            <MenuButton
+              key={c.operator}
+              indent
+              checked={Boolean(dated && dated.operator === c.operator)}
+              onClick={() => go({ kind: "date", operator: c.operator })}
+            >
+              {c.label}
+            </MenuButton>
+          ))}
+          {DATE_DYNAMIC_GROUPS.map((group, i) => (
+            <div key={i} className="fm-group">
+              <div className="fm-sep" role="separator" />
+              {group.map((c) => (
+                <MenuButton
+                  key={c.operator}
+                  indent
+                  checked={Boolean(dated && dated.operator === c.operator)}
+                  onClick={() => setDate({ operator: c.operator })}
+                >
+                  {c.label}
+                </MenuButton>
+              ))}
+            </div>
+          ))}
+          <div className="fm-sep" role="separator" />
+          <MenuButton indent expanded={periodsOpen} onClick={() => go(periodsOpen ? { kind: "dates" } : { kind: "periods" })}>
+            All Dates in the Period
+          </MenuButton>
+          {periodsOpen &&
+            DATE_PERIODS.map((c) => (
+              <MenuButton
+                key={c.operator}
+                indent
+                checked={Boolean(dated && dated.operator === c.operator)}
+                onClick={() => setDate({ operator: c.operator })}
+              >
+                <span className="fm-deeper">{c.label}</span>
+              </MenuButton>
+            ))}
+        </div>
+      )}
 
       <MenuButton expanded={labelsOpen} onClick={() => go(labelsOpen ? { kind: "menu" } : { kind: "labels" })}>
         Label Filters
@@ -407,6 +536,20 @@ export function FieldMenu({ field, measures, defaultMeasure, onAction, expandabl
             {TOP_LABEL}
           </MenuButton>
         </div>
+      )}
+
+      {(props.onGroups || props.onCalculatedItems) && <div className="fm-sep" role="separator" />}
+      {props.onGroups && (
+        <MenuButton onClick={props.onGroups}>
+          Group Items…
+          {groups > 0 && <span className="fm-state">{groups === 1 ? "1 group" : `${groups} groups`}</span>}
+        </MenuButton>
+      )}
+      {props.onCalculatedItems && (
+        <MenuButton onClick={props.onCalculatedItems}>
+          Calculated Item…
+          {formulas > 0 && <span className="fm-state">{formulas === 1 ? "1 item" : `${formulas} items`}</span>}
+        </MenuButton>
       )}
 
       <div className="fm-sep" role="separator" />

@@ -708,6 +708,20 @@ input[type="checkbox"] {
   margin-left: 19px;
 }
 
+.field-row.unavailable {
+  color: var(--text-2);
+}
+
+.field-row.action-row {
+  color: var(--accent, #217346);
+}
+
+.icon-button.tiny {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+
 .field-caption {
   flex: 1;
   min-width: 0;
@@ -1533,4 +1547,115 @@ tbody .pv-head {
   z-index: 1;
   background: #ffffff;
   box-shadow: 0 1px 0 #b5b5b5;
+}
+
+.fm-deeper {
+  padding-left: 14px;
+}
+
+/* -- calculation dialogs (CalculationDialogs.tsx) ------------------------------ */
+.dialog-text {
+  color: var(--text-2);
+}
+
+.dialog-text code,
+code.calc-detail {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+}
+
+.dialog-note {
+  color: var(--text-2);
+}
+
+.dialog-note.ok {
+  color: var(--accent);
+}
+
+.dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+}
+
+.dialog-row {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+}
+
+.dialog-row > .select {
+  flex: 1;
+  min-width: 0;
+}
+
+.dialog-body > .input,
+.dialog-field > .input,
+.dialog-field > .select {
+  width: 100%;
+}
+
+.input.formula {
+  height: auto;
+  min-height: 64px;
+  padding-top: 4px;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  resize: vertical;
+}
+
+.calc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  list-style: none;
+}
+
+.calc-list > li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.calc-name {
+  flex: none;
+  font-weight: 600;
+}
+
+.calc-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calc-items {
+  width: 100%;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+.calc-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--row);
+  padding: 0 6px;
+}
+
+.calc-caption {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

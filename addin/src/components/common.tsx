@@ -20,7 +20,11 @@ type IconName =
   | "search"
   | "more"
   | "sort"
-  | "trash";
+  | "trash"
+  | "kpi"
+  | "set"
+  | "calc"
+  | "plus";
 
 const PATHS: Record<IconName, ReactNode> = {
   "chevron-right": <path d="M6 3.5 10.5 8 6 12.5" />,
@@ -65,6 +69,15 @@ const PATHS: Record<IconName, ReactNode> = {
   ),
   trash: <path d="M3 4.5h10M6.5 4.5v-2h3v2M4.5 4.5l.5 9h6l.5-9M6.75 7v4M9.25 7v4" />,
   sort: <path d="M5 3v10M2.5 10.5 5 13l2.5-2.5M11 13V3M8.5 5.5 11 3l2.5 2.5" />,
+  kpi: (
+    <>
+      <path d="M2.5 11.5a5.5 5.5 0 0 1 11 0" />
+      <path d="M8 11.5 10.5 7" />
+    </>
+  ),
+  set: <path d="M6 2.5c-1.5 0-1.5 1-1.5 2.5S4 7.5 3 8c1 .5 1.5 1.5 1.5 3s0 2.5 1.5 2.5M10 2.5c1.5 0 1.5 1 1.5 2.5S12 7.5 13 8c-1 .5-1.5 1.5-1.5 3s0 2.5-1.5 2.5" />,
+  calc: <path d="M9.5 2.5c-1.5 0-2 .8-2.2 2L6.2 11.5c-.2 1.2-.7 2-2.2 2M5 6.5h4.5M10 9l3 3.5M13 9l-3 3.5" />,
+  plus: <path d="M8 3.5v9M3.5 8h9" />,
 };
 
 export function Icon({ name, className }: { name: IconName; className?: string }) {

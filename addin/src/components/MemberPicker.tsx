@@ -42,6 +42,11 @@ interface Props {
     onAction: (action: LayoutAction) => void;
     /** For Expand / Collapse Entire Field; null without a result. */
     expandable: { members: string[]; anyChildren: boolean } | null;
+    /** The field's items are dates: offer Date Filters. */
+    isDate?: boolean;
+    /** Open the field's groups, and its calculated items. */
+    onGroups?: () => void;
+    onCalculatedItems?: () => void;
   };
 }
 
@@ -244,6 +249,9 @@ export function MemberPicker({ api, connectionId, catalog, cube, field, onApply,
             defaultMeasure={menu.defaultMeasure}
             onAction={menu.onAction}
             expandable={menu.expandable}
+            isDate={menu.isDate}
+            onGroups={menu.onGroups}
+            onCalculatedItems={menu.onCalculatedItems}
           />
           <h3 className="picker-heading">Select items</h3>
         </>
