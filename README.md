@@ -39,13 +39,17 @@ the same way Windows Excel does, with your Windows (domain) user name and passwo
 
 **Building a report (PivotTable)**
 - Field list with measures (by measure group and display folder), dimensions and
-  their fields, **KPIs** (Value, Goal, Status, Trend) and **named sets**; search.
+  their fields, **KPIs** (Value, Goal, Status, Trend) and **named sets** (also sets
+  that span several fields); search. A multi-level hierarchy lists its **levels**, so
+  you can place just one of them, such as only **Month** of a Calendar.
 - The four areas: Filters, Columns, Rows, Values. Tick a field, drag it, or use its
   menu to move it.
 - **Report Layout**: Compact Form (Excel's default), Outline Form, Tabular Form.
 - **Subtotals**: none, at the bottom of each group, or at the top of each group.
   **Grand Totals**: Excel's four choices. **Repeat All Item Labels**, **For empty
   cells show**, **Hide empty** rows and columns, **Defer updates**.
+- **Report styles** modelled on Excel's PivotTable Styles, with its Style Options:
+  Row Headers, Column Headers, Banded Rows, Banded Columns.
 - Drill down and up (Expand / Collapse, Expand / Collapse Entire Field).
 - Several reports per workbook and per sheet; each sheet's report follows you as you
   move between sheets, as on Windows.
@@ -59,14 +63,18 @@ the same way Windows Excel does, with your Windows (domain) user name and passwo
   and **Date Filters** for date fields (Today, This Month, Last Quarter, Year to
   Date, Between, All Dates in the Period, and the rest of Excel's list).
 - Item checklists with search. Totals count only the items that are shown
-  ("visual totals"), the default for cube PivotTables on Windows.
+  ("visual totals"), the default for cube PivotTables on Windows, or every item with
+  **Include filtered items in totals** (totals then carry an asterisk, as in Excel).
+- **Slicers**: buttons in the panel, one per item, to filter the report with a click
+  (Multi-Select and Clear Filter as in Excel).
 
 **Values**
 - **Show Values As**: all 14 of Excel's choices (% of Grand / Column / Row Total, % Of,
   % of Parent Row / Column / Parent Total, Difference From, % Difference From,
   Running Total In, % Running Total In, Rank Smallest to Largest / Largest to
   Smallest, Index), with base field and base item.
-- **Number Format** per value field, kept on every refresh.
+- **Number Format** per value field, kept on every refresh, and its own **name**
+  (Windows: Value Field Settings > Custom Name).
 - The same measure more than once (**Duplicate**), for example the number and its
   percentage side by side.
 - KPI Status and Trend shown as Excel's traffic lights and arrows.
