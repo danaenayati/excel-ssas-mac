@@ -149,6 +149,42 @@ def test_sample_cube_non_visual_top_per_outer_item(demo):
     assert data_per_city and all(n == 1 for n in data_per_city)
 
 
+def test_sample_cube_non_visual_hides_an_outer_item_with_no_items_left_under_it(demo):
+    # Abu Dhabi, Ankara and Dubai have no Bike rides. Their non-visual totals are not
+    # empty, but Excel shows an outer item only with items under it.
+    bike = dict(placed(demo, SERVICE), members=[member(demo, SERVICE, "Bike")])
+    visual = run(demo, rows=[placed(demo, CITY), bike], subtotals=True)
+    non_visual = run(demo, rows=[placed(demo, CITY), bike], subtotals=True, includeFilteredItems=True)
+    assert len(non_visual["rowHeaders"]) == len(visual["rowHeaders"]) == 6 * 2 + 1
+    assert "Dubai Total*" not in labels(non_visual) and "Dubai" not in labels(non_visual)
+    assert non_visual["rowKinds"].count("subtotal") == non_visual["rowKinds"].count("data") == 6
+    # The rows that stay keep their own values.
+    tehran = labels(non_visual).index("Tehran Total*")
+    assert non_visual["values"][tehran] == run(demo, rows=[dict(placed(demo, CITY), members=[member(demo, CITY, "Tehran")])])["values"][0]
+
+
+def test_sample_cube_non_visual_set_with_no_pair_for_the_outer_items_shows_only_the_total(demo):
+    # As found in Excel: the City level of Geography, Dubai only, then a set of the top
+    # city and service pairs, none of them in Dubai.
+    geography = "[Geography].[Geography]"
+    city_level = {"uniqueName": f"{geography}.[City]", "number": 2, "caption": "City"}
+    dubai = member(demo, geography, "Dubai", level=city_level["uniqueName"])
+    cities = dict(placed(demo, geography), level=city_level, members=[dubai])
+    pairs = dict(placed(demo, CITY), set="[Top Service Cities]", caption="Top Service Cities",
+                 setHierarchies=[CITY, SERVICE],
+                 setAllMembers=[placed(demo, CITY)["allMember"], placed(demo, SERVICE)["allMember"]])
+    grid = run(demo, rows=[cities, pairs], subtotals=True, includeFilteredItems=True)
+    assert grid["rowKinds"] == ["grandTotal"]
+    assert labels(grid) == ["Grand Total*"]
+
+
+def test_orphan_subtotal_columns_go_with_their_cells(demo):
+    bike = dict(placed(demo, SERVICE), members=[member(demo, SERVICE, "Bike")])
+    grid = run(demo, columns=[placed(demo, CITY), bike], subtotals=True, includeFilteredItems=True)
+    assert grid["stats"]["columns"] == len(grid["colKinds"]) == len(grid["values"][0]) == 6 * 2 + 1
+    assert grid["colKinds"].count("subtotal") == 6
+
+
 # -- named sets spanning several fields --------------------------------------------------------
 def multi_set():
     return field("[Geo].[City]", set="[Pairs]", caption="Pairs", setHierarchies=["[Geo].[City]", "[S].[T]"],

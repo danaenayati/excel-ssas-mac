@@ -32,7 +32,8 @@ def build_grid(
     col_tuples = cellset.axes[0] if cellset.axes else []
     has_row_axis = len(cellset.axes) > 1
     row_tuples = cellset.axes[1] if has_row_axis else []
-    n_cols = len(col_tuples)
+    all_cols = len(col_tuples)
+    n_cols = all_cols
     n_rows = len(row_tuples) if has_row_axis else (1 if n_cols else 0)
 
     if n_rows * n_cols > cell_limit:
@@ -41,6 +42,16 @@ def build_grid(
             f"This view would return {n_rows * n_cols:,} cells ({n_rows:,} rows × {n_cols:,} columns). "
             f"Add a filter or remove a field to bring it under {cell_limit:,}.",
         )
+
+    # The tuples to show, by their place in the cellset. A subtotal with no item left
+    # under it is dropped, as Excel shows an outer item only with items under it: with
+    # "Include filtered items in totals" its total is not empty, so NON EMPTY keeps it.
+    col_index = _shown(col_tuples, layout.columns)
+    col_tuples = [col_tuples[i] for i in col_index]
+    n_cols = len(col_tuples)
+    row_index = _shown(row_tuples, layout.rows) if has_row_axis and layout.rows else list(range(n_rows))
+    row_tuples = [row_tuples[i] for i in row_index] if has_row_axis and layout.rows else row_tuples
+    n_rows = len(row_index)
 
     # "Include filtered items in totals" marks the totals with an asterisk, as Excel does.
     star = "*" if layout.options.include_filtered and _anything_narrowed(layout) else ""
@@ -73,10 +84,10 @@ def build_grid(
     palette = [GENERAL]
     palette_index = {GENERAL: 0}
     values, cell_formats = [], []
-    for r in range(n_rows):
+    for r in row_index:
         value_line, format_line = [], []
-        base = r * n_cols
-        for c in range(n_cols):
+        base = r * all_cols
+        for c in col_index:
             cell = cellset.cells.get(base + c)
             if cell is None:
                 value_line.append(None)
@@ -152,6 +163,49 @@ def _field_captions(fields: tuple[PlacedField, ...]) -> list[str]:
     return out
 
 
+def _starts(fields: tuple[PlacedField, ...]) -> list[int]:
+    """Where each field's first hierarchy is in a tuple of the axis."""
+    starts, at = [], 0
+    for f in fields:
+        starts.append(at)
+        at += f.width
+    return starts
+
+
+def _first_all(members: tuple[AxisMember, ...], fields: tuple[PlacedField, ...], starts: list[int]) -> int | None:
+    """The outermost field at its All member: 0 for the grand total, more for a subtotal,
+    None for an item's own line."""
+    return next(
+        (
+            i for i, f in enumerate(fields)
+            if f.all_members[0] and members[starts[i]].unique_name == f.all_members[0]
+        ),
+        None,
+    )
+
+
+def _shown(tuples: list[tuple[AxisMember, ...]], fields: tuple[PlacedField, ...]) -> list[int]:
+    """The indexes of the tuples to show: all but a subtotal with no item's line that
+    shares its outer items."""
+    if len(fields) < 2:
+        return list(range(len(tuples)))
+    starts = _starts(fields)
+    width = sum(f.width for f in fields)
+    firsts = [_first_all(tup[:width], fields, starts) if len(tup) >= width else None for tup in tuples]
+    # The outer items of every item's line, for each depth a subtotal can be at.
+    under: dict[int, set[tuple[str, ...]]] = {}
+    for depth in range(1, len(fields)):
+        under[depth] = {
+            tuple(m.unique_name for m in tup[: starts[depth]])
+            for tup, first in zip(tuples, firsts)
+            if first is None
+        }
+    return [
+        i for i, (tup, first) in enumerate(zip(tuples, firsts))
+        if not first or tuple(m.unique_name for m in tup[: starts[first]]) in under[first]
+    ]
+
+
 def _axis_lines(
     tuples: list[tuple[AxisMember, ...]],
     fields: tuple[PlacedField, ...],
@@ -164,10 +218,7 @@ def _axis_lines(
     column per hierarchy, and its total is the tuple of their All members.
     """
     columns = [(i, f, h, a) for i, f in enumerate(fields) for h, a in zip(f.hierarchies, f.all_members)]
-    starts, at = [], 0
-    for f in fields:
-        starts.append(at)
-        at += f.width
+    starts = _starts(fields)
     width = len(columns)
     expanded = [frozenset(f.expanded) for f in fields]
     lines: list[list[dict]] = []
@@ -177,14 +228,8 @@ def _axis_lines(
         members = tup[:width]
         if len(members) < width:
             raise CubeError("server", "The cube returned a result that does not match the report layout.")
-        first_all = next(
-            (
-                i for i, f in enumerate(fields)
-                if f.all_members[0] and members[starts[i]].unique_name == f.all_members[0]
-            ),
-            None,
-        )
-        kind = "data" if first_all is None else ("grandTotal" if first_all == 0 else "subtotal")
+        first_all = _first_all(members, fields, starts)
+        kind ="data" if first_all is None else ("grandTotal" if first_all == 0 else "subtotal")
         # With measures innermost on columns, the same hierarchy tuple repeats once per
         # measure; only its first occurrence is labelled.
         repeat_of_previous = previous is not None and _same(previous, members, width)
