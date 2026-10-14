@@ -100,6 +100,9 @@ the same way Windows Excel does, with your Windows (domain) user name and passwo
   Refresh All, Expand, Collapse, Expand Entire Field, Collapse Entire Field.
 - **Refresh**, **Refresh All**, **Refresh when the workbook opens**, **Refresh Every**
   1 to 60 minutes (while the panel is open), and Cancel for a slow query.
+- **Connections** by server name (`server`, `server:port`, `server\instance`) or by web
+  address (`https://…/msmdpump.dll`), signing in with NTLM or Kerberos, or Basic over
+  https.
 - A built-in **Sample cube** to try everything without a server.
 
 ---
@@ -249,6 +252,19 @@ Your password is stored in the Mac's **Keychain**, never in a workbook or a file
     measures, groups, named sets, and a page filter with several items.
 12. **More reports.** **New report here** starts another report at the selected cell.
     Each sheet's report comes back when you go to that sheet.
+13. **Slicers.** In the report's **⋯** menu choose **Insert Slicer…**, tick fields, and
+    click their buttons in the panel to filter (Cmd-click or **Multi-Select** for
+    several items, **Clear Filter** for all).
+14. **Charts.** In the report's **⋯** menu choose **Insert Chart** and a type. The chart
+    sits beside the report and changes with it on every refresh; **Delete Chart**
+    removes it.
+15. **Look.** Under the areas, pick a **Style** and the Style Options (Row Headers,
+    Column Headers, Banded Rows, Banded Columns). In a value field's menu,
+    **Value Field Settings…** gives it its own name.
+16. **Right-click.** Right-click a cell of a report and choose **Cube Explorer** for
+    Show Details, Refresh, Refresh All, Expand and Collapse.
+17. **Automatic refresh.** In the report's **⋯** menu, **Refresh Every** refreshes every
+    report in the workbook every 1 to 60 minutes while the panel is open.
 
 The report is saved in the workbook. Open the file later and press **Refresh** for new
 numbers. A colleague without Cube Explorer still sees the numbers as plain cells.
