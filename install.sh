@@ -94,7 +94,11 @@ fi
 
 step "Installing the helper"
 "$UV" venv --quiet --python 3.12 --allow-existing "$APP/venv"
-"$UV" pip install --quiet --python "$PYTHON" --reinstall-package cubebridge "$REPO/helper"
+# gssapi and krb5 (for Windows Authentication / Kerberos) use the Mac's own Kerberos
+# library. They come as ready-made wheels for both kinds of Mac; --only-binary makes
+# sure nothing is ever compiled here, even for a new version that ships source first.
+"$UV" pip install --quiet --python "$PYTHON" --only-binary gssapi --only-binary krb5 \
+  --reinstall-package cubebridge "$REPO/helper"
 "$PYTHON" -m cubebridge --version >/dev/null || fail "the helper did not install correctly."
 
 step "Installing the Excel panel"

@@ -76,7 +76,7 @@ def _seal(ctx, payload: bytes, frame_size: int) -> bytes:
     return bytes(out)
 
 
-def _unseal(ctx, blob: bytes) -> bytes:
+def _unseal(ctx, blob: bytes, token_sizes: list[int] | None = None) -> bytes:
     out, offset = b"", 0
     while offset < len(blob):
         data_size, token_size = struct.unpack_from("<HH", blob, offset)
@@ -84,6 +84,8 @@ def _unseal(ctx, blob: bytes) -> bytes:
         data = blob[offset : offset + data_size]
         token = blob[offset + data_size : offset + data_size + token_size]
         offset += data_size + token_size
+        if token_sizes is not None:
+            token_sizes.append(token_size)
         out += ctx.unwrap_winrm(token, data)
     return out[3:] if out.startswith(BOM) else out
 
@@ -91,11 +93,15 @@ def _unseal(ctx, blob: bytes) -> bytes:
 class FakeSsas:
     """Start with `with FakeSsas(...) as server:` and connect to `server.port`."""
 
-    def __init__(self, responses=None, record_size: int = 60000, frame_size: int = 16000) -> None:
+    def __init__(self, responses=None, record_size: int = 60000, frame_size: int = 16000, acceptor=None) -> None:
         # substring of the request -> bytes, or callable(request_text) -> bytes
         self.responses = responses or {}
         self.record_size = record_size
         self.frame_size = frame_size
+        # Makes the server's security context for each connection; NTLM by default.
+        self.acceptor = acceptor or (lambda: spnego.server(protocol="ntlm"))
+        self.contexts: list = []
+        self.client_token_sizes: list[int] = []  # security token size of every frame received
         self.delay = 0.0
         self.wrap_tokens = False  # CRLF every 64 characters, as Windows' encoder emits
         self.final_token_text = ""  # text placed in the last reply's SspiHandshake
@@ -134,7 +140,8 @@ class FakeSsas:
     def _serve(self, conn: socket.socket) -> None:
         wire = _Wire(conn)
         try:
-            ctx = spnego.server(protocol="ntlm")
+            ctx = self.acceptor()
+            self.contexts.append(ctx)
             while not ctx.complete:
                 payload, options = wire.read_message()
                 self.handshake_options.append(options)
@@ -154,7 +161,7 @@ class FakeSsas:
             while True:
                 payload, options = wire.read_message()
                 self.sealed_options.append(options)
-                text = _unseal(ctx, payload).decode("utf-8")
+                text = _unseal(ctx, payload, self.client_token_sizes).decode("utf-8")
                 self.requests.append(text)
                 if self.delay:
                     time.sleep(self.delay)

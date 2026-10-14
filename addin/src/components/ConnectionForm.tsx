@@ -1,12 +1,13 @@
-// "Add connection": name, server, username, password. The helper signs in to the
-// server before it saves anything, so a wrong password is reported here, at once. The
-// password goes to the helper (which keeps it in the macOS Keychain) and is not kept
-// by the pane.
+// "Add connection": server, how to sign in, username, password, name. The helper signs
+// in to the server before it saves anything, so a wrong password is reported here, at
+// once. The password goes to the helper (which keeps it in the macOS Keychain) and is
+// not kept by the pane.
 
 import { useState, type FormEvent } from "react";
 import type { Api } from "../api";
 import { toUiError, type UiError } from "../state/runner";
-import type { Connection } from "../types";
+import { defaultSignIn, keepSignIn, signInOptions, signInProblem } from "../state/signIn";
+import type { Connection, NewConnection, SignIn } from "../types";
 import { ErrorNote, Spinner } from "./common";
 
 interface Props {
@@ -15,15 +16,53 @@ interface Props {
   onCancel: () => void;
 }
 
+export interface FormFields {
+  name: string;
+  server: string;
+  signIn: SignIn;
+  username: string;
+  password: string;
+}
+
+/** What the helper is sent: trimmed, without an empty name. The password as typed. */
+export function newConnection(fields: FormFields): NewConnection {
+  return {
+    name: fields.name.trim() || undefined,
+    server: fields.server.trim(),
+    username: fields.username.trim(),
+    password: fields.password,
+    signIn: fields.signIn,
+  };
+}
+
+export function formReady(fields: FormFields): boolean {
+  return (
+    fields.server.trim() !== "" &&
+    fields.username.trim() !== "" &&
+    fields.password !== "" &&
+    signInProblem(fields.server, fields.signIn) === null
+  );
+}
+
 export function ConnectionForm({ api, onAdded, onCancel }: Props) {
   const [name, setName] = useState("");
   const [server, setServer] = useState("");
+  const [signIn, setSignIn] = useState<SignIn>(defaultSignIn());
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<UiError | null>(null);
 
-  const ready = server.trim() !== "" && username.trim() !== "" && password !== "";
+  const fields: FormFields = { name, server, signIn, username, password };
+  const ready = formReady(fields);
+  const options = signInOptions(server);
+  const chosen = options.find((option) => option.value === signIn) ?? options[0];
+
+  const changeServer = (value: string) => {
+    setServer(value);
+    // Basic is offered for https:// addresses only; leaving one takes the choice back.
+    setSignIn((current) => keepSignIn(value, current));
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -31,12 +70,7 @@ export function ConnectionForm({ api, onAdded, onCancel }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const connection = await api.addConnection({
-        name: name.trim() || undefined,
-        server: server.trim(),
-        username: username.trim(),
-        password,
-      });
+      const connection = await api.addConnection(newConnection(fields));
       setPassword("");
       onAdded(connection);
     } catch (failure) {
@@ -60,13 +94,29 @@ export function ConnectionForm({ api, onAdded, onCancel }: Props) {
         <input
           className="input"
           value={server}
-          onChange={(e) => setServer(e.target.value)}
-          placeholder="server, server:port or server\instance"
+          onChange={(e) => changeServer(e.target.value)}
+          placeholder="server, server\instance or https://…/msmdpump.dll"
           disabled={busy}
           autoFocus
           {...plain}
         />
       </label>
+      <fieldset className="field choice-group" disabled={busy}>
+        <legend className="field-label">Sign in with</legend>
+        {options.map((option) => (
+          <label key={option.value} className="choice">
+            <input
+              type="radio"
+              name="sign-in"
+              value={option.value}
+              checked={option.value === chosen.value}
+              onChange={() => setSignIn(option.value)}
+            />
+            <span>{option.label}</span>
+          </label>
+        ))}
+        <span className="hint">{chosen.hint}</span>
+      </fieldset>
       <label className="field">
         <span className="field-label">Username</span>
         <input

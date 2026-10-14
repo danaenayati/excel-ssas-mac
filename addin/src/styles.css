@@ -547,6 +547,31 @@ input[type="checkbox"] {
   color: var(--text-2);
 }
 
+/* "Sign in with" in the connection form: one radio button per line, its hint below. */
+.choice-group {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.choice-group legend {
+  padding: 0;
+  margin-bottom: 2px;
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+input[type="radio"] {
+  flex: none;
+  margin: 0;
+}
+
 .form-buttons {
   display: flex;
   flex-wrap: wrap;

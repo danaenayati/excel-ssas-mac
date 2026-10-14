@@ -1,7 +1,8 @@
-"""Turn what the user types as "server" into a host and a TCP port.
+"""Turn what the user types as "server" into where to connect.
 
 Accepted forms are the ones Windows Excel accepts for an on-premises server:
-`host`, `host:port` and `host\\instance`.
+`host`, `host:port` and `host\\instance` for the TCP binding (`Target`), and the
+http:// or https:// address of an msmdpump.dll endpoint (`HttpTarget`).
 
 A default instance listens on 2383. A named instance uses a port of its own, which
 the SQL Server Browser service on TCP 2382 hands out. Microsoft does not publish that
@@ -12,9 +13,11 @@ server, so a failure always tells the user the reliable alternative: `server:por
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from ..errors import CubeError
 from . import dime, envelopes, sealing, xmla
@@ -27,6 +30,7 @@ _LABEL = r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?"
 _HOST = re.compile(rf"{_LABEL}(?:\.{_LABEL})*")
 _INSTANCE = re.compile(r"[A-Za-z0-9_$#-]{1,64}")
 _URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_WEB_SCHEMES = {"http": 80, "https": 443}
 
 
 @dataclass(frozen=True)
@@ -36,8 +40,78 @@ class Target:
     instance: str | None = None
 
 
+@dataclass(frozen=True)
+class HttpTarget:
+    """An XMLA endpoint over HTTP, such as https://bi.corp.local/olap/msmdpump.dll."""
+
+    scheme: str  # "http" or "https"
+    host: str
+    port: int
+    path: str  # path and query, always starting with "/"
+
+    @property
+    def secure(self) -> bool:
+        return self.scheme == "https"
+
+    @property
+    def url(self) -> str:
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        default = _WEB_SCHEMES[self.scheme] == self.port
+        return f"{self.scheme}://{host}{'' if default else f':{self.port}'}{self.path}"
+
+
 def _bad(message: str) -> CubeError:
     return CubeError("bad-request", message)
+
+
+def is_ip_address(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def parse_target(text: str) -> Target | HttpTarget:
+    """What the user typed as "server": a server name (TCP) or a web address (HTTP)."""
+    text = (text or "").strip()
+    if not text:
+        raise _bad("Enter the server name.")
+    if _URL.match(text) and text.split(":", 1)[0].lower() in _WEB_SCHEMES:
+        return parse_url(text)
+    if _URL.match(text):
+        raise _bad(
+            "That kind of web address is not supported. Enter the server name as in Windows "
+            "Excel, or the http:// or https:// address of msmdpump.dll."
+        )
+    return parse_server(text)
+
+
+def parse_url(text: str) -> HttpTarget:
+    text = (text or "").strip()
+    if any(ch <= " " or ch == "\x7f" for ch in text):
+        raise _bad("The web address must not contain spaces.")
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError as exc:
+        raise _bad("The port in the web address must be a number between 1 and 65535.") from exc
+    scheme = parts.scheme.lower()
+    if scheme not in _WEB_SCHEMES:
+        raise _bad("The web address must start with http:// or https://.")
+    if parts.username is not None or parts.password is not None:
+        raise _bad("Put the user name and password in their own boxes, not in the web address.")
+    if parts.fragment or text.endswith("#"):
+        raise _bad("The web address must not contain '#'.")
+    host = parts.hostname or ""
+    if not host or (not is_ip_address(host) and (len(host) > 253 or not _HOST.fullmatch(host))):
+        raise _bad("The server name in the web address is not valid.")
+    if port == 0:
+        raise _bad("The port in the web address must be a number between 1 and 65535.")
+    path = parts.path or "/"
+    if parts.query:
+        path += "?" + parts.query
+    return HttpTarget(scheme=scheme, host=host, port=port or _WEB_SCHEMES[scheme], path=path)
 
 
 def parse_server(text: str) -> Target:

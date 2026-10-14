@@ -1190,6 +1190,18 @@ export function createMockApi(options: MockOptions = {}): Api {
       if (server === "" || /[\s,]/.test(server)) {
         throw fail("bad-request", 400, "Enter the server as host, host:port or host\\instance.");
       }
+      const signIn = input.signIn ?? "ntlm";
+      if (signIn === "basic" && !/^https:\/\//i.test(server)) {
+        throw fail("bad-request", 400, "Basic sign-in sends the password with every request, so it needs an https:// address.");
+      }
+      if (signIn === "kerberos" && /nokerberos/i.test(server)) {
+        throw fail(
+          "auth-mechanism",
+          401,
+          'Kerberos does not know this Analysis Services server, so it cannot sign in to it. Ask IT to register one, or choose "User name and password (NTLM)".',
+          "Kerberos: no-service",
+        );
+      }
       if (input.username.trim() === "") {
         throw fail("bad-request", 400, "Enter the username as DOMAIN\\user.");
       }
@@ -1215,6 +1227,7 @@ export function createMockApi(options: MockOptions = {}): Api {
         kind: "ssas",
         server,
         username: input.username.trim(),
+        signIn,
       };
       connections.push(connection);
       return { ...connection };

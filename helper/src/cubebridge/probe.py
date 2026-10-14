@@ -4,6 +4,9 @@ Run by the user in Terminal, because only they can type the password. It walks t
 same path the add-in uses (name lookup, port, sign-in, metadata, one tiny query) and
 says in plain words where it stops. The password is read with echo off and is never
 printed or logged.
+
+The server may be a server name (TCP) or the https:// address of msmdpump.dll, and
+the sign-in kind is asked for as the pane asks for it (or given with --sign-in).
 """
 
 from __future__ import annotations
@@ -18,8 +21,7 @@ from .backends.ssas_backend import SsasBackend
 from .errors import CubeError
 from .pivot.grid import build_grid
 from .pivot.model import Layout
-from .ssas import resolve
-from .ssas.session import Session
+from .ssas import auth, resolve
 
 Printer = Callable[[str], None]
 
@@ -36,12 +38,40 @@ def _port_open(host: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
-def run(server: str, username: str, password: str, out: Printer = print) -> bool:
+def _kerberos_ready(out: Printer, username: str) -> bool:
+    from .ssas import kerberos
+
+    try:
+        kerberos.check_installed()
+    except CubeError as exc:
+        _step(out, "Kerberos on this Mac", "NOT INSTALLED")
+        out(f"\n  {exc.message}")
+        return False
+    _step(out, "Kerberos on this Mac", "OK")
+    ticket = kerberos.existing_ticket()
+    if ticket is not None and kerberos.ticket_matches(ticket[1], username):
+        _step(out, "Kerberos ticket", f"already on this Mac ({ticket[1]})")
+    elif ticket is not None:
+        _step(out, "Kerberos ticket", f"one for {ticket[1]}; not used, the password gets one")
+    else:
+        _step(out, "Kerberos ticket", "none yet; the password gets one")
+    return True
+
+
+def run(server: str, username: str, password: str, out: Printer = print, sign_in: str = auth.DEFAULT_SIGN_IN) -> bool:
     """Return True when every step passed."""
     try:
-        target = resolve.parse_server(server)
+        target = resolve.parse_target(server)
+        sign_in = auth.read_sign_in(sign_in)
+        auth.check_allowed(sign_in, target)
     except CubeError as exc:
         _step(out, "Server name", f"NOT VALID: {exc.message}")
+        return False
+    web = isinstance(target, resolve.HttpTarget)
+    if web:
+        _step(out, "Web address", f"OK ({target.scheme}, port {target.port})")
+    _step(out, "Sign in with", auth.LABELS[sign_in])
+    if sign_in == "kerberos" and not _kerberos_ready(out, username):
         return False
 
     try:
@@ -53,26 +83,30 @@ def run(server: str, username: str, password: str, out: Printer = print) -> bool
         out("  or check the spelling against what you type in Windows Excel.")
         return False
 
-    try:
-        host, port = resolve.endpoint(target)
-    except CubeError as exc:
-        _step(out, "Instance port", "FAILED")
-        out(f"\n  {exc.message}")
-        return False
-    if target.instance:
-        _step(out, "Instance port", f"OK ({port})")
+    if web:
+        host, port = target.host, target.port
+    else:
+        try:
+            host, port = resolve.endpoint(target)
+        except CubeError as exc:
+            _step(out, "Instance port", "FAILED")
+            out(f"\n  {exc.message}")
+            return False
+        if target.instance:
+            _step(out, "Instance port", f"OK ({port})")
 
     if not _port_open(host, port):
         _step(out, f"Port {port}", "CLOSED or blocked")
-        other = [str(p) for p in (2382, 443, 80) if _port_open(host, p, 2.0)]
         out(f"\n  The server answers by name but not on port {port}.")
-        if other:
-            out(f"  Other open ports on it: {', '.join(other)}.")
-        out("  If the cube runs as a named instance, enter the server as  name\\INSTANCE  or  name:port.")
+        if not web:
+            other = [str(p) for p in (2382, 443, 80) if _port_open(host, p, 2.0)]
+            if other:
+                out(f"  Other open ports on it: {', '.join(other)}.")
+            out("  If the cube runs as a named instance, enter the server as  name\\INSTANCE  or  name:port.")
         return False
     _step(out, f"Port {port}", "OK")
 
-    backend = SsasBackend(server, username, password)
+    backend = SsasBackend(server, username, password, sign_in=sign_in)
     try:
         try:
             catalogs = backend.catalogs()
@@ -82,17 +116,10 @@ def run(server: str, username: str, password: str, out: Printer = print) -> bool
             if exc.detail:
                 out(f"  Detail: {exc.detail}")
             return False
-        _step(out, "Sign-in", "OK")
+        _step(out, "Sign-in", f"OK ({backend.sign_in_note})" if backend.sign_in_note else "OK")
 
         try:
-            session = Session(host, port, username, password)
-            session.open()
-            try:
-                rows = session.discover("DISCOVER_PROPERTIES", {"PropertyName": "DBMSVersion"})
-            finally:
-                session.close()
-            version = next((r.get("Value", "") for r in rows if r.get("PropertyName") == "DBMSVersion"), "")
-            _step(out, "Server version", version or "(not reported)")
+            _step(out, "Server version", backend.server_version() or "(not reported)")
         except CubeError:
             _step(out, "Server version", "(not reported)")
 
@@ -161,20 +188,47 @@ def enable_verbose(stream=None) -> Callable[[], None]:
     return undo
 
 
-def main(verbose: bool = False) -> int:
+def sign_in_choices(server: str) -> list[str]:
+    """The kinds offered for this server, the default first (as in the pane)."""
+    try:
+        target = resolve.parse_target(server)
+    except CubeError:
+        target = None
+    secure_web = isinstance(target, resolve.HttpTarget) and target.secure
+    return ["ntlm", "kerberos"] + (["basic"] if secure_web else [])
+
+
+def ask_sign_in(server: str, ask: Callable[[str], str] = input, show: Printer = print) -> str:
+    choices = sign_in_choices(server)
+    show("Sign in with:")
+    for number, kind in enumerate(choices, 1):
+        show(f"  {number}  {auth.LABELS[kind]}")
+    while True:
+        answer = ask(f"Choose 1-{len(choices)} [1]: ").strip()
+        if not answer:
+            return choices[0]
+        if answer.isdigit() and 1 <= int(answer) <= len(choices):
+            return choices[int(answer) - 1]
+        show("  Type the number of a choice, or press Return for 1.")
+
+
+def main(verbose: bool = False, sign_in: str | None = None) -> int:
     if verbose:
         enable_verbose()
     print("Cube connection test")
     print("Nothing here is sent anywhere except to your own server.\n")
     try:
-        server = input("Server (as typed in Windows Excel): ").strip()
+        server = input("Server (as typed in Windows Excel, or https://…/msmdpump.dll): ").strip()
+        if sign_in is None:
+            sign_in = ask_sign_in(server)
         username = input("Username (DOMAIN\\user): ").strip()
-        password = getpass.getpass("Password (typing is hidden): ")
+        hint = "used only if this Mac has no Kerberos ticket; " if sign_in == "kerberos" else ""
+        password = getpass.getpass(f"Password ({hint}typing is hidden): ")
     except (EOFError, KeyboardInterrupt):
         print("\nCancelled.")
         return 130
     print()
-    ok = run(server, username, password)
+    ok = run(server, username, password, sign_in=sign_in)
     print()
     if not ok:
         print("Not working yet. Copy the lines above (they contain no password) when asking for help.")
@@ -187,7 +241,7 @@ def main(verbose: bool = False) -> int:
     if answer in ("", "y", "yes"):
         from .store import Store, default_directory
 
-        Store(default_directory()).add(name="", server=server, username=username, password=password)
+        Store(default_directory()).add(name="", server=server, username=username, password=password, sign_in=sign_in)
         print("Saved. Open the Cube panel in Excel and choose it from the list.")
     return 0
 

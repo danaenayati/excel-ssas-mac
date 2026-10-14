@@ -27,6 +27,10 @@ this repository), each under its own licence:
 | Library | Licence |
 |---|---|
 | pyspnego | MIT |
+| gssapi (python-gssapi; macOS only) | ISC |
+| decorator (used by gssapi) | BSD-2-Clause |
+| krb5 (pykrb5; macOS only) | MIT |
+| truststore | MIT |
 | keyring (with jaraco.classes, jaraco.context, jaraco.functools, more-itertools) | MIT |
 | cryptography | Apache-2.0 or BSD-3-Clause |
 | cffi | MIT-0 |

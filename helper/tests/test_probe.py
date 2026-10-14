@@ -56,7 +56,7 @@ def test_unknown_host_and_bad_server_text():
     assert probe.run("no-such-host.invalid", "CORP\\dana", "x", lines.append) is False
     assert "could not be found" in "\n".join(lines)
     lines.clear()
-    assert probe.run("https://bi/olap", "CORP\\dana", "x", lines.append) is False
+    assert probe.run("powerbi://bi/olap", "CORP\\dana", "x", lines.append) is False
     assert "NOT VALID" in "\n".join(lines)
 
 

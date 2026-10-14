@@ -87,6 +87,11 @@ def main(argv: list[str] | None = None) -> int:
 
     probe_parser = sub.add_parser("probe", help="test the connection to your server")
     probe_parser.add_argument("--verbose", action="store_true", help="also print protocol step sizes")
+    probe_parser.add_argument(
+        "--sign-in",
+        choices=["ntlm", "kerberos", "basic"],
+        help="how to sign in (asked for when not given): ntlm, kerberos, or basic (https only)",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "serve":
@@ -95,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         return _setup(args.dir, args.renew_cert)
     from . import probe
 
-    return probe.main(verbose=args.verbose)
+    return probe.main(verbose=args.verbose, sign_in=args.sign_in)
 
 
 if __name__ == "__main__":

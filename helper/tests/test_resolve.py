@@ -90,3 +90,54 @@ def test_malformed_host_names_are_rejected_up_front(text):
     with pytest.raises(CubeError) as info:
         resolve.parse_server(text)
     assert info.value.category == "bad-request"
+
+
+# -- web addresses (msmdpump.dll) ----------------------------------------------------
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("https://bi.corp.local/olap/msmdpump.dll", ("https", "bi.corp.local", 443, "/olap/msmdpump.dll")),
+        ("  HTTP://BI:8080/olap/msmdpump.dll  ", ("http", "bi", 8080, "/olap/msmdpump.dll")),
+        ("https://10.1.2.3/olap/msmdpump.dll?x=1", ("https", "10.1.2.3", 443, "/olap/msmdpump.dll?x=1")),
+        ("https://[fd00::5]:8443/pump", ("https", "fd00::5", 8443, "/pump")),
+        ("http://bi", ("http", "bi", 80, "/")),
+    ],
+)
+def test_web_addresses_become_http_targets(text, expected):
+    target = resolve.parse_target(text)
+    assert isinstance(target, resolve.HttpTarget)
+    assert (target.scheme, target.host, target.port, target.path) == expected
+
+
+def test_a_web_address_reads_back_as_typed():
+    assert resolve.parse_target("https://bi.corp.local/olap/msmdpump.dll").url == "https://bi.corp.local/olap/msmdpump.dll"
+    assert resolve.parse_target("http://bi:8080/p").url == "http://bi:8080/p"
+    assert resolve.parse_target("https://[fd00::5]/p").url == "https://[fd00::5]/p"
+    assert resolve.parse_target("https://bi/p").secure and not resolve.parse_target("http://bi/p").secure
+
+
+def test_server_names_still_become_tcp_targets():
+    assert resolve.parse_target("bi-server\\TAB") == resolve.Target("bi-server", None, "TAB")
+    assert resolve.parse_target("bi-server:2384") == resolve.Target("bi-server", 2384, None)
+
+
+@pytest.mark.parametrize(
+    "text, fragment",
+    [
+        ("powerbi://api.powerbi.com/v1.0/myorg/Sales", "web address"),
+        ("asazure://westeurope.asazure.windows.net/x", "web address"),
+        ("https://dana:secret@bi/olap/msmdpump.dll", "own boxes"),
+        ("https://bi:99999/olap", "port"),
+        ("https://bi:0/olap", "port"),
+        ("https:///olap/msmdpump.dll", "not valid"),
+        ("https://bi corp/olap", "spaces"),
+        ("https://bi/olap#x", "#"),
+        ("https://bi..corp/olap", "not valid"),
+    ],
+)
+def test_bad_web_addresses_are_explained(text, fragment):
+    with pytest.raises(CubeError) as info:
+        resolve.parse_target(text)
+    assert info.value.category == "bad-request"
+    assert fragment in info.value.message
+    assert "secret" not in info.value.message

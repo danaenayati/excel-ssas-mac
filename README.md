@@ -110,8 +110,9 @@ the same way Windows Excel does, with your Windows (domain) user name and passwo
 - **Microsoft Excel for Mac**, version 16, kept up to date (Microsoft 365 or a
   perpetual licence; add-ins are allowed by default).
 - Your company's **SSAS server name**, as you would type it in Windows Excel
-  (`server`, `server:port` or `server\instance`), and your **Windows user name and
-  password** (`DOMAIN\user`).
+  (`server`, `server:port` or `server\instance`, or a web address such as
+  `https://server/olap/msmdpump.dll`), and your **Windows user name and password**
+  (`DOMAIN\user`).
 - Access to that server: the office network or the company **VPN**, the same as on
   Windows.
 - An internet connection **once**, while installing.
@@ -122,7 +123,7 @@ needs and keeps it in its own folder:
 | Part | What it is for | Where it comes from |
 |---|---|---|
 | Python 3.12 | runs the helper | downloaded by uv into the Cube Explorer folder |
-| pyspnego, keyring, cryptography (and their small dependencies) | Windows sign-in (NTLM), storing your password in the Keychain, the local certificate | installed by uv from PyPI into the helper's private environment |
+| pyspnego, gssapi, krb5, keyring, cryptography, truststore (and their small dependencies) | Windows sign-in (NTLM, and Kerberos through the Mac's own Kerberos), storing your password in the Keychain, the local certificate, checking `https://` servers against the certificates your Mac trusts | installed by uv from PyPI into the helper's private environment (ready-made, nothing is compiled) |
 | [uv](https://github.com/astral-sh/uv) 0.12.5 | installs Python and those libraries | your Mac's own copy if you have one, otherwise downloaded and checked against its published SHA-256 |
 | [Node.js](https://nodejs.org) 24 LTS | builds the Excel panel (React, TypeScript, Vite) | your Mac's own copy if it is recent enough, otherwise downloaded and checked against its published SHA-256 |
 
@@ -189,8 +190,10 @@ needs no server or VPN, so you can see how everything works.
 
 **Then add your company's server.** Connect the VPN, then either:
 
-- In the panel: **Add connection**, then fill in the server, your `DOMAIN\user` and
-  your password. Or
+- In the panel: **Add connection**, then fill in the server, choose how to sign in
+  (**User name and password (NTLM)** suits most servers; **Windows Authentication
+  (Kerberos)** is for servers that accept only Kerberos; **Basic** appears for
+  `https://` addresses set up for it), and enter your `DOMAIN\user` and password. Or
 - In Terminal, run the checker, which tests each step and says exactly where it stops
   if something is wrong, then offers to save the connection:
   ```bash
@@ -283,7 +286,8 @@ delete the `~/CubeExplorer` folder, and quit and reopen Excel to clear the butto
 | Cube Explorer is not in the **Add-ins** list | Quit Excel completely (Cmd+Q), reopen it, then **Home > Add-ins** again. |
 | "Can't reach the server" | Connect the VPN. Run `~/CubeExplorer/cube-probe` to see which step fails. |
 | "The server refused the sign-in" | Check the user name is `DOMAIN\user` and the password is current. |
-| Sign-in fails although the password is right | Your server may accept only Kerberos. That is not supported yet; see below. |
+| Sign-in fails although the password is right | Your server may accept only Kerberos: add the connection again with **Windows Authentication (Kerberos)**. Kerberos needs the server's name (not its IP address) and the company network or VPN. |
+| "This Mac does not trust the server's certificate" | Ask IT to install the company's root certificate on the Mac; it is then trusted here as in Safari. |
 | "Couldn't find the port of instance …" | Ask a Windows colleague for the port and enter the server as `name:port`. |
 | "This view would return … cells" | Add a filter or remove a field. The limit protects Excel from freezing. |
 | Nothing appears after ticking fields | Select an empty cell outside other reports; on a new sheet the report starts at the selected cell. |
@@ -318,8 +322,10 @@ on Windows greys out Group for cube PivotTables).
   go into the formula itself (Convert to Formulas does this for you). They read
   `CUBE.VALUE` rather than `CUBEVALUE`, because add-in functions always carry a name
   prefix.
-- Sign-in is NTLM with your user name and password. Kerberos-only servers and
-  connections over HTTP (`msmdpump.dll`) are not supported yet.
+- Windows signs in as whoever is logged in to the PC. On a Mac you give the user name
+  and password once, and the connection signs in with NTLM, or with Kerberos (using a
+  Kerberos ticket the Mac already has, or one got with that password). Connections to
+  a web address (`msmdpump.dll`) can also use Basic over `https://`.
 - PivotTables your colleagues built on Windows do not refresh on a Mac; build the
   report again here once.
 
@@ -344,15 +350,17 @@ on Windows greys out Group for cube PivotTables).
 ```
 addin/    The Excel panel: an Office.js task-pane add-in (React, TypeScript, Vite),
           plus the custom functions behind CUBE.*
-helper/   A local Python service: SSAS's native TCP protocol with NTLM sign-in,
-          MDX generation, and a small HTTPS API for the panel
+helper/   A local Python service: SSAS's native TCP protocol and XMLA over HTTP(S),
+          NTLM, Kerberos and Basic sign-in, MDX generation, and a small HTTPS API
+          for the panel
 docs/     Design notes and images
 ```
 
 - The panel builds a layout; the helper turns it into MDX, sends it to SSAS over its
-  native binary protocol ([MS-SSAS], the same one ADOMD.NET uses on Windows), and turns
-  the answer into a grid the panel writes into the sheet. The JSON contract between the
-  two is `addin/src/types.ts`.
+  native binary protocol ([MS-SSAS], the same one ADOMD.NET uses on Windows), or for a
+  web address as SOAP over HTTP(S) to `msmdpump.dll`, and turns the answer into a grid
+  the panel writes into the sheet. The JSON contract between the two is
+  `addin/src/types.ts`.
 - Tests: `cd helper && uv run pytest` and `cd addin && npm test`.
 - `npm run build` builds the panel, then the cube functions (`addin/src/functions/`)
   into `dist/functions.js`, `functions.html` and `functions.json`, which Excel runs in
@@ -362,8 +370,9 @@ docs/     Design notes and images
 - The undocumented parts of the SSAS wire protocol come from the
   [ssas-xmla-tcp](https://github.com/oluies/ssas-xmla-tcp) project (Apache-2.0); see
   `THIRD_PARTY_NOTICES.md`.
-- Known gaps: Kerberos, HTTP connections, named-instance lookup on port 2382 is
-  untested against a real server.
+- Untested against a real server so far: Kerberos (over TCP and HTTP), connections to
+  `msmdpump.dll`, and the named-instance lookup on port 2382. The tests cover them
+  against stand-in servers.
 
 ---
 

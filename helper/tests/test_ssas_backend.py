@@ -293,7 +293,7 @@ def test_wrong_password_surfaces_as_auth(ntlm_users):
 
 def test_bad_server_text_is_rejected_before_any_network_use():
     with pytest.raises(CubeError) as info:
-        SsasBackend("https://bi/olap/msmdpump.dll", "CORP\\dana", "x")
+        SsasBackend("powerbi://api.powerbi.com/v1.0/myorg/Sales", "CORP\\dana", "x")
     assert info.value.category == "bad-request"
 
 

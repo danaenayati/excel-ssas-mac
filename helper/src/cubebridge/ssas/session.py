@@ -1,11 +1,12 @@
 """An authenticated conversation with one Analysis Services instance.
 
-Sequence: connect, authenticate (NTLM tokens carried in Authenticate SOAP messages,
-in the clear), then sealed Discover and Execute requests.
+Sequence: connect, authenticate (NTLM or Kerberos tokens carried in Authenticate SOAP
+messages, in the clear), then sealed Discover and Execute requests.
 
 A session is used by one request at a time (the lock), except `abort`, which another
-thread calls to cancel. After any transport failure the session is closed: the NTLM
-key stream is continuous, so a half-read message cannot be recovered from.
+thread calls to cancel. After any transport failure the session is closed: the
+security context's key stream is continuous, so a half-read message cannot be
+recovered from.
 
 Handshake logic derived from oluies/ssas-xmla-tcp (Apache-2.0); see THIRD_PARTY_NOTICES.md.
 """
@@ -19,7 +20,7 @@ from collections.abc import Callable, Mapping
 
 from ..errors import CubeError, IncompleteMessage, ProtocolError
 from ..pivot.model import CellSet
-from . import dime, envelopes, sealing, xmla
+from . import auth, dime, envelopes, sealing, xmla
 from .transport import MessageReader, SocketChannel, send_message
 
 log = logging.getLogger("cubebridge.ssas")
@@ -29,15 +30,18 @@ MAX_HANDSHAKE_ROUNDS = 10
 
 
 def ntlm_context(username: str, password: str, host: str):
-    import spnego
+    return auth.ntlm_context(username, password, host, SERVICE_CLASS)
 
-    return spnego.client(
-        username=username,
-        password=password,
-        hostname=host,
-        service=SERVICE_CLASS,
-        protocol="ntlm",
-    )
+
+def kerberos_factory(instance: str | None) -> Callable:
+    """Kerberos for the TCP binding: the service's name is MSOLAPSvc.3/host[:instance]."""
+
+    def make(username: str, password: str, host: str):
+        from . import kerberos
+
+        return kerberos.client_context(username, password, host, service=SERVICE_CLASS, instance=instance)
+
+    return make
 
 
 class Session:
@@ -51,21 +55,30 @@ class Session:
         connect_timeout: float = 15.0,
         io_timeout: float = 60.0,
         query_timeout: float = 1800.0,
-        context_factory: Callable = ntlm_context,
+        sign_in: str = auth.DEFAULT_SIGN_IN,
+        instance: str | None = None,
+        context_factory: Callable | None = None,
     ) -> None:
+        if sign_in not in ("ntlm", "kerberos"):
+            raise CubeError("bad-request", f"{auth.LABELS.get(sign_in, sign_in)} is not available for a server name.")
         self.host = host
         self.port = port
+        self.sign_in = sign_in
         self._username = username
         self._password = password
         self._connect_timeout = connect_timeout
         self._io_timeout = io_timeout
         self._query_timeout = query_timeout
+        if context_factory is None:
+            context_factory = kerberos_factory(instance) if sign_in == "kerberos" else ntlm_context
         self._context_factory = context_factory
         self._lock = threading.Lock()
         self._channel: SocketChannel | None = None
         self._reader: MessageReader | None = None
         self._context = None
         self._session_id: str | None = None
+        # How the last sign-in went, in words (for the probe); never a secret.
+        self.sign_in_note = ""
 
     def __repr__(self) -> str:  # never include credentials
         return f"<Session {self.host}:{self.port} open={self.is_open}>"
@@ -178,22 +191,34 @@ class Session:
             return parsed
 
     # -- authentication ----------------------------------------------------------
-    def _authenticate(self, channel: SocketChannel, reader: MessageReader):
+    def _new_context(self):
         try:
-            context = self._context_factory(self._username, self._password, self.host)
+            return self._context_factory(self._username, self._password, self.host)
+        except CubeError:
+            raise  # already a sentence for the user (Kerberos says what went wrong)
         except Exception as exc:
             raise CubeError(
                 "auth-mechanism",
                 "Password sign-in could not be started on this Mac.",
                 type(exc).__name__,
             ) from exc
+
+    def _authenticate(self, channel: SocketChannel, reader: MessageReader):
+        kerberos = self.sign_in == "kerberos"
+        context = self._new_context()
         for name in ("wrap_winrm", "unwrap_winrm"):
             if not callable(getattr(context, name, None)):
                 raise CubeError("auth-mechanism", "The sign-in method cannot protect messages.", name)
+        choice = getattr(context, "cube_choice", None)
+        if choice is not None:
+            how = "ticket already on this Mac" if choice.credential == "ticket" else "ticket got with the password"
+            self.sign_in_note = f"Kerberos, {how} ({choice.service})"
+        else:
+            self.sign_in_note = "Kerberos" if kerberos else "NTLM"
 
         in_token: bytes | None = None
         sent_any = False
-        log.debug("connected to port %d; starting sign-in", self.port)
+        log.debug("connected to port %d; starting sign-in (%s)", self.port, self.sign_in)
         for round_number in range(1, MAX_HANDSHAKE_ROUNDS + 1):
             try:
                 out_token = context.step(in_token)
@@ -201,7 +226,10 @@ class Session:
                 # The exception text can carry the account and domain: do not pass it on.
                 raise CubeError(
                     "auth",
-                    "The sign-in could not be completed. Check the username (DOMAIN\\user) and password.",
+                    "The server's Kerberos answer could not be verified. Ask IT to check the "
+                    "server's Kerberos name (SPN), or choose \"User name and password (NTLM)\"."
+                    if kerberos
+                    else "The sign-in could not be completed. Check the username (DOMAIN\\user) and password.",
                     type(exc).__name__,
                 ) from exc
             if not out_token:
@@ -222,7 +250,10 @@ class Session:
                 if exc.category == "unreachable" and sent_any:
                     raise CubeError(
                         "auth",
-                        "The server ended the sign-in. This usually means a wrong username or "
+                        "The server ended the sign-in. It may not accept Kerberos from this Mac; "
+                        "choose \"User name and password (NTLM)\" to check."
+                        if kerberos
+                        else "The server ended the sign-in. This usually means a wrong username or "
                         "password, or a server that does not accept password (NTLM) sign-in.",
                         exc.detail,
                     ) from exc
@@ -232,7 +263,17 @@ class Session:
             # Every reply is fault-checked, including the last one: for NTLM the client
             # side is complete as soon as it sends its final token, so a "Logon failure"
             # in the reply would otherwise be missed.
-            parsed = xmla.parse(reply, during_auth=True)
+            try:
+                parsed = xmla.parse(reply, during_auth=True)
+            except CubeError as exc:
+                if kerberos and exc.category == "auth":
+                    raise CubeError(
+                        "auth",
+                        "The server refused the Kerberos sign-in. Its Kerberos name (SPN) may not "
+                        "match its service account; ask IT, or choose \"User name and password (NTLM)\".",
+                        exc.detail,
+                    ) from exc
+                raise
             if context.complete:
                 log.debug("sign-in complete after %d round(s)", round_number)
                 return context

@@ -4,6 +4,11 @@ Metadata comes from the standard MDSCHEMA rowsets; member lists and pivot result
 come from MDX. One session is kept open and reused. If the server has dropped it
 (idle timeout, VPN reconnect), the request is retried once on a fresh connection.
 
+The server as typed decides the transport: a server name uses the TCP binding
+(ssas/session.py), an http(s):// address of msmdpump.dll uses XMLA over HTTP
+(ssas/http_session.py). Both sessions have the same interface, and both sign in the
+way the connection says (ssas/auth.py).
+
 Cancelling is aimed at queries only. It shuts the shared connection down, so a
 metadata request that happened to be on it is quietly repeated, while the query
 reports "cancelled". A cancel that arrives when no query is running does nothing.
@@ -11,6 +16,7 @@ reports "cancelled". A cancel that arrives when no query is running does nothing
 
 from __future__ import annotations
 
+import functools
 import threading
 from collections.abc import Callable
 
@@ -20,7 +26,8 @@ from ..pivot import mdx
 from ..pivot.grid import clean_value
 from ..pivot.model import CellSet, Layout
 from ..pivot.names import validate_unique_name
-from ..ssas import resolve, xmla
+from ..ssas import auth, resolve, xmla
+from ..ssas.http_session import HttpSession
 from ..ssas.session import Session
 from .base import plain_column_names
 
@@ -166,12 +173,22 @@ class SsasBackend:
         username: str,
         password: str,
         *,
-        session_factory: Callable[..., Session] = Session,
+        sign_in: str = auth.DEFAULT_SIGN_IN,
+        session_factory: Callable[..., Session | HttpSession] | None = None,
         lookup: Callable[[str, str], int] | None = None,
     ) -> None:
-        self._target = resolve.parse_server(server)
+        """`session_factory` makes a session: called (host, port, username, password) for
+        a server name, (HttpTarget, username, password) for a web address."""
+        self._target = resolve.parse_target(server)
+        self._sign_in = auth.read_sign_in(sign_in)
+        auth.check_allowed(self._sign_in, self._target)
         self._username = username
         self._password = password
+        if session_factory is None:
+            if isinstance(self._target, resolve.HttpTarget):
+                session_factory = functools.partial(HttpSession, sign_in=self._sign_in)
+            else:
+                session_factory = functools.partial(Session, sign_in=self._sign_in, instance=self._target.instance)
         self._session_factory = session_factory
         self._lookup = lookup
         self._endpoint: tuple[str, int] | None = None
@@ -188,21 +205,32 @@ class SsasBackend:
         self._measure_formats: dict[tuple[str, str], dict[str, str]] = {}
 
     # -- connection --------------------------------------------------------------
-    def _open_session(self) -> tuple[Session, bool]:
+    @property
+    def sign_in_note(self) -> str:
+        """How the open session signed in, in words; "" before the first sign-in."""
+        session = self._session
+        return getattr(session, "sign_in_note", "") if session is not None else ""
+
+    def _new_session(self) -> Session | HttpSession:
+        if isinstance(self._target, resolve.HttpTarget):
+            return self._session_factory(self._target, self._username, self._password)
+        if self._endpoint is None:
+            self._endpoint = resolve.endpoint(self._target, self._lookup)
+        return self._session_factory(self._endpoint[0], self._endpoint[1], self._username, self._password)
+
+    def _open_session(self) -> tuple[Session | HttpSession, bool]:
         """Return a usable session and whether it had to be opened just now."""
         with self._lock:
             if self._closed:
                 raise CubeError("unreachable", "This connection has been removed.")
             if self._session is not None and self._session.is_open:
                 return self._session, False
-            if self._endpoint is None:
-                self._endpoint = resolve.endpoint(self._target, self._lookup)
-            session = self._session_factory(self._endpoint[0], self._endpoint[1], self._username, self._password)
+            session = self._new_session()
             self._pending = session
             try:
                 session.open()
             except CubeError as exc:
-                if exc.category == "unreachable" and self._target.instance:
+                if exc.category == "unreachable" and getattr(self._target, "instance", None):
                     # A named instance gets a new port when the service restarts.
                     self._endpoint = None
                 raise
@@ -263,6 +291,11 @@ class SsasBackend:
             if r.get("CATALOG_NAME")
         ]
         return sorted(found, key=lambda c: c["name"].lower())
+
+    def server_version(self) -> str:
+        """The server's DBMSVersion ("16.0.43.211"), or "" when it does not say."""
+        rows = self._call(lambda s: s.discover("DISCOVER_PROPERTIES", {"PropertyName": "DBMSVersion"}))
+        return next((r.get("Value", "") for r in rows if r.get("PropertyName") == "DBMSVersion"), "")
 
     def cubes(self, catalog: str) -> list[dict]:
         rows = self._call(lambda s: s.discover("MDSCHEMA_CUBES", {"CATALOG_NAME": catalog}, catalog))

@@ -212,7 +212,9 @@ def test_adding_a_connection_tests_it_first_and_keeps_the_password_out_of_respon
     new = {"name": "BI", "server": "bi-server", "username": "CORP\\dana", "password": "pw-123"}
     status, created = call(app, "POST", "/api/connections", new)
     assert status == 200
-    assert created == {"id": created["id"], "name": "BI", "kind": "ssas", "server": "bi-server", "username": "CORP\\dana"}
+    assert created == {
+        "id": created["id"], "name": "BI", "kind": "ssas", "server": "bi-server", "username": "CORP\\dana", "signIn": "ntlm",
+    }
     assert FakeBackend.instances[0].args == ("bi-server", "CORP\\dana", "pw-123")
     assert app.store.password(created["id"]) == "pw-123"
     assert "pw-123" not in json.dumps(call(app, "GET", "/api/connections")[1])

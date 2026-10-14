@@ -9,9 +9,12 @@ description = "Local helper that connects Excel for Mac to SQL Server Analysis S
 license = "GPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
-  "pyspnego>=0.10",
+  "pyspnego>=0.12,<0.13",
   "keyring>=24",
   "cryptography>=42",
+  "gssapi>=1.9 ; sys_platform == 'darwin'",
+  "krb5>=0.7 ; sys_platform == 'darwin'",
+  "truststore>=0.10",
 ]
 
 [dependency-groups]

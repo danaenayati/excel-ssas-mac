@@ -57,6 +57,7 @@ from .errors import CubeError
 from .pivot.grid import DEFAULT_CELL_LIMIT, build_grid
 from .pivot.model import Layout
 from .pivot.names import validate_unique_name
+from .ssas import auth, resolve
 from .store import DEMO_ID, Store
 
 log = logging.getLogger("cubebridge")
@@ -319,6 +320,13 @@ class App:
         return False
 
     # -- backends ----------------------------------------------------------------
+    def _make_backend(self, server: str, username: str, password: str, sign_in: str):
+        # NTLM is passed as no argument at all, so a backend factory written before
+        # sign-in kinds existed (three arguments) keeps working for it.
+        if sign_in == auth.DEFAULT_SIGN_IN:
+            return self._backend_factory(server, username, password)
+        return self._backend_factory(server, username, password, sign_in=sign_in)
+
     def _backend(self, connection_id: str):
         with self._lock:
             backend = self._backends.get(connection_id)
@@ -328,8 +336,11 @@ class App:
                 backend = DemoBackend()
             else:
                 connection = self.store.get(connection_id)
-                backend = self._backend_factory(
-                    connection["server"], connection["username"], self.store.password(connection_id)
+                backend = self._make_backend(
+                    connection["server"],
+                    connection["username"],
+                    self.store.password(connection_id),
+                    auth.read_sign_in(connection.get("signIn")),
                 )
             self._backends[connection_id] = backend
             return backend
@@ -357,13 +368,16 @@ class App:
         username = _text(body, "username").strip()
         password = _text(body, "password", limit=1024)
         name = _text(body, "name", required=False)
-        backend = self._backend_factory(server, username, password)
+        sign_in = auth.read_sign_in(body.get("signIn"))
+        # Before anything is sent: Basic only goes to an https:// address.
+        auth.check_allowed(sign_in, resolve.parse_target(server))
+        backend = self._make_backend(server, username, password, sign_in)
         try:
             backend.catalogs()  # proves the server is reachable and the sign-in works
         except BaseException:
             backend.close()
             raise
-        connection = self.store.add(name=name, server=server, username=username, password=password)
+        connection = self.store.add(name=name, server=server, username=username, password=password, sign_in=sign_in)
         with self._lock:
             self._backends[connection["id"]] = backend
         return connection

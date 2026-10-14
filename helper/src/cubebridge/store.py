@@ -1,7 +1,8 @@
 """Saved connections and the install token.
 
-`config.json` holds the token and each connection's server and username. Passwords
-are never written there: they go to the macOS Keychain through `keyring`.
+`config.json` holds the token and each connection's server, username and sign-in
+kind ("signIn"; connections saved before it existed have none and sign in with NTLM).
+Passwords are never written there: they go to the macOS Keychain through `keyring`.
 """
 
 from __future__ import annotations
@@ -22,10 +23,18 @@ from .errors import CubeError
 APP_NAME = "CubeBridge"
 DEMO_ID = "demo"
 DEMO_CONNECTION = {"id": DEMO_ID, "name": "Sample cube", "kind": "demo", "server": "(built in)", "username": ""}
+DEFAULT_SIGN_IN = "ntlm"  # also what a connection saved before sign-in kinds existed uses
 
 
 def default_directory() -> Path:
     return Path.home() / "Library" / "Application Support" / APP_NAME
+
+
+def _with_sign_in(connection: dict) -> dict:
+    found = dict(connection)
+    if found.get("kind") == "ssas" and not found.get("signIn"):
+        found["signIn"] = DEFAULT_SIGN_IN
+    return found
 
 
 class Secrets(Protocol):
@@ -146,7 +155,7 @@ class Store:
 
     def connections(self) -> list[dict]:
         with self._locked() as data:
-            return [dict(DEMO_CONNECTION)] + [dict(c) for c in data["connections"]]
+            return [dict(DEMO_CONNECTION)] + [_with_sign_in(c) for c in data["connections"]]
 
     def get(self, connection_id: str) -> dict:
         for connection in self.connections():
@@ -154,13 +163,14 @@ class Store:
                 return connection
         raise CubeError("not-found", "That connection no longer exists on this Mac.")
 
-    def add(self, *, name: str, server: str, username: str, password: str) -> dict:
+    def add(self, *, name: str, server: str, username: str, password: str, sign_in: str = DEFAULT_SIGN_IN) -> dict:
         connection = {
             "id": uuid.uuid4().hex[:12],
             "name": name.strip() or server,
             "kind": "ssas",
             "server": server,
             "username": username,
+            "signIn": sign_in,
         }
         with self._locked() as data:
             self._secrets.set(connection["id"], password)

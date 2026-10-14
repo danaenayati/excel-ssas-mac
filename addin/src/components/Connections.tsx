@@ -4,6 +4,7 @@
 import { useState } from "react";
 import type { Api } from "../api";
 import { toUiError, type UiError } from "../state/runner";
+import { signInTag } from "../state/signIn";
 import type { Connection } from "../types";
 import { cx } from "../util";
 import { ConnectionForm } from "./ConnectionForm";
@@ -21,9 +22,9 @@ interface Props {
   onBack?: () => void;
 }
 
-function describe(connection: Connection): string {
+export function describe(connection: Connection): string {
   if (connection.kind === "demo") return "Built-in sample data. No server needed.";
-  return connection.username ? `${connection.server} · ${connection.username}` : connection.server;
+  return [connection.server, connection.username, signInTag(connection.signIn)].filter(Boolean).join(" · ");
 }
 
 export function Connections({ api, connections, activeId, onChoose, onChanged, onBack }: Props) {
