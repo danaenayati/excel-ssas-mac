@@ -63,13 +63,24 @@ You can also add a connection from the panel itself with **Add connection**.
    to include.
 3. The result is written into the sheet where your cursor was. The cube calculates
    every number, including totals, so they match what Windows Excel shows.
-4. **Filter from the table:** click any cell that shows a small ▾ (a page filter's
-   value, a row field's name or a column field's name). A checklist opens in the
-   panel; tick the items you want and press **Apply**.
+4. **Sort and filter from the table:** click any cell that shows a small ▾ (a page
+   filter's value, a row field's name or a column field's name). For a row or column
+   field the panel shows the same choices as the Windows dropdown: Sort A to Z / Z to
+   A / by a measure, **Label Filters**, **Value Filters** (including **Top 10…**),
+   the item checklist, and **Clear Filter**. A filtered field shows ▼ instead of ▾.
+   Totals count only the items that are shown, as in Excel on Windows.
+   A page filter offers the checklist only.
 5. Click a row or column label, then **Expand** or **Collapse** in the panel to drill.
-6. **Refresh** updates the numbers. The view is saved inside the workbook, so you can
-   reopen the file later and refresh it.
-7. **New report here** starts another report at the selected cell. If a report's sheet
+6. **Value fields:** the menu on a Values chip has **Show Values As** (% of grand,
+   column or row total) and **Number Format**, which is kept on every refresh.
+7. **Show Details:** select a number in the table and press **Show Details** in the
+   panel. The rows behind it go to a new sheet (first 1,000 rows), like double-clicking
+   a number on Windows. As on Windows, this is refused when a field is filtered to
+   several items.
+8. **Refresh** updates the numbers. The view is saved inside the workbook, so you can
+   reopen the file later and refresh it. To do that automatically, tick
+   **Refresh when the workbook opens** in the report's **⋯** menu.
+9. **New report here** starts another report at the selected cell. If a report's sheet
    was deleted, select a cell and press **Place here** to put it back, fields included.
 
 Your password is kept in the Mac's Keychain. It is never written into a workbook.
@@ -81,6 +92,10 @@ Your password is kept in the Mac's Keychain. It is never written into a workbook
 - PivotTables that colleagues built on Windows against the cube still do not refresh
   on Mac.
 - It is read-only. It cannot change anything in the cube.
+- A Top 10 or value filter on an inner row field picks the top items overall, not
+  separately inside each outer item as Windows does.
+- Not yet: other "Show Values As" kinds (running total, rank, difference from),
+  grouping, calculated items, and adding the same measure twice from the field list.
 - You need the VPN or office network, the same as on Windows.
 - A colleague opening your workbook on their Mac needs their own install and
   connection. On Windows the numbers are plain cells.
