@@ -3,7 +3,11 @@
 // skip a re-query.
 
 import type {
+  CalculatedMeasure,
+  CustomItem,
+  DateFilter,
   FieldSort,
+  KpiPart,
   LabelFilter,
   Layout,
   LayoutOptions,
@@ -38,9 +42,40 @@ export interface HierarchyInput {
   allMember: string | null;
 }
 
+export interface KpiInput {
+  name: string;
+  caption: string;
+  /** The KPI's value measure. */
+  measure: string;
+}
+
+/** A named set that can be placed: its items come from one hierarchy. */
+export interface SetInput {
+  uniqueName: string;
+  caption: string;
+  hierarchy: string;
+  allMember: string | null;
+}
+
+/** Excel's words for a KPI's parts, as its field list shows them. */
+export const KPI_PART_LABELS: Record<KpiPart, string> = {
+  value: "Value",
+  goal: "Goal",
+  status: "Status",
+  trend: "Trend",
+};
+
 export type LayoutAction =
   /** Tick a measure: goes to Values. No-op when already there. */
   | { type: "addMeasure"; measure: MeasureInput; index?: number }
+  /** Tick a KPI's Value, Goal, Status or Trend: goes to Values. No-op when already there. */
+  | { type: "addKpi"; kpi: KpiInput; part: KpiPart; index?: number }
+  /** Another copy of a value field, right after it, to be shown another way. */
+  | { type: "duplicateValue"; key: string }
+  /** Untick a measure in the field list: every plain copy of it leaves Values, as in Excel. */
+  | { type: "removeMeasure"; measure: string }
+  /** Tick a named set: goes to Rows unless an area is given. No-op when its field is placed. */
+  | { type: "addSet"; set: SetInput; area?: "rows" | "columns"; index?: number }
   /** Tick a hierarchy: goes to Rows unless an area is given. If it is already placed
    *  and an area is given, it is moved there (keeping its drill state and filter). */
   | { type: "addHierarchy"; hierarchy: HierarchyInput; area?: FieldArea; index?: number }
@@ -67,11 +102,22 @@ export type LayoutAction =
   | { type: "setSort"; hierarchy: string; sort: FieldSort | null }
   | { type: "setLabelFilter"; hierarchy: string; filter: LabelFilter | null }
   | { type: "setValueFilter"; hierarchy: string; filter: ValueFilter | null }
+  /** Excel's Date Filters. A date filter and a label filter replace each other, as in Excel. */
+  | { type: "setDateFilter"; hierarchy: string; filter: DateFilter | null }
+  /** A field's groups and calculated items, all at once. */
+  | { type: "setCustomItems"; hierarchy: string; items: CustomItem[] }
+  /** Add a calculated measure, or replace the one called `previousName` (a rename keeps its uses). */
+  | { type: "setCalculatedMeasure"; measure: CalculatedMeasure; previousName?: string }
+  /** Delete a calculated measure, with its value fields, and the sorts and filters that use it. */
+  | { type: "removeCalculatedMeasure"; name: string }
   /** "Clear Filter From <field>": items, label filter and value filter. Not the sort. */
   | { type: "clearFilters"; hierarchy: string }
-  /** Show Values As, with the base field and item the kind needs (others are dropped). */
+  /**
+   * Show Values As, with the base field and item the kind needs (others are dropped).
+   * `measure` is the value field's key (`valueKey`), which is its measure for the first copy.
+   */
   | { type: "setShowAs"; measure: string; showAs: ShowValuesAs; baseField?: string | null; baseItem?: string | null }
-  /** A value field's number format; null for the cube's own. */
+  /** A value field's number format; null for the cube's own. `measure` is the field's key. */
   | { type: "setNumberFormat"; measure: string; format: string | null }
   | { type: "replace"; layout: Layout };
 
@@ -137,9 +183,45 @@ export function filterValueText(field: PlacedField): string {
   return "(Multiple Items)";
 }
 
-/** Any of the three ways to narrow a field is in use: items, label filter, value filter. */
+/** Any of the ways to narrow a field is in use: items, label, date or value filter. */
 export function isFiltered(field: PlacedField): boolean {
-  return field.members.length > 0 || Boolean(field.labelFilter) || Boolean(field.valueFilter);
+  return (
+    field.members.length > 0 || Boolean(field.labelFilter) || Boolean(field.valueFilter) || Boolean(field.dateFilter)
+  );
+}
+
+/**
+ * How a value field is told apart from the others in Values: its measure for the first
+ * plain copy (so older reports keep their names), "<measure>#2" and so on for further
+ * copies, and "kpi:<name>:<part>" for a KPI's part.
+ */
+export function valueKey(values: readonly ValueField[], index: number): string {
+  const value = values[index];
+  if (value.kpi) return `kpi:${value.kpi.name}:${value.kpi.part}`;
+  let earlier = 0;
+  for (let i = 0; i < index; i++) {
+    if (!values[i].kpi && values[i].measure === value.measure) earlier++;
+  }
+  return earlier === 0 ? value.measure : `${value.measure}#${earlier + 1}`;
+}
+
+export function valueIndex(values: readonly ValueField[], key: string): number {
+  for (let i = 0; i < values.length; i++) if (valueKey(values, i) === key) return i;
+  return -1;
+}
+
+/**
+ * The header Excel shows for each value field, as the helper names it: a second plain
+ * copy of a measure reads "<caption> 2". Used for the chips in Values.
+ */
+export function valueLabels(values: readonly ValueField[]): string[] {
+  const seen = new Map<string, number>();
+  return values.map((value) => {
+    if (value.kpi || (value.showAs ?? "normal") !== "normal") return value.caption;
+    const n = (seen.get(value.measure) ?? 0) + 1;
+    seen.set(value.measure, n);
+    return n === 1 ? value.caption : `${value.caption} ${n}`;
+  });
 }
 
 /** The same selection for a chip: "All", "2025", "3 selected". */
@@ -152,13 +234,13 @@ export interface Placement {
   index: number;
 }
 
-/** Where a measure or hierarchy currently sits, or null when it is not placed. */
+/** Where a hierarchy or value field (by its `valueKey`) sits, or null when it is not placed. */
 export function locate(layout: Layout, name: string): Placement | null {
   for (const area of FIELD_AREAS) {
     const index = layout[area].findIndex((f) => f.hierarchy === name);
     if (index >= 0) return { area, index };
   }
-  const index = layout.values.findIndex((v) => v.measure === name);
+  const index = valueIndex(layout.values, name);
   return index >= 0 ? { area: "values", index } : null;
 }
 
@@ -216,8 +298,8 @@ function withOptional<T extends object, K extends keyof T>(item: T, key: K, valu
   return next;
 }
 
-function updateValue(layout: Layout, measure: string, change: (field: ValueField) => ValueField): Layout {
-  const index = layout.values.findIndex((v) => v.measure === measure);
+function updateValue(layout: Layout, key: string, change: (field: ValueField) => ValueField): Layout {
+  const index = valueIndex(layout.values, key);
   if (index < 0) return layout;
   const before = layout.values[index];
   const after = change(before);
@@ -244,6 +326,7 @@ function moveTo(layout: Layout, name: string, area: Area, index: number | undefi
   const from = place.area;
   const to = area as FieldArea;
   const item: PlacedField = layout[from][place.index];
+  if (item.set && to === "filters") return layout; // a named set cannot be a page filter
   const without = removeAt(layout[from], place.index);
   if (from === to) {
     const at = clampIndex(index, without.length);
@@ -279,13 +362,71 @@ export function layoutReducer(layout: Layout, action: LayoutAction): Layout {
 function applyAction(layout: Layout, action: LayoutAction): Layout {
   switch (action.type) {
     case "addMeasure": {
-      if (locate(layout, action.measure.uniqueName)) return layout;
+      if (valueIndex(layout.values, action.measure.uniqueName) >= 0) return layout;
       const value: ValueField = {
         measure: action.measure.uniqueName,
         caption: action.measure.caption,
       };
       return { ...layout, values: insertAt(layout.values, value, action.index) };
     }
+
+    case "addKpi": {
+      const key = `kpi:${action.kpi.name}:${action.part}`;
+      if (valueIndex(layout.values, key) >= 0) return layout;
+      const value: ValueField = {
+        measure: action.kpi.measure,
+        caption: `${action.kpi.caption} ${KPI_PART_LABELS[action.part]}`,
+        kpi: { name: action.kpi.name, part: action.part },
+      };
+      return { ...layout, values: insertAt(layout.values, value, action.index) };
+    }
+
+    case "duplicateValue": {
+      const index = valueIndex(layout.values, action.key);
+      if (index < 0 || layout.values[index].kpi) return layout;
+      const { measure, caption } = layout.values[index];
+      return { ...layout, values: insertAt(layout.values, { measure, caption }, index + 1) };
+    }
+
+    case "removeMeasure": {
+      const values = layout.values.filter((v) => v.kpi || v.measure !== action.measure);
+      return values.length === layout.values.length ? layout : { ...layout, values };
+    }
+
+    case "addSet": {
+      if (locate(layout, action.set.hierarchy)) return layout;
+      const area = action.area ?? "rows";
+      const field: PlacedField = {
+        hierarchy: action.set.hierarchy,
+        caption: action.set.caption,
+        allMember: action.set.allMember,
+        expanded: [],
+        members: [],
+        memberCaptions: [],
+        set: action.set.uniqueName,
+      };
+      return { ...layout, [area]: insertAt(layout[area], field, action.index) };
+    }
+
+    case "setDateFilter":
+      return updateField(layout, action.hierarchy, (field) => {
+        if (sameJson(field.dateFilter, action.filter)) return field;
+        const next = withOptional(field, "dateFilter", action.filter);
+        return action.filter ? withOptional(next, "labelFilter", null) : next;
+      });
+
+    case "setCustomItems":
+      return updateField(layout, action.hierarchy, (field) =>
+        sameJson(field.customItems ?? [], action.items)
+          ? field
+          : withOptional(field, "customItems", action.items.length > 0 ? action.items : null),
+      );
+
+    case "setCalculatedMeasure":
+      return setCalculatedMeasure(layout, action.measure, action.previousName);
+
+    case "removeCalculatedMeasure":
+      return removeCalculatedMeasure(layout, action.name);
 
     case "addHierarchy": {
       const name = action.hierarchy.uniqueName;
@@ -392,11 +533,11 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
       );
 
     case "setLabelFilter":
-      return updateField(layout, action.hierarchy, (field) =>
-        sameJson(field.labelFilter, action.filter)
-          ? field
-          : withOptional(field, "labelFilter", action.filter),
-      );
+      return updateField(layout, action.hierarchy, (field) => {
+        if (sameJson(field.labelFilter, action.filter)) return field;
+        const next = withOptional(field, "labelFilter", action.filter);
+        return action.filter ? withOptional(next, "dateFilter", null) : next;
+      });
 
     case "setValueFilter":
       return updateField(layout, action.hierarchy, (field) =>
@@ -408,7 +549,8 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
     case "clearFilters":
       return updateField(layout, action.hierarchy, (field) => {
         if (!isFiltered(field)) return field;
-        const cleared = withOptional(withOptional(field, "labelFilter", null), "valueFilter", null);
+        let cleared = withOptional(withOptional(field, "labelFilter", null), "valueFilter", null);
+        cleared = withOptional(cleared, "dateFilter", null);
         return { ...cleared, members: [], memberCaptions: [] };
       });
 
@@ -438,4 +580,61 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
     case "replace":
       return action.layout;
   }
+}
+
+/** The unique name of a calculated measure: "[Measures].[name]". */
+export function calculatedMeasureName(name: string): string {
+  return `[Measures].[${name.replace(/\]/g, "]]")}]`;
+}
+
+/** Every field's sort and value filter, with `rename` applied to the measures they use. */
+function mapMeasureUses(layout: Layout, rename: (measure: string) => string | null): Layout {
+  const fix = (field: PlacedField): PlacedField => {
+    let next = field;
+    if (field.sort && field.sort.by === "measure" && field.sort.measure) {
+      const to = rename(field.sort.measure);
+      if (to !== field.sort.measure) next = withOptional(next, "sort", to === null ? null : { ...field.sort, measure: to });
+    }
+    if (field.valueFilter) {
+      const to = rename(field.valueFilter.measure);
+      if (to !== field.valueFilter.measure) {
+        next = withOptional(next, "valueFilter", to === null ? null : { ...field.valueFilter, measure: to });
+      }
+    }
+    return next;
+  };
+  return { ...layout, rows: layout.rows.map(fix), columns: layout.columns.map(fix), filters: layout.filters.map(fix) };
+}
+
+function setCalculatedMeasure(layout: Layout, measure: CalculatedMeasure, previousName?: string): Layout {
+  const list = layout.calculatedMeasures ?? [];
+  const at = list.findIndex((m) => m.name === (previousName ?? measure.name));
+  if (at >= 0 && sameJson(list[at], measure)) return layout;
+  const next = list.slice();
+  if (at >= 0) next[at] = measure;
+  else next.push(measure);
+  let out: Layout = { ...layout, calculatedMeasures: next };
+  if (previousName !== undefined && previousName !== measure.name) {
+    const from = calculatedMeasureName(previousName);
+    const to = calculatedMeasureName(measure.name);
+    out = {
+      ...mapMeasureUses(out, (m) => (m === from ? to : m)),
+      values: out.values.map((v) => (v.measure === from ? { ...v, measure: to, caption: measure.name } : v)),
+    };
+  }
+  return out;
+}
+
+function removeCalculatedMeasure(layout: Layout, name: string): Layout {
+  const list = layout.calculatedMeasures ?? [];
+  if (!list.some((m) => m.name === name)) return layout;
+  const gone = calculatedMeasureName(name);
+  const rest = list.filter((m) => m.name !== name);
+  const out: Layout = {
+    ...mapMeasureUses(layout, (m) => (m === gone ? null : m)),
+    values: layout.values.filter((v) => v.measure !== gone),
+  };
+  if (rest.length > 0) out.calculatedMeasures = rest;
+  else delete out.calculatedMeasures;
+  return out;
 }

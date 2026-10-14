@@ -187,7 +187,11 @@ describe("reading a stored definition", () => {
         ],
         columns: [],
         filters: [],
-        values: [{ measure: "[Measures].[X]", caption: "[Measures].[X]" }],
+        // A second copy of a measure is kept: it can be shown another way.
+        values: [
+          { measure: "[Measures].[X]", caption: "[Measures].[X]" },
+          { measure: "[Measures].[X]", caption: "[Measures].[X]" },
+        ],
         options: { grandTotals: true, subtotals: true, nonEmpty: true },
       },
     });
@@ -354,7 +358,7 @@ describe("reading sorts, filters, show-as and formats back", () => {
     expect(def.layout.rows[0].valueFilter).toEqual({ operator: "bottom", measure: "[M]", value: 3, topBy: "items" });
   });
 
-  it("keeps the same measure twice when it is shown two ways, but not an exact repeat", () => {
+  it("keeps every copy of a measure, however it is shown", () => {
     const def = parseReportDef(
       JSON.stringify({
         id: "abc",
@@ -370,6 +374,60 @@ describe("reading sorts, filters, show-as and formats back", () => {
     expect(def.layout.values).toEqual([
       { measure: "[M]", caption: "M" },
       { measure: "[M]", caption: "M", showAs: "percentOfGrandTotal" },
+      { measure: "[M]", caption: "M" },
+    ]);
+  });
+
+  it("reads date filters, groups, calculated items, sets, KPI parts and calculated measures back", () => {
+    const def = parseReportDef(
+      JSON.stringify({
+        id: "abc",
+        layout: {
+          rows: [
+            {
+              hierarchy: "[D].[Day]",
+              dateFilter: { operator: "between", value: "2026-01-01", value2: "2026-01-31" },
+              customItems: [
+                { name: "Pair", members: ["[D].[Day].&[1]", "[D].[Day].&[2]"] },
+                { name: "Gap", formula: "[D].[Day].&[1] - [D].[Day].&[2]" },
+                { name: "pair", formula: "1" },
+                { name: "Lonely", members: ["[D].[Day].&[3]"] },
+                { name: "Both", members: ["a", "b"], formula: "1" },
+              ],
+            },
+            { hierarchy: "[G].[City]", set: "[Top Cities]", members: ["x"], sort: { by: "caption", order: "asc" } },
+          ],
+          columns: [{ hierarchy: "[S].[Type]", dateFilter: { operator: "between", value: "2026-01-01" } }],
+          values: [
+            { measure: "[Measures].[Sales]", caption: "Sales Status", kpi: { name: "Sales", part: "status" } },
+            { measure: "[Measures].[Sales]", caption: "Again", kpi: { name: "Sales", part: "status" } },
+            { measure: "[Measures].[Sales]", caption: "Odd", kpi: { name: "Sales", part: "forecast" } },
+          ],
+          calculatedMeasures: [
+            { name: "Fare", formula: "[Measures].[R] / [Measures].[N]", formatString: "#,##0.00" },
+            { name: "fare", formula: "1" },
+            { name: "Empty", formula: "" },
+          ],
+        },
+      }),
+    )!;
+    const [day, city] = def.layout.rows;
+    expect(day.dateFilter).toEqual({ operator: "between", value: "2026-01-01", value2: "2026-01-31" });
+    expect(day.customItems).toEqual([
+      { name: "Pair", members: ["[D].[Day].&[1]", "[D].[Day].&[2]"] },
+      { name: "Gap", formula: "[D].[Day].&[1] - [D].[Day].&[2]" },
+    ]);
+    expect(city).toEqual({
+      hierarchy: "[G].[City]", caption: "[G].[City]", allMember: null, expanded: [], members: [], memberCaptions: [],
+      set: "[Top Cities]",
+    });
+    expect(def.layout.columns[0].dateFilter).toBeUndefined();
+    expect(def.layout.values).toEqual([
+      { measure: "[Measures].[Sales]", caption: "Sales Status", kpi: { name: "Sales", part: "status" } },
+      { measure: "[Measures].[Sales]", caption: "Odd" },
+    ]);
+    expect(def.layout.calculatedMeasures).toEqual([
+      { name: "Fare", formula: "[Measures].[R] / [Measures].[N]", formatString: "#,##0.00" },
     ]);
   });
 });

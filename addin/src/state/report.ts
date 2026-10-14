@@ -4,7 +4,12 @@
 
 import type { CellAddress, Extent, ReportDef, SheetSelection } from "../sheet/host";
 import type {
+  CalculatedMeasure,
+  CustomItem,
+  DateFilter,
+  DateOperator,
   FieldSort,
+  KpiPart,
   LabelFilter,
   LabelOperator,
   Layout,
@@ -272,6 +277,17 @@ const SHOW_AS: readonly ShowValuesAs[] = [
   "index",
 ];
 const TWO_BOUNDS = ["between", "notBetween"];
+const DATE_OPERATORS: readonly DateOperator[] = [
+  "equals", "before", "after", "between", "tomorrow", "today", "yesterday",
+  "nextWeek", "thisWeek", "lastWeek", "nextMonth", "thisMonth", "lastMonth",
+  "nextQuarter", "thisQuarter", "lastQuarter", "nextYear", "thisYear", "lastYear", "yearToDate",
+  "quarter1", "quarter2", "quarter3", "quarter4",
+  "month1", "month2", "month3", "month4", "month5", "month6",
+  "month7", "month8", "month9", "month10", "month11", "month12",
+];
+const KPI_PARTS: readonly KpiPart[] = ["value", "goal", "status", "trend"];
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_NAME = 100;
 
 function isOneOf<T extends string>(list: readonly T[], value: unknown): value is T {
   return typeof value === "string" && (list as readonly string[]).indexOf(value) >= 0;
@@ -314,6 +330,53 @@ function parseValueFilter(value: unknown): ValueFilter | null {
   return out;
 }
 
+function parseDateFilter(value: unknown): DateFilter | null {
+  if (!isRecord(value) || !isOneOf(DATE_OPERATORS, value.operator)) return null;
+  const needsDate = ["equals", "before", "after", "between"].indexOf(value.operator) >= 0;
+  if (!needsDate) return { operator: value.operator };
+  const date = (v: unknown) => (typeof v === "string" && ISO_DATE.test(v) ? v : null);
+  const first = date(value.value);
+  if (!first) return null;
+  if (value.operator !== "between") return { operator: value.operator, value: first };
+  const second = date(value.value2);
+  return second ? { operator: "between", value: first, value2: second } : null;
+}
+
+function newName(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" && value.length <= MAX_NAME ? value.trim() : null;
+}
+
+function parseCustomItems(value: unknown): CustomItem[] {
+  if (!Array.isArray(value)) return [];
+  const out: CustomItem[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const name = newName(item.name);
+    if (!name || out.some((o) => o.name.toLowerCase() === name.toLowerCase())) continue;
+    const members = strings(item.members);
+    if (members.length >= 2 && !item.formula) out.push({ name, members });
+    else if (typeof item.formula === "string" && item.formula.trim() !== "" && members.length === 0) {
+      out.push({ name, formula: item.formula });
+    }
+  }
+  return out;
+}
+
+function parseCalculatedMeasures(value: unknown): CalculatedMeasure[] {
+  if (!Array.isArray(value)) return [];
+  const out: CalculatedMeasure[] = [];
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const name = newName(item.name);
+    if (!name || typeof item.formula !== "string" || item.formula.trim() === "") continue;
+    if (out.some((o) => o.name.toLowerCase() === name.toLowerCase())) continue;
+    const measure: CalculatedMeasure = { name, formula: item.formula };
+    if (typeof item.formatString === "string" && item.formatString !== "") measure.formatString = item.formatString;
+    out.push(measure);
+  }
+  return out;
+}
+
 function placedFields(value: unknown): PlacedField[] {
   if (!Array.isArray(value)) return [];
   const out: PlacedField[] = [];
@@ -336,6 +399,16 @@ function placedFields(value: unknown): PlacedField[] {
     if (labelFilter) field.labelFilter = labelFilter;
     const valueFilter = parseValueFilter(item.valueFilter);
     if (valueFilter) field.valueFilter = valueFilter;
+    const dateFilter = parseDateFilter(item.dateFilter);
+    if (dateFilter && !field.labelFilter) field.dateFilter = dateFilter;
+    const customItems = parseCustomItems(item.customItems);
+    if (customItems.length > 0) field.customItems = customItems;
+    if (typeof item.set === "string" && item.set !== "") {
+      // A set's items are its own: nothing else about the field applies.
+      out.push({ hierarchy: field.hierarchy, caption: field.caption, allMember: field.allMember,
+        expanded: [], members: [], memberCaptions: [], set: item.set });
+      continue;
+    }
     out.push(field);
   }
   return out;
@@ -350,6 +423,12 @@ function valueFields(value: unknown): ValueField[] {
       measure: item.measure,
       caption: typeof item.caption === "string" ? item.caption : item.measure,
     };
+    if (isRecord(item.kpi) && typeof item.kpi.name === "string" && item.kpi.name !== "" && isOneOf(KPI_PARTS, item.kpi.part)) {
+      if (out.some((o) => o.kpi && o.kpi.name === (item.kpi as { name: string }).name && o.kpi.part === (item.kpi as { part: string }).part)) continue;
+      field.kpi = { name: item.kpi.name, part: item.kpi.part };
+      out.push(field);
+      continue; // a KPI's part is shown as it is
+    }
     if (isOneOf(SHOW_AS, item.showAs) && item.showAs !== "normal") {
       // A kind whose base is missing cannot be shown as asked: it reads as No Calculation.
       const baseField = typeof item.baseField === "string" && item.baseField !== "" ? item.baseField : null;
@@ -384,20 +463,19 @@ export function parseLayout(value: unknown): Layout {
   const columns = unique(placedFields(value.columns));
   const filters = unique(placedFields(value.filters));
 
-  // The same measure may be in Values twice, shown two ways (plain and as a percent).
-  const shown = new Set<string>();
-  const values = valueFields(value.values).filter((v) => {
-    const key = [v.measure, v.showAs ?? "normal", v.baseField ?? "", v.baseItem ?? ""].join("\u0001");
-    return shown.has(key) ? false : (shown.add(key), true);
-  });
+  // The same measure may be in Values any number of times, each copy shown its own way.
+  const values = valueFields(value.values);
+  const calculatedMeasures = parseCalculatedMeasures(value.calculatedMeasures);
 
-  return {
+  const layout: Layout = {
     rows,
     columns,
     values,
     filters,
     options: parsedOptions(options, flag),
   };
+  if (calculatedMeasures.length > 0) layout.calculatedMeasures = calculatedMeasures;
+  return layout;
 }
 
 function parsedOptions(
