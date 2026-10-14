@@ -17,10 +17,12 @@ import type {
 import {
   DEFAULT_OPTIONS,
   MAX_EMPTY_CELL_TEXT,
+  REPORT_FORMS,
   emptyLayout,
   layoutReducer,
   needsBaseField,
   needsBaseItem,
+  newLayout,
   type LayoutAction,
 } from "./layout";
 
@@ -66,7 +68,7 @@ export function newReportId(random: () => number = Math.random): string {
 }
 
 export function newReportDef(connectionId: string, catalog = "", cube = ""): ReportDef {
-  return { id: newReportId(), connectionId, catalog, cube, layout: emptyLayout() };
+  return { id: newReportId(), connectionId, catalog, cube, layout: newLayout() };
 }
 
 export function currentReducer(state: Current | null, action: CurrentAction): Current | null {
@@ -105,7 +107,7 @@ export function currentReducer(state: Current | null, action: CurrentAction): Cu
       if (state.def.catalog === action.catalog) return state;
       return {
         ...state,
-        def: { ...state.def, catalog: action.catalog, cube: "", layout: emptyLayout() },
+        def: { ...state.def, catalog: action.catalog, cube: "", layout: newLayout() },
         revision: state.revision + 1,
         urgent: false,
       };
@@ -113,7 +115,7 @@ export function currentReducer(state: Current | null, action: CurrentAction): Cu
       if (state.def.cube === action.cube) return state;
       return {
         ...state,
-        def: { ...state.def, cube: action.cube, layout: emptyLayout() },
+        def: { ...state.def, cube: action.cube, layout: newLayout() },
         revision: state.revision + 1,
         urgent: false,
       };
@@ -412,6 +414,9 @@ function parsedOptions(
   // Optional settings are kept only when they are what they claim to be.
   if (typeof options.grandTotalRow === "boolean") out.grandTotalRow = options.grandTotalRow;
   if (typeof options.grandTotalColumn === "boolean") out.grandTotalColumn = options.grandTotalColumn;
+  // A definition without a form is from before compact and outline: tabular, as it was.
+  if (isOneOf(REPORT_FORMS, options.form)) out.form = options.form;
+  if (options.subtotalsAt === "top" || options.subtotalsAt === "bottom") out.subtotalsAt = options.subtotalsAt;
   if (options.repeatLabels === true) out.repeatLabels = true;
   if (typeof options.emptyCellText === "string" && options.emptyCellText !== "") {
     out.emptyCellText = options.emptyCellText.slice(0, MAX_EMPTY_CELL_TEXT);
