@@ -15,36 +15,50 @@ const HELPER = "https://localhost:47613";
 // modules, and the helper puts the install token into that one file when serving it.
 const FUNCTIONS_DIR = "src/functions/";
 
-function functionsFiles(): Plugin {
+// `vite build --mode commands` (the third part) builds the right-click commands the same
+// way: dist/commands.js, a classic script with a fixed name, loaded by commands.html (the
+// manifest's FunctionFile), and message.html, the small page that shows what a command
+// has to say. The helper puts the install token into commands.html, as into every page.
+const COMMANDS_DIR = "src/commands/";
+
+/** Copy files from `dir` into dist/ as they are. */
+function copiedFiles(dir: string, names: string[]): Plugin {
   return {
-    name: "cube-functions-files",
+    name: "cube-copied-files",
     generateBundle() {
-      for (const name of ["functions.html", "functions.json"]) {
-        const path = fileURLToPath(new URL(FUNCTIONS_DIR + name, import.meta.url));
+      for (const name of names) {
+        const path = fileURLToPath(new URL(dir + name, import.meta.url));
         this.emitFile({ type: "asset", fileName: name, source: readFileSync(path, "utf8") });
       }
     },
   };
 }
 
+/** One classic script, `<name>.js`, built from `dir/<name>.ts` next to the pane in dist/. */
+function scriptBuild(dir: string, name: string, global: string, files: string[]) {
+  return {
+    publicDir: false as const,
+    plugins: [copiedFiles(dir, files)],
+    build: {
+      target: "es2019",
+      outDir: "dist",
+      emptyOutDir: false, // the pane was built into dist/ just before
+      sourcemap: false,
+      lib: {
+        entry: fileURLToPath(new URL(dir + name + ".ts", import.meta.url)),
+        formats: ["iife" as const],
+        name: global,
+        fileName: () => name + ".js",
+      },
+    },
+  };
+}
+
 export default defineConfig(({ mode }) =>
   mode === "functions"
-    ? {
-        publicDir: false,
-        plugins: [functionsFiles()],
-        build: {
-          target: "es2019",
-          outDir: "dist",
-          emptyOutDir: false, // the pane was built into dist/ just before
-          sourcemap: false,
-          lib: {
-            entry: fileURLToPath(new URL(FUNCTIONS_DIR + "functions.ts", import.meta.url)),
-            formats: ["iife"],
-            name: "CubeExplorerFunctions",
-            fileName: () => "functions.js",
-          },
-        },
-      }
+    ? scriptBuild(FUNCTIONS_DIR, "functions", "CubeExplorerFunctions", ["functions.html", "functions.json"])
+    : mode === "commands"
+    ? scriptBuild(COMMANDS_DIR, "commands", "CubeExplorerCommands", ["commands.html", "message.html"])
     : {
         base: "./",
         plugins: [react()],

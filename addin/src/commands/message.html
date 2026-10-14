@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Cube Explorer</title>
+    <link rel="icon" href="data:," />
+    <!--
+      The short message a right-click command shows when it could not do its job, in an
+      Office dialog opened by commands.js. The text comes in the address (?text=) and is
+      only ever shown as text. OK, Return or Escape closes it; so does commands.js after a
+      few seconds.
+    -->
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --text: #1d1d1f;
+        --accent: #217346;
+        --accent-hover: #1a5c38;
+        --on-accent: #ffffff;
+        --focus: #3b82d6;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1d1d1e;
+          --text: #e9e9eb;
+          --accent-hover: #2b8a55;
+          --focus: #5aa2f0;
+        }
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+      }
+      body {
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 14px;
+        padding: 14px 18px;
+      }
+      p {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      button {
+        align-self: flex-end;
+        min-width: 72px;
+        height: 24px;
+        padding: 0 14px;
+        border: 1px solid var(--accent);
+        border-radius: 5px;
+        background: var(--accent);
+        color: var(--on-accent);
+        font: inherit;
+        font-weight: 500;
+      }
+      button:hover {
+        border-color: var(--accent-hover);
+        background: var(--accent-hover);
+      }
+      button:focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <p id="text" role="alert"></p>
+    <button id="ok" type="button">OK</button>
+    <script>
+      (function () {
+        var text = new URLSearchParams(window.location.search).get("text") || "";
+        document.getElementById("text").textContent = text;
+        var ok = document.getElementById("ok");
+        var close = function () {
+          try {
+            Office.context.ui.messageParent("close");
+          } catch (e) {
+            // Not in an Office dialog: nothing to close.
+          }
+        };
+        ok.addEventListener("click", close);
+        document.addEventListener("keydown", function (event) {
+          if (event.key === "Escape" || event.key === "Enter") close();
+        });
+        if (typeof Office !== "undefined" && typeof Office.onReady === "function") {
+          Office.onReady(function () {
+            ok.focus();
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

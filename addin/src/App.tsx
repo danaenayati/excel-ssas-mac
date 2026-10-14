@@ -17,6 +17,7 @@ import { CopyButton, Dialog, ErrorNote, Icon, Spinner } from "./components/commo
 import { CalculatedItemDialog, CalculatedMeasureDialog, GroupDialog } from "./components/CalculationDialogs";
 import { NumberFormatDialog } from "./components/NumberFormatDialog";
 import { ShowAsDialog } from "./components/ShowAsDialog";
+import { refreshEveryMenu, refreshEveryNote } from "./components/refreshEvery";
 import { conversionBlocker, convertReport, formulaConnection } from "./sheet/convert";
 import { rectA1 } from "./sheet/geometry";
 import {
@@ -28,7 +29,7 @@ import {
   type SheetHost,
   type SheetSelection,
 } from "./sheet/host";
-import { REFRESH_ON_OPEN } from "./sheet/host";
+import { REFRESH_MINUTES, REFRESH_ON_OPEN } from "./sheet/host";
 import { guessFieldCell, labelsCaption, type MemberHit } from "./sheet/layout";
 import { PreviewHost } from "./sheet/preview";
 import {
@@ -57,6 +58,10 @@ import {
   type UiError,
 } from "./state/runner";
 import { useCached, type Cache } from "./state/useCached";
+import { clockTime, excelWasBusy, normalizeMinutes, type AutoRefreshResult } from "./state/autoRefresh";
+import { useAutoRefresh } from "./state/useAutoRefresh";
+import { syncReports } from "./state/sync";
+import { useWorkbookSync } from "./state/useWorkbookSync";
 import type {
   CalculatedMeasure,
   Catalog,
@@ -197,6 +202,8 @@ export function App({ api, host, mock }: Props) {
   const [reportMenu, setReportMenu] = useState<HTMLElement | null>(null);
   const [generation, setGeneration] = useState(0);
   const [refreshOnOpen, setRefreshOnOpen] = useState(false);
+  /** "Refresh Every": the workbook's interval in minutes, 0 when off. */
+  const [refreshMinutes, setRefreshMinutes] = useState(0);
   /** Set at start-up when the workbook asks for a refresh on open; cleared once done. */
   const [openingRefresh, setOpeningRefresh] = useState(false);
   const [, setTick] = useState(0);
@@ -214,6 +221,8 @@ export function App({ api, host, mock }: Props) {
   const keepNote = useRef(false);
   /** The Show Details request in flight, so that Cancel can stop it. */
   const detailsFlight = useRef<{ abort: AbortController; connectionId: string } | null>(null);
+  /** When the pane last wrote a report definition (see useWorkbookSync). */
+  const lastOwnWrite = useRef(0);
 
   // -- runner ---------------------------------------------------------------
 
@@ -273,6 +282,7 @@ export function App({ api, host, mock }: Props) {
   /** Fold the result of a run into the pane's state. `single` runs report their own notes. */
   const applyOutcome = useCallback(
     (def: ReportDef, outcome: RunOutcome, single: boolean) => {
+      lastOwnWrite.current = Date.now();
       const isCurrent = () => {
         const cur = currentRef.current;
         return cur !== null && cur.def.id === def.id;
@@ -406,16 +416,19 @@ export function App({ api, host, mock }: Props) {
     const where: Record<string, Extent | null> = {};
     let active: SheetSelection | null = null;
     let refresh = false;
+    let minutes = 0;
     try {
       defs = await host.loadReports();
       for (const def of defs) where[def.id] = await host.getReportExtent(def.id);
       active = await host.getSelection();
       refresh = await host.getFlag(REFRESH_ON_OPEN);
+      minutes = normalizeMinutes(await host.getNumber(REFRESH_MINUTES));
     } catch {
       // The sheet cannot be read right now (a cell is being edited, say). The pane
       // still opens; reports show up at the next start.
     }
     setRefreshOnOpen(refresh);
+    setRefreshMinutes(minutes);
     setOpeningRefresh(refresh && defs.length > 0);
     setReports(defs);
     setLocations(where);
@@ -442,7 +455,7 @@ export function App({ api, host, mock }: Props) {
   }, [boot]);
 
   // "Refresh when the workbook opens": once, after start-up, like Refresh All.
-  const refreshAllRef = useRef<() => Promise<void>>(async () => undefined);
+  const refreshAllRef = useRef<() => Promise<unknown>>(async () => undefined);
   useEffect(() => {
     if (phase !== "ready" || !openingRefresh) return;
     setOpeningRefresh(false);
@@ -635,7 +648,10 @@ export function App({ api, host, mock }: Props) {
     if (!cur.persisted) return;
     const next = { ...cur.def, connectionId: id };
     host.saveReport(next).then(
-      () => setReports((list) => upsert(list, next)),
+      () => {
+        lastOwnWrite.current = Date.now();
+        setReports((list) => upsert(list, next));
+      },
       (failure) => setError(toUiError(failure)),
     );
   };
@@ -773,13 +789,19 @@ export function App({ api, host, mock }: Props) {
     }
   };
 
-  const refreshAll = async () => {
+  /**
+   * Refresh All. `auto` when "Refresh Every" runs it: the note then says when, and when
+   * Excel was busy it stops and answers "busy", so that the next tick tries again.
+   */
+  const refreshAll = async (auto = false): Promise<AutoRefreshResult> => {
     const cur = currentRef.current;
     const list = reportsRef.current.map((d) => (cur && cur.def.id === d.id ? cur.def : d));
+    const autoNote = () => `Refreshed automatically at ${clockTime(Date.now())}.`;
     if (list.length === 0) {
       // No reports, but there may be cube formulas (Convert to Formulas): ask them again.
-      if (await recalculateFormulas()) setNote("Cube formulas recalculated.");
-      return;
+      if (await recalculateFormulas()) setNote(auto ? autoNote() : "Cube formulas recalculated.");
+      autoRefresh.noteRefreshed();
+      return "done";
     }
     setError(null);
     setNote(null);
@@ -804,7 +826,7 @@ export function App({ api, host, mock }: Props) {
       applyOutcome(item, outcome, false);
       if (outcome.kind === "superseded") {
         busyPrefix.current = "";
-        return; // another run took over and owns the status line now
+        return "busy"; // another run took over and owns the status line now
       }
       if (cur && cur.def.id === item.id) setRan({ id: item.id, revision: cur.revision });
       if (outcome.kind === "cancelled") {
@@ -815,6 +837,12 @@ export function App({ api, host, mock }: Props) {
       else if (outcome.kind === "needs-anchor") lost++;
       else if (outcome.kind === "declined") skipped++;
       else if (outcome.kind === "error") {
+        if (auto && excelWasBusy(outcome.error)) {
+          // A cell is being edited: leave it, and try again at the next tick.
+          busyPrefix.current = "";
+          if (!runner.busy) setBusy(null);
+          return "busy";
+        }
         failed++;
         if (!firstError) firstError = outcome.error;
         if (outcome.error.helperDown) break; // the rest would fail the same way
@@ -824,16 +852,75 @@ export function App({ api, host, mock }: Props) {
     if (!runner.busy) setBusy(null);
     // As Windows' Refresh All does for cube formulas: they ask the cube again.
     if (!stopped) await recalculateFormulas();
-    const parts = [stopped ? `Cancelled after ${plural(done, "report", "reports")}.` : `${plural(done, "report", "reports")} refreshed.`];
+    const parts = [
+      stopped
+        ? `Cancelled after ${plural(done, "report", "reports")}.`
+        : auto
+          ? autoNote()
+          : `${plural(done, "report", "reports")} refreshed.`,
+    ];
     if (unbound > 0) parts.push(`${unbound} ${unbound === 1 ? "needs" : "need"} a connection.`);
     if (lost > 0) parts.push(`${lost} could not be found on a sheet.`);
     if (skipped > 0) parts.push(`${skipped} left as ${skipped === 1 ? "it was" : "they were"} to keep other cells.`);
     if (failed > 0) parts.push(`${failed} failed.`);
     setNote(parts.join(" "));
     if (firstError) setError(firstError);
+    autoRefresh.noteRefreshed();
+    return "done";
   };
 
   refreshAllRef.current = refreshAll;
+
+  // "Refresh Every": Refresh All when due, never while the pane is busy with something else.
+  const autoRefresh = useAutoRefresh({
+    active: phase === "ready",
+    minutes: refreshMinutes,
+    canRun: () =>
+      busy === null &&
+      question === null &&
+      picker === null &&
+      !dirty &&
+      detailsFlight.current === null &&
+      !runner.busy,
+    refresh: () => refreshAll(true),
+  });
+
+  // A right-click command (Expand, Collapse, ...) saved a definition from outside the
+  // pane: take it, so that the pane never writes its older copy back over it. The report
+  // being edited is reopened with it, unless the pane has a change of its own waiting.
+  useWorkbookSync({
+    host,
+    active: phase === "ready",
+    paneBusy: () => runner.busy,
+    lastOwnWrite: () => lastOwnWrite.current,
+    apply: (loaded) => {
+      const cur = currentRef.current;
+      const last = ranRef.current;
+      const pending =
+        runner.busy ||
+        (cur !== null && cur.revision > 0 && !(last !== null && last.id === cur.def.id && last.revision === cur.revision));
+      const result = syncReports({
+        loaded,
+        known: reportsRef.current,
+        current: cur && cur.persisted ? cur.def : null,
+        pending,
+      });
+      if (result.reports === reportsRef.current) return;
+      // Their cells were rewritten elsewhere: what the runner remembers no longer fits,
+      // and their size may have changed.
+      for (const id of result.changed) runner.forget(id);
+      if (result.changed.length > 0) {
+        void refreshLocations();
+        refreshSelection();
+      }
+      setReports(result.reports);
+      if (result.reopen) {
+        dispatch({ type: "open", def: result.reopen, persisted: true, anchor: cur ? cur.anchor : null });
+        setRan(null);
+      }
+      setTick((n) => n + 1);
+    },
+  });
 
   const askDeleteReport = async (target: ReportDef) => {
     let extent: Extent | null = null;
@@ -1099,6 +1186,17 @@ export function App({ api, host, mock }: Props) {
         );
       },
     });
+    items.push(
+      refreshEveryMenu(refreshMinutes, (minutes) => {
+        host.setNumber(REFRESH_MINUTES, minutes > 0 ? minutes : null).then(
+          () => {
+            setRefreshMinutes(minutes);
+            setNote(refreshEveryNote(minutes));
+          },
+          (failure) => setError(toUiError(failure)),
+        );
+      }),
+    );
     if (current && current.persisted) {
       const target = current.def;
       items.push("separator", {

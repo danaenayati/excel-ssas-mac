@@ -5,7 +5,7 @@
            xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
            xsi:type="TaskPaneApp">
   <Id>9dcc8fab-dcab-4acc-93d0-c5938eaa1342</Id>
-  <Version>1.1.0.0</Version>
+  <Version>1.2.0.0</Version>
   <ProviderName>CubeBridge</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Cube Explorer"/>
@@ -59,6 +59,12 @@
             <Description resid="GetStarted.Description"/>
             <LearnMoreUrl resid="GetStarted.LearnMoreUrl"/>
           </GetStarted>
+          <!--
+            The right-click commands run in commands.html, a page Excel loads unseen in a
+            runtime of its own (src/commands/). An Excel without context menus for add-ins
+            leaves the ContextMenu extension point out and loads everything else.
+          -->
+          <FunctionFile resid="Commands.Url"/>
           <ExtensionPoint xsi:type="PrimaryCommandSurface">
             <OfficeTab id="TabHome">
               <Group id="CubeBridge.Group">
@@ -87,6 +93,95 @@
               </Group>
             </OfficeTab>
           </ExtensionPoint>
+          <!-- Right-click on a cell: Cube Explorer > Show Details, Refresh, ... (Windows' words). -->
+          <ExtensionPoint xsi:type="ContextMenu">
+            <OfficeMenu id="ContextMenuCell">
+              <Control xsi:type="Menu" id="CubeBridge.CellMenu">
+                <Label resid="Button.Label"/>
+                <Supertip>
+                  <Title resid="Button.Label"/>
+                  <Description resid="CellMenu.Tooltip"/>
+                </Supertip>
+                <Icon>
+                  <bt:Image size="16" resid="Icon.16"/>
+                  <bt:Image size="32" resid="Icon.32"/>
+                  <bt:Image size="80" resid="Icon.80"/>
+                </Icon>
+                <Items>
+                <Item id="CubeBridge.Cell.ShowDetails">
+                  <Label resid="Cell.ShowDetails.Label"/>
+                  <Supertip>
+                    <Title resid="Cell.ShowDetails.Label"/>
+                    <Description resid="Cell.ShowDetails.Tooltip"/>
+                  </Supertip>
+                  <Action xsi:type="ExecuteFunction">
+                    <FunctionName>cubeShowDetails</FunctionName>
+                  </Action>
+                </Item>
+                <Item id="CubeBridge.Cell.Refresh">
+                  <Label resid="Cell.Refresh.Label"/>
+                  <Supertip>
+                    <Title resid="Cell.Refresh.Label"/>
+                    <Description resid="Cell.Refresh.Tooltip"/>
+                  </Supertip>
+                  <Action xsi:type="ExecuteFunction">
+                    <FunctionName>cubeRefresh</FunctionName>
+                  </Action>
+                </Item>
+                <Item id="CubeBridge.Cell.RefreshAll">
+                  <Label resid="Cell.RefreshAll.Label"/>
+                  <Supertip>
+                    <Title resid="Cell.RefreshAll.Label"/>
+                    <Description resid="Cell.RefreshAll.Tooltip"/>
+                  </Supertip>
+                  <Action xsi:type="ExecuteFunction">
+                    <FunctionName>cubeRefreshAll</FunctionName>
+                  </Action>
+                </Item>
+                <Item id="CubeBridge.Cell.Expand">
+                  <Label resid="Cell.Expand.Label"/>
+                  <Supertip>
+                    <Title resid="Cell.Expand.Label"/>
+                    <Description resid="Cell.Expand.Tooltip"/>
+                  </Supertip>
+                  <Action xsi:type="ExecuteFunction">
+                    <FunctionName>cubeExpand</FunctionName>
+                  </Action>
+                </Item>
+                <Item id="CubeBridge.Cell.Collapse">
+                  <Label resid="Cell.Collapse.Label"/>
+                  <Supertip>
+                    <Title resid="Cell.Collapse.Label"/>
+                    <Description resid="Cell.Collapse.Tooltip"/>
+                  </Supertip>
+                  <Action xsi:type="ExecuteFunction">
+                    <FunctionName>cubeCollapse</FunctionName>
+                  </Action>
+                </Item>
+                <Item id="CubeBridge.Cell.ExpandField">
+                  <Label resid="Cell.ExpandField.Label"/>
+                  <Supertip>
+                    <Title resid="Cell.ExpandField.Label"/>
+                    <Description resid="Cell.ExpandField.Tooltip"/>
+                  </Supertip>
+                  <Action xsi:type="ExecuteFunction">
+                    <FunctionName>cubeExpandField</FunctionName>
+                  </Action>
+                </Item>
+                <Item id="CubeBridge.Cell.CollapseField">
+                  <Label resid="Cell.CollapseField.Label"/>
+                  <Supertip>
+                    <Title resid="Cell.CollapseField.Label"/>
+                    <Description resid="Cell.CollapseField.Tooltip"/>
+                  </Supertip>
+                  <Action xsi:type="ExecuteFunction">
+                    <FunctionName>cubeCollapseField</FunctionName>
+                  </Action>
+                </Item>
+                </Items>
+              </Control>
+            </OfficeMenu>
+          </ExtensionPoint>
         </DesktopFormFactor>
       </Host>
     </Hosts>
@@ -102,16 +197,32 @@
         <bt:Url id="Functions.Script.Url" DefaultValue="https://localhost:47613/functions.js"/>
         <bt:Url id="Functions.Page.Url" DefaultValue="https://localhost:47613/functions.html"/>
         <bt:Url id="Functions.Metadata.Url" DefaultValue="https://localhost:47613/functions.json"/>
+        <bt:Url id="Commands.Url" DefaultValue="https://localhost:47613/commands.html"/>
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="Group.Label" DefaultValue="Cube"/>
         <bt:String id="Button.Label" DefaultValue="Cube Explorer"/>
         <bt:String id="GetStarted.Title" DefaultValue="Cube Explorer is ready"/>
         <bt:String id="Functions.Namespace" DefaultValue="CUBE"/>
+        <bt:String id="Cell.ShowDetails.Label" DefaultValue="Show Details"/>
+        <bt:String id="Cell.Refresh.Label" DefaultValue="Refresh"/>
+        <bt:String id="Cell.RefreshAll.Label" DefaultValue="Refresh All"/>
+        <bt:String id="Cell.Expand.Label" DefaultValue="Expand"/>
+        <bt:String id="Cell.Collapse.Label" DefaultValue="Collapse"/>
+        <bt:String id="Cell.ExpandField.Label" DefaultValue="Expand Entire Field"/>
+        <bt:String id="Cell.CollapseField.Label" DefaultValue="Collapse Entire Field"/>
       </bt:ShortStrings>
       <bt:LongStrings>
         <bt:String id="Button.Tooltip" DefaultValue="Open the panel to explore an Analysis Services cube and put the results in this sheet."/>
         <bt:String id="GetStarted.Description" DefaultValue="Click Cube Explorer on the Home tab to connect to a cube."/>
+        <bt:String id="CellMenu.Tooltip" DefaultValue="Show Details, Refresh, Expand and Collapse for the Cube Explorer report in this cell."/>
+        <bt:String id="Cell.ShowDetails.Tooltip" DefaultValue="Put the rows behind this number on a new sheet."/>
+        <bt:String id="Cell.Refresh.Tooltip" DefaultValue="Ask the cube again for this report."/>
+        <bt:String id="Cell.RefreshAll.Tooltip" DefaultValue="Ask the cube again for every report and cube formula in this workbook."/>
+        <bt:String id="Cell.Expand.Tooltip" DefaultValue="Show the items under this item."/>
+        <bt:String id="Cell.Collapse.Tooltip" DefaultValue="Hide the items under this item."/>
+        <bt:String id="Cell.ExpandField.Tooltip" DefaultValue="Show the next level under every item of this field."/>
+        <bt:String id="Cell.CollapseField.Tooltip" DefaultValue="Hide every level under the items of this field."/>
       </bt:LongStrings>
     </Resources>
   </VersionOverrides>

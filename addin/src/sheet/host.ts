@@ -112,6 +112,19 @@ export interface SheetHost {
   getFlag(key: string): Promise<boolean>;
   setFlag(key: string, on: boolean): Promise<void>;
 
+  /** A workbook setting that holds a number, such as `cube.refreshMinutes`. Null when absent. */
+  getNumber(key: string): Promise<number | null>;
+  /** Null removes the setting. */
+  setNumber(key: string, value: number | null): Promise<void>;
+
+  /**
+   * Calls `listener` (some time after) the workbook settings change: report definitions
+   * saved by the right-click commands, which run apart from the pane, as well as the
+   * pane's own saves. Optional: a host that cannot tell leaves it out. Returns the
+   * unsubscribe function.
+   */
+  onSettingsChanged?(listener: () => void): () => void;
+
   /**
    * Convert to Formulas: write formulas into the report's block. Both matrices are the
    * block's size as last written; null leaves a cell's formula or number format as it
@@ -127,6 +140,9 @@ export interface SheetHost {
 
 /** Workbook setting: refresh every report when the workbook is opened. */
 export const REFRESH_ON_OPEN = "cube.refreshOnOpen";
+
+/** Workbook setting: refresh every report this many minutes apart while the pane is open. */
+export const REFRESH_MINUTES = "cube.refreshMinutes";
 
 /** "Details", then "Details 2", "Details 3", … : the first name no sheet has (case aside). */
 export function detailsSheetName(existing: string[]): string {

@@ -116,6 +116,7 @@ export class PreviewHost implements SheetHost {
   private snapshotCache: PreviewSnapshot | null = null;
   private selectionListeners = new Set<(selection: SheetSelection) => void>();
   private clickListeners = new Set<(click: SheetClick) => void>();
+  private settingsListeners = new Set<() => void>();
   private viewers = new Set<() => void>();
 
   private readonly persist: boolean;
@@ -232,12 +233,14 @@ export class PreviewHost implements SheetHost {
   async saveReport(def: ReportDef): Promise<void> {
     this.settings.set(settingKey(def.id), serializeReportDef(def));
     this.changed();
+    this.settingsChanged();
   }
 
   async deleteReport(reportId: string): Promise<void> {
     this.settings.delete(settingKey(reportId));
     this.names.delete(reportId);
     this.changed();
+    this.settingsChanged();
   }
 
   async addDetailsSheet(columns: string[], rows: CellValue[][]): Promise<string> {
@@ -272,6 +275,28 @@ export class PreviewHost implements SheetHost {
     if (on) this.settings.set(name, "true");
     else this.settings.delete(name);
     this.changed();
+    this.settingsChanged();
+  }
+
+  async getNumber(name: string): Promise<number | null> {
+    const stored = this.settings.get(name);
+    const value = stored === undefined ? NaN : Number(stored);
+    return isFinite(value) ? value : null;
+  }
+
+  async setNumber(name: string, value: number | null): Promise<void> {
+    if (value === null) this.settings.delete(name);
+    else this.settings.set(name, String(value));
+    this.changed();
+    this.settingsChanged();
+  }
+
+  /** Like Excel's settings event: heard after the change, never during it. */
+  onSettingsChanged(listener: () => void): () => void {
+    this.settingsListeners.add(listener);
+    return () => {
+      this.settingsListeners.delete(listener);
+    };
   }
 
   async writeFormulas(reportId: string, formulas: (string | null)[][], numberFormats: (string | null)[][]): Promise<void> {
@@ -469,6 +494,13 @@ export class PreviewHost implements SheetHost {
       cell: { sheetId: sheet.id, sheetName: sheet.name, row, col },
       report: this.reportAt(sheet.id, row, col),
     };
+  }
+
+  private settingsChanged(): void {
+    if (this.settingsListeners.size === 0) return;
+    setTimeout(() => {
+      for (const listener of Array.from(this.settingsListeners)) listener();
+    }, 0);
   }
 
   private announceSelection(): void {

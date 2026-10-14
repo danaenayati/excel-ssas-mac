@@ -2,8 +2,8 @@
 // names, the selection, and `ExcelHost`, which ties these and writer.ts together
 // behind the `SheetHost` interface.
 //
-// Requirement sets: ExcelApi 1.4 for settings and names; 1.2 for
-// workbook.onSelectionChanged; guarded 1.7 for getActiveCell, worksheets.onActivated,
+// Requirement sets: ExcelApi 1.4 for settings and names (and, guarded, the settings
+// event); 1.2 for workbook.onSelectionChanged; guarded 1.7 for getActiveCell, worksheets.onActivated,
 // worksheets.onDeleted and worksheets.onAdded; guarded 1.10 for onSingleClicked.
 // Without click events nothing is lost but a shortcut: the pane offers the same
 // "Filter <field>…" action for the selected cell.
@@ -441,6 +441,55 @@ export class ExcelHost implements SheetHost {
       else context.workbook.settings.getItemOrNullObject(name).delete();
       await context.sync();
     });
+  }
+
+  getNumber(name: string): Promise<number | null> {
+    return runExcel(async (context) => {
+      const setting = context.workbook.settings.getItemOrNullObject(name);
+      setting.load("value");
+      await context.sync();
+      if (setting.isNullObject) return null;
+      const value = typeof setting.value === "string" ? Number(setting.value) : setting.value;
+      return typeof value === "number" && isFinite(value) ? value : null;
+    });
+  }
+
+  setNumber(name: string, value: number | null): Promise<void> {
+    return runExcel(async (context) => {
+      if (value === null) context.workbook.settings.getItemOrNullObject(name).delete();
+      else context.workbook.settings.add(name, value);
+      await context.sync();
+    });
+  }
+
+  /**
+   * ExcelApi 1.4's settings event, guarded. Without it the pane still re-reads the
+   * definitions when it gets the focus (useWorkbookSync).
+   */
+  onSettingsChanged(listener: () => void): () => void {
+    let disposed = false;
+    let stop: (() => void) | null = null;
+    if (supportsExcelApi("1.4")) {
+      const handlers: OfficeExtension.EventHandlerResult<unknown>[] = [];
+      Excel.run(async (context) => {
+        handlers.push(
+          context.workbook.settings.onSettingsChanged.add(async () => {
+            if (!disposed) listener();
+          }),
+        );
+        await context.sync();
+      }).then(
+        () => {
+          if (disposed) removeHandlers(handlers);
+          else stop = () => removeHandlers(handlers);
+        },
+        () => undefined,
+      );
+    }
+    return () => {
+      disposed = true;
+      if (stop) stop();
+    };
   }
 
   writeFormulas(reportId: string, formulas: (string | null)[][], numberFormats: (string | null)[][]): Promise<void> {

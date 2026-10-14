@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      The manifest's FunctionFile: Excel loads this page, unseen, in a runtime of its own
+      when a right-click command (Cube Explorer > Show Details, Refresh, ...) is chosen.
+      The helper replaces the placeholder with the install token when it serves this page,
+      as it does for index.html; commands.js reads it from here.
+    -->
+    <meta name="cube-token" content="__CUBE_TOKEN__" />
+    <title>Cube Explorer commands</title>
+    <!-- Office.js must come from Microsoft's CDN and must not be bundled. -->
+    <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <script src="commands.js"></script>
+  </head>
+  <body></body>
+</html>
