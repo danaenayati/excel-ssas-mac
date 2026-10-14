@@ -163,6 +163,11 @@ def test_subtotals_at_top_head_their_group_and_the_grand_total_stays_last():
     ) in text
 
 
+def test_subtotals_at_top_leave_column_subtotals_after_their_items():
+    text = query(columns=[field(CITY), field(SERVICE)], subtotals=True, subtotalsAt="top", form="compact")
+    assert "{{[Service].[Type].[All].Children}, {[Service].[Type].[All]}}" in text
+
+
 def test_subtotals_at_top_are_ignored_in_tabular_form():
     tabular = query(rows=[field(CITY), field(SERVICE)], subtotals=True, subtotalsAt="top", form="tabular")
     assert tabular == query(rows=[field(CITY), field(SERVICE)], subtotals=True)

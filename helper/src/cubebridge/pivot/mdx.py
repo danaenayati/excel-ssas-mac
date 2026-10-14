@@ -109,7 +109,8 @@ def build_query(
     options = layout.options
     at_top = options.subtotals_at_top
     if layout.columns:
-        columns = f"CrossJoin({_axis_set(layout.columns, options.grand_total_column, options.subtotals, at_top)}, {measures})"
+        # Excel's "at Top of Group" moves row subtotals only: column subtotals stay right of their items.
+        columns = f"CrossJoin({_axis_set(layout.columns, options.grand_total_column, options.subtotals)}, {measures})"
     else:
         columns = measures
     axes = [f"{non_empty}{columns} ON COLUMNS"]

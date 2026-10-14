@@ -267,7 +267,9 @@ class DemoBackend:
 
         options = layout.options
         row_tuples = (
-            self._axis_tuples(layout.rows, layout, facts, allowed, options.grand_total_row) if layout.rows else [()]
+            self._axis_tuples(layout.rows, layout, facts, allowed, options.grand_total_row, options.subtotals_at_top)
+            if layout.rows
+            else [()]
         )
         col_tuples = (
             self._axis_tuples(layout.columns, layout, facts, allowed, options.grand_total_column)
@@ -741,6 +743,7 @@ class DemoBackend:
         facts: list[dict],
         allowed: dict[str, set[tuple]],
         grand_total: bool,
+        at_top: bool = False,
     ) -> list[tuple[_Key, ...]]:
         alls = [(f.hierarchy, ()) for f in fields]
         by_value = [bool(f.sort and f.sort.by == "measure") for f in fields]
@@ -761,7 +764,7 @@ class DemoBackend:
             wanted = grand_total if depth == 0 else layout.options.subtotals
             if wanted:
                 # The grand total always ends the axis; subtotals may head their group.
-                if depth > 0 and layout.options.subtotals_at_top:
+                if depth > 0 and at_top:
                     body.insert(0, tuple(alls[depth:]))
                 else:
                     body.append(tuple(alls[depth:]))
