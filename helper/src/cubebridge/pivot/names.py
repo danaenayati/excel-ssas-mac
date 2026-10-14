@@ -48,3 +48,86 @@ def quote_identifier(name: str) -> str:
 def quote_string(text: str) -> str:
     """An MDX string literal."""
     return '"' + text.replace('"', '""') + '"'
+
+
+MAX_EXPRESSION = 2000
+# Words that start or shape a statement. An expression never needs them, and refusing
+# them keeps a formula from a shared workbook to one value inside the query it joins.
+_STATEMENT_WORDS = frozenset(
+    {
+        "select", "from", "where", "with", "drillthrough", "create", "drop", "alter", "update",
+        "call", "insert", "delete", "refresh", "clear", "scope", "freeze",
+    }
+)
+_CLOSING = {")": "(", "}": "{"}
+
+
+def validate_expression(text: object, what: str, max_length: int = MAX_EXPRESSION) -> str:
+    """An MDX value or set expression typed by the user (a calculated measure, a
+    calculated item, a set for a cube formula), made safe to place in a query.
+
+    Bracketed names and string literals are skipped over; outside them, brackets must
+    balance, and ';', comments and statement keywords are refused. The caller still
+    wraps the result in parentheses, so a valid expression cannot end the clause it is
+    placed in. Line breaks become spaces.
+    """
+    if not isinstance(text, str) or not text.strip():
+        raise CubeError("bad-request", f"{what} is empty.")
+    if len(text) > max_length:
+        raise CubeError("bad-request", f"{what} is longer than {max_length:,} characters.")
+    if any(ord(ch) < 0x20 and ch not in "\t\r\n" for ch in text):
+        raise CubeError("bad-request", f"{what} contains characters that are not allowed.")
+    flat = " ".join(text.split())
+
+    def refuse(reason: str) -> CubeError:
+        return CubeError("bad-request", f"{what} is not a formula Cube Explorer can use: {reason}.")
+
+    stack: list[str] = []
+    i, n = 0, len(flat)
+    while i < n:
+        ch = flat[i]
+        if ch == "[":
+            end = i + 1
+            while True:
+                end = flat.find("]", end)
+                if end < 0:
+                    raise refuse("a '[' is not closed")
+                if end + 1 < n and flat[end + 1] == "]":
+                    end += 2
+                    continue
+                break
+            i = end + 1
+            continue
+        if ch in "\"'":
+            end = i + 1
+            while True:
+                end = flat.find(ch, end)
+                if end < 0:
+                    raise refuse("a text in quotes is not closed")
+                if end + 1 < n and flat[end + 1] == ch:
+                    end += 2
+                    continue
+                break
+            i = end + 1
+            continue
+        if ch == ";":
+            raise refuse("';' is not allowed")
+        if flat.startswith(("--", "//", "/*"), i):
+            raise refuse("comments are not allowed")
+        if ch in "({":
+            stack.append(ch)
+        elif ch in ")}":
+            if not stack or stack.pop() != _CLOSING[ch]:
+                raise refuse(f"a '{ch}' has no matching opening bracket")
+        elif ch.isalpha() or ch == "_":
+            end = i
+            while end < n and (flat[end].isalnum() or flat[end] == "_"):
+                end += 1
+            if flat[i:end].lower() in _STATEMENT_WORDS:
+                raise refuse(f"'{flat[i:end]}' starts a statement, not a formula")
+            i = end
+            continue
+        i += 1
+    if stack:
+        raise refuse(f"a '{stack[-1]}' is not closed")
+    return flat
