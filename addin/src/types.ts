@@ -31,21 +31,37 @@ export interface Status {
   certDaysLeft: number | null;
 }
 
+/**
+ * How a connection signs in. "ntlm": user name and password (the default, and what
+ * connections made before this field existed use). "kerberos": Windows' Negotiate with a
+ * Kerberos ticket, got with the password when there is none yet. "basic": user name and
+ * password over HTTPS, for an HTTP connection (msmdpump.dll) set up that way.
+ */
+export type SignIn = "ntlm" | "kerberos" | "basic";
+
 export interface Connection {
   id: string;
   name: string;
   kind: "ssas" | "demo";
+  /** As typed: "host", "host:port", "host\\instance", or an http(s):// URL of msmdpump.dll. */
   server: string;
   username: string;
+  /** Absent: "ntlm". */
+  signIn?: SignIn;
 }
 
 export interface NewConnection {
   name?: string;
-  /** "host", "host:port" or "host\\instance", as typed in Windows Excel. */
+  /**
+   * "host", "host:port" or "host\\instance", as typed in Windows Excel, or the URL of an
+   * HTTP endpoint ("https://server/olap/msmdpump.dll"), as Windows Excel also accepts.
+   */
   server: string;
   /** "DOMAIN\\user" or "user@domain". */
   username: string;
   password: string;
+  /** Absent: "ntlm". "basic" only for an http(s) server. */
+  signIn?: SignIn;
 }
 
 export interface Catalog {
@@ -75,6 +91,20 @@ export interface Hierarchy {
   /** Unique name of the All member; null when the hierarchy has none. */
   allMember: string | null;
   /** The field's top-level items are dates, so Date Filters apply to it. */
+  isDate?: boolean;
+  /**
+   * A user hierarchy's levels below All, top down, so one level can be placed on its own
+   * (Windows: tick "Month" under "Calendar"). Absent for attribute hierarchies.
+   */
+  levels?: Level[];
+}
+
+export interface Level {
+  uniqueName: string;
+  caption: string;
+  /** LEVEL_NUMBER: 0 is the top (All, when there is one). */
+  number: number;
+  /** The level's items are dates: Date Filters apply when it is placed alone. */
   isDate?: boolean;
 }
 
@@ -114,6 +144,12 @@ export interface NamedSet {
   hierarchy: string | null;
   /** That hierarchy's All member, for totals; null when none or unknown. */
   allMember: string | null;
+  /**
+   * Every hierarchy its tuples are made of, in tuple order, and their All members. One
+   * entry for a set of one field. Absent from older helpers: then `hierarchy` alone.
+   */
+  hierarchies?: string[];
+  allMembers?: (string | null)[];
 }
 
 export interface Fields {
@@ -179,6 +215,18 @@ export interface PlacedField {
    * `members`, `sort` and the filters do not apply. Rows and Columns only.
    */
   set?: string | null;
+  /**
+   * For a set whose tuples span several hierarchies: all of them in tuple order (the
+   * first is `hierarchy`) and their All members. The field then takes one header column
+   * (or row) per hierarchy; `Grid.rowFieldOf` / `colFieldOf` say which.
+   */
+  setHierarchies?: string[] | null;
+  setAllMembers?: (string | null)[] | null;
+  /**
+   * Place only this level of a user hierarchy: its items are that level's members (all
+   * months, not years), which can still be expanded downwards. Absent: the top level.
+   */
+  level?: { uniqueName: string; number: number; caption: string } | null;
 }
 
 /**
@@ -363,6 +411,11 @@ export interface ValueField {
    */
   baseItem?: string | null;
   /**
+   * Pane only, the helper ignores it: the header text the user gave this field (Windows:
+   * Value Field Settings > Custom Name). Absent or "": the cube's caption.
+   */
+  customName?: string | null;
+  /**
    * Excel number format chosen by the user for this field. Applied by the pane, which
    * uses it instead of the cube's format; the helper ignores it. Absent or null: the
    * cube's format.
@@ -396,6 +449,23 @@ export interface LayoutOptions {
   repeatLabels?: boolean;
   /** Pane only: text written in value cells that have no value. Absent or "": empty. */
   emptyCellText?: string;
+  /**
+   * Windows' "Include filtered items in totals" (PivotTable Options > Totals & Filters, for
+   * cube PivotTables): totals count every item, also those hidden by item selections and
+   * label, date or value filters on Rows and Columns ("non-visual totals"), and their labels
+   * get an asterisk ("Grand Total*"). Absent: false, totals count only what is shown.
+   */
+  includeFilteredItems?: boolean;
+  /**
+   * Pane only: the report's look, as Excel's PivotTable Styles and Style Options. `style` is
+   * a name from the pane's style list ("Light 9", "Medium 2", …); absent: the pane's default.
+   */
+  style?: string;
+  bandedRows?: boolean;
+  bandedColumns?: boolean;
+  /** Absent: true (Excel's defaults). */
+  rowHeaders?: boolean;
+  columnHeaders?: boolean;
 }
 
 export interface Layout {
@@ -406,6 +476,12 @@ export interface Layout {
   options: LayoutOptions;
   /** Measures defined in this report; usable in Values, sorts and value filters. At most 50. */
   calculatedMeasures?: CalculatedMeasure[] | null;
+  /**
+   * Fields shown as slicers in the panel (buttons, one per item). Each filters the report
+   * the way a page filter does (`members`; none selected: all), but has no cell in the
+   * sheet. A hierarchy is in one area only: Rows, Columns, Filters or slicers. At most 16.
+   */
+  slicers?: PlacedField[] | null;
 }
 
 export interface QueryRequest {
@@ -499,6 +575,14 @@ export interface Grid {
    * column-member × measure columns.
    */
   colValueIndex: number[];
+  /**
+   * For each row-header column (R entries): the index in `layout.rows` of the field it
+   * belongs to. Columns and fields are one to one unless a named set spans several
+   * hierarchies. Absent from older helpers: one to one.
+   */
+  rowFieldOf?: number[];
+  /** The same for the column header rows above the measures row (one per column hierarchy). */
+  colFieldOf?: number[];
   stats: {
     rows: number;
     columns: number;
