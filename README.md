@@ -377,7 +377,10 @@ docs/     Design notes and images
   web address as SOAP over HTTP(S) to `msmdpump.dll`, and turns the answer into a grid
   the panel writes into the sheet. The JSON contract between the two is
   `addin/src/types.ts`.
-- Tests: `cd helper && uv run pytest` and `cd addin && npm test`.
+- Tests: `cd helper && uv run pytest` and `cd addin && npm test`. With MIT Kerberos
+  installed (`brew install krb5`), `tests/test_kerberos_real.py` also starts a
+  throwaway Kerberos server on 127.0.0.1 and signs in with real tickets over TCP and
+  HTTP; without it, those tests are skipped.
 - `npm run build` builds the panel, then the cube functions (`addin/src/functions/`)
   into `dist/functions.js`, `functions.html` and `functions.json`, which Excel runs in
   its own JavaScript-only runtime, apart from the panel.
@@ -386,9 +389,10 @@ docs/     Design notes and images
 - The undocumented parts of the SSAS wire protocol come from the
   [ssas-xmla-tcp](https://github.com/oluies/ssas-xmla-tcp) project (Apache-2.0); see
   `THIRD_PARTY_NOTICES.md`.
-- Untested against a real server so far: Kerberos (over TCP and HTTP), connections to
-  `msmdpump.dll`, and the named-instance lookup on port 2382. The tests cover them
-  against stand-in servers.
+- Untested against a real Analysis Services server so far: Kerberos (over TCP and
+  HTTP), connections to `msmdpump.dll`, and the named-instance lookup on port 2382.
+  The tests cover them against stand-in servers; Kerberos also against a real Kerberos
+  server (above), with the Mac's own Kerberos library on the client side.
 
 ---
 
