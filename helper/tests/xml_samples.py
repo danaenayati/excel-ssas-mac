@@ -114,3 +114,37 @@ def _esc(text: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+def drillthrough_rowset(columns: list[tuple[str, str]], rows: list[list[str | None]], session_id: str | None = "S-1") -> bytes:
+    """A DRILLTHROUGH answer as SSAS sends it: a typed XSD schema, then rows whose
+    element names are the XML-encoded column names (cells with no value are left out)."""
+
+    def encode(name: str) -> str:
+        return "".join(ch if ch.isalnum() or ch == "_" else f"_x{ord(ch):04X}_" for ch in name)
+
+    schema_columns = "".join(
+        f'<xsd:element sql:field="{_esc(name)}" name="{encode(name)}" type="{xsd}" minOccurs="0"/>'
+        for name, xsd in columns
+    )
+    body_rows = "".join(
+        "<row>"
+        + "".join(
+            f"<{encode(name)}>{_esc(value)}</{encode(name)}>"
+            for (name, _), value in zip(columns, row)
+            if value is not None
+        )
+        + "</row>"
+        for row in rows
+    )
+    return envelope(
+        f'<ExecuteResponse xmlns="{XMLA}"><return>'
+        f'<root xmlns="{XMLA}:rowset" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+        f'xmlns:xsd="http://www.w3.org/2001/XMLSchema">'
+        f'<xsd:schema targetNamespace="{XMLA}:rowset" xmlns:sql="urn:schemas-microsoft-com:xml-sql" elementFormDefault="qualified">'
+        f'<xsd:element name="root"><xsd:complexType><xsd:sequence minOccurs="0" maxOccurs="unbounded">'
+        f'<xsd:element name="row" type="row"/></xsd:sequence></xsd:complexType></xsd:element>'
+        f'<xsd:complexType name="row"><xsd:sequence>{schema_columns}</xsd:sequence></xsd:complexType>'
+        f"</xsd:schema>{body_rows}</root></return></ExecuteResponse>",
+        session_id,
+    )

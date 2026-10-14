@@ -160,3 +160,104 @@ def test_query_text_is_the_mdx_a_real_cube_would_get(demo):
     layout = Layout.from_json({"rows": [placed(demo, CITY)], "values": [{"measure": "[Measures].[Rides]", "caption": "Rides"}]})
     _, text = demo.query(CATALOG, CUBE, layout)
     assert text.startswith("SELECT NON EMPTY {[Measures].[Rides]} ON COLUMNS") and "FROM [Ride Sales]" in text
+
+
+# -- sorting, filters, Show Values As, Show Details ----------------------------------
+def labels(grid):
+    return [line[0]["text"] for line in grid["rowHeaders"]]
+
+
+def test_sort_by_caption_and_by_measure(demo):
+    by_name = run(demo, rows=[dict(placed(demo, CITY), sort={"by": "caption", "order": "desc"})], grandTotals=False)
+    assert labels(by_name) == sorted(labels(by_name), key=str.lower, reverse=True)
+    by_rides = run(demo, rows=[dict(placed(demo, CITY), sort={"by": "measure", "measure": "[Measures].[Rides]", "order": "desc"})], grandTotals=False)
+    rides = column(by_rides)
+    assert rides == sorted(rides, reverse=True) and labels(by_rides)[0] == "Tehran"
+
+
+def test_sorting_a_drilled_hierarchy_keeps_children_under_their_parent(demo):
+    first_year = demo.members(CATALOG, CUBE, DATE, None, None, 5)["members"][0]["uniqueName"]
+    grid = run(demo, rows=[dict(placed(demo, DATE, expanded=[first_year]), sort={"by": "caption", "order": "desc"})], grandTotals=False)
+    texts = labels(grid)
+    year = demo.members(CATALOG, CUBE, DATE, None, None, 5)["members"][0]["caption"]
+    i = texts.index(year)
+    assert texts[i + 1 : i + 5] == ["Q4", "Q3", "Q2", "Q1"]
+
+
+def test_label_filter_keeps_matching_items_and_totals_count_only_them(demo):
+    grid = run(demo, rows=[dict(placed(demo, CITY), labelFilter={"operator": "contains", "value": "AN"})])
+    assert labels(grid)[:-1] and all("an" in t.lower() for t in labels(grid)[:-1])
+    assert column(grid)[-1] == sum(column(grid)[:-1])  # visual total
+    none = run(demo, rows=[dict(placed(demo, CITY), labelFilter={"operator": "beginsWith", "value": "zzz"})])
+    assert none["rowHeaders"] == []
+
+
+def test_value_filters_top_bottom_and_comparisons(demo):
+    top = run(demo, rows=[dict(placed(demo, CITY), valueFilter={"operator": "top", "measure": "[Measures].[Rides]", "value": 2})])
+    assert labels(top) == ["Istanbul", "Tehran", "Grand Total"] or set(labels(top)[:-1]) == {"Tehran", "Istanbul"}
+    assert column(top)[-1] == sum(column(top)[:-1])
+    everything = run(demo, rows=[placed(demo, CITY)], grandTotals=False)
+    rides = dict(zip(labels(everything), column(everything)))
+    big = run(demo, rows=[dict(placed(demo, CITY), valueFilter={"operator": "greaterThan", "measure": "[Measures].[Rides]", "value": 300000})], grandTotals=False)
+    assert set(labels(big)) == {c for c, v in rides.items() if v > 300000}
+    bottom = run(demo, rows=[dict(placed(demo, CITY), valueFilter={"operator": "bottom", "measure": "[Measures].[Rides]", "value": 1})], grandTotals=False)
+    assert labels(bottom) == [min(rides, key=rides.get)]
+    pct = run(demo, rows=[dict(placed(demo, CITY), valueFilter={"operator": "top", "measure": "[Measures].[Rides]", "value": 50, "topBy": "percent"})], grandTotals=False)
+    kept = sum(column(pct))
+    assert kept >= 0.5 * sum(rides.values()) and len(labels(pct)) < len(rides)
+
+
+def test_show_values_as_percentages(demo):
+    grid = run(
+        demo,
+        rows=[placed(demo, CITY)],
+        columns=[placed(demo, SERVICE)],
+        values=("Rides",),
+    )
+    layout = Layout.from_json(
+        {
+            "rows": [placed(demo, CITY)],
+            "columns": [placed(demo, SERVICE)],
+            "values": [{"measure": "[Measures].[Rides]", "caption": "Rides", "showAs": "percentOfGrandTotal"}],
+        }
+    )
+    cellset, _ = demo.query(CATALOG, CUBE, layout)
+    pct = build_grid(cellset, layout)
+    assert pct["colHeaderRows"][-1][0]["text"] == "Rides (% of Grand Total)"
+    assert pct["formatPalette"][pct["cellFormats"][0][0]] == "0.00%"
+    assert pct["values"][-1][-1] == pytest.approx(1.0)  # grand total of grand total
+    assert pct["values"][0][0] == pytest.approx(grid["values"][0][0] / grid["values"][-1][-1])
+
+    by_row = Layout.from_json(
+        {
+            "rows": [placed(demo, CITY)],
+            "columns": [placed(demo, SERVICE)],
+            "values": [{"measure": "[Measures].[Rides]", "caption": "Rides", "showAs": "percentOfRowTotal"}],
+        }
+    )
+    row_pct = build_grid(demo.query(CATALOG, CUBE, by_row)[0], by_row)
+    for line in row_pct["values"]:
+        assert sum(v or 0 for v in line[:-1]) == pytest.approx(1.0) and line[-1] == pytest.approx(1.0)
+
+
+def test_show_details_returns_the_rows_behind_a_cell(demo):
+    layout = Layout.from_json({"rows": [placed(demo, CITY)], "values": [{"measure": "[Measures].[Rides]", "caption": "Rides"}]})
+    tehran = next(m for m in demo.members(CATALOG, CUBE, CITY, None, None, 50)["members"] if m["caption"] == "Tehran")
+    result = demo.details(CATALOG, CUBE, layout, [tehran["uniqueName"]], "[Measures].[Rides]", 50)
+    assert "City" in result["columns"] and "Rides" in result["columns"]
+    city = result["columns"].index("City")
+    assert len(result["rows"]) == 50 and result["truncated"] is True
+    assert all(row[city] == "Tehran" for row in result["rows"])
+    everything = demo.details(CATALOG, CUBE, layout, [tehran["uniqueName"]], "[Measures].[Rides]", 100000)
+    rides = result["columns"].index("Rides")
+    grid = run(demo, rows=[placed(demo, CITY)], grandTotals=False)
+    assert sum(r[rides] for r in everything["rows"]) == dict(zip(labels(grid), column(grid)))["Tehran"]
+    assert everything["truncated"] is False
+
+
+def test_show_details_is_refused_like_excel_when_a_filter_covers_several_items(demo):
+    two = [m["uniqueName"] for m in demo.members(CATALOG, CUBE, SERVICE, None, None, 50)["members"][:2]]
+    layout = Layout.from_json({"filters": [placed(demo, SERVICE, members=two)], "values": [{"measure": "[Measures].[Rides]", "caption": "Rides"}]})
+    with pytest.raises(CubeError) as info:
+        demo.details(CATALOG, CUBE, layout, [], "[Measures].[Rides]", 10)
+    assert "Show Details" in info.value.message

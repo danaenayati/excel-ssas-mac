@@ -7,6 +7,7 @@ keyed by ordinal `column + row * column_count`.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from ..errors import CubeError
@@ -15,6 +16,25 @@ from .names import validate_unique_name
 MAX_FIELDS_PER_AREA = 16
 MAX_MEMBERS_PER_FIELD = 5000
 MAX_CAPTION = 400
+MAX_FILTER_TEXT = 200
+MAX_TOP_ITEMS = 100_000
+
+LABEL_OPERATORS = frozenset(
+    {
+        "equals", "notEquals", "beginsWith", "notBeginsWith", "endsWith", "notEndsWith",
+        "contains", "notContains", "greaterThan", "greaterOrEqual", "lessThan", "lessOrEqual",
+        "between", "notBetween",
+    }
+)
+VALUE_OPERATORS = frozenset(
+    {
+        "equals", "notEquals", "greaterThan", "greaterOrEqual", "lessThan", "lessOrEqual",
+        "between", "notBetween", "top", "bottom",
+    }
+)
+RANGE_OPERATORS = frozenset({"between", "notBetween"})
+TOP_BY = frozenset({"items", "percent", "sum"})
+SHOW_AS = frozenset({"normal", "percentOfGrandTotal", "percentOfColumnTotal", "percentOfRowTotal"})
 
 
 @dataclass(frozen=True)
@@ -40,6 +60,29 @@ class CellSet:
 
 
 @dataclass(frozen=True)
+class FieldSort:
+    by: str  # "caption" | "measure"
+    order: str  # "asc" | "desc"
+    measure: str | None = None
+
+
+@dataclass(frozen=True)
+class LabelFilter:
+    operator: str
+    value: str
+    value2: str | None = None
+
+
+@dataclass(frozen=True)
+class ValueFilter:
+    operator: str
+    measure: str
+    value: float
+    value2: float | None = None
+    top_by: str = "items"
+
+
+@dataclass(frozen=True)
 class PlacedField:
     hierarchy: str
     caption: str
@@ -47,12 +90,21 @@ class PlacedField:
     expanded: tuple[str, ...] = ()
     members: tuple[str, ...] = ()
     member_captions: tuple[str, ...] = ()
+    sort: FieldSort | None = None
+    label_filter: LabelFilter | None = None
+    value_filter: ValueFilter | None = None
+
+    @property
+    def narrowed(self) -> bool:
+        """True when anything restricts this field to fewer than all of its items."""
+        return bool(self.members) or self.label_filter is not None or self.value_filter is not None
 
 
 @dataclass(frozen=True)
 class ValueField:
     measure: str
     caption: str
+    show_as: str = "normal"
 
 
 @dataclass(frozen=True)
@@ -118,6 +170,78 @@ def _name_list(value: object, what: str) -> tuple[str, ...]:
     return tuple(validate_unique_name(item) for item in value)
 
 
+def _measure_name(value: object, what: str) -> str:
+    name = validate_unique_name(value)
+    if not name.lower().startswith("[measures]."):
+        raise _bad(f"{what} must be a measure.")
+    return name
+
+
+def _number(value: object, what: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise _bad(f"{what} must be a number.")
+    return float(value)
+
+
+def _filter_text(value: object, what: str) -> str:
+    text = _text(value, what)
+    if len(text) > MAX_FILTER_TEXT or any(ord(ch) < 0x20 for ch in text):
+        raise _bad(f"{what} is too long or contains characters that are not allowed.")
+    return text
+
+
+def _sort(value: object) -> FieldSort | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _bad("A sort setting is not an object.")
+    by, order = value.get("by"), value.get("order")
+    if by not in ("caption", "measure") or order not in ("asc", "desc"):
+        raise _bad("A sort setting is not valid.")
+    measure = _measure_name(value.get("measure"), "The measure to sort by") if by == "measure" else None
+    return FieldSort(by=by, order=order, measure=measure)
+
+
+def _label_filter(value: object) -> LabelFilter | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or value.get("operator") not in LABEL_OPERATORS:
+        raise _bad("A label filter is not valid.")
+    operator = value["operator"]
+    first = _filter_text(value.get("value", ""), "The label filter's value")
+    second = None
+    if operator in RANGE_OPERATORS:
+        second = _filter_text(value.get("value2"), "The label filter's second value")
+        if first.lower() > second.lower():
+            raise _bad("In a label filter's range, the first value must come before the second.")
+    return LabelFilter(operator=operator, value=first, value2=second)
+
+
+def _value_filter(value: object) -> ValueFilter | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or value.get("operator") not in VALUE_OPERATORS:
+        raise _bad("A value filter is not valid.")
+    operator = value["operator"]
+    measure = _measure_name(value.get("measure"), "The value filter's measure")
+    first = _number(value.get("value"), "The value filter's number")
+    second = None
+    top_by = "items"
+    if operator in RANGE_OPERATORS:
+        second = _number(value.get("value2"), "The value filter's second number")
+        if first > second:
+            raise _bad("In a value filter's range, the first number must not be larger than the second.")
+    if operator in ("top", "bottom"):
+        top_by = value.get("topBy", "items") or "items"
+        if top_by not in TOP_BY:
+            raise _bad("A Top 10 filter must count items, percent or sum.")
+        if top_by == "items" and not (first.is_integer() and 1 <= first <= MAX_TOP_ITEMS):
+            raise _bad(f"A Top 10 filter needs a whole number of items from 1 to {MAX_TOP_ITEMS:,}.")
+        if top_by == "percent" and not 0 < first <= 100:
+            raise _bad("A Top 10 filter's percent must be more than 0 and at most 100.")
+    return ValueFilter(operator=operator, measure=measure, value=first, value2=second, top_by=top_by)
+
+
 def _placed_list(value: object, area: str) -> tuple[PlacedField, ...]:
     if not isinstance(value, list):
         raise _bad(f"The {area} area must be a list.")
@@ -143,6 +267,10 @@ def _placed_list(value: object, area: str) -> tuple[PlacedField, ...]:
                 expanded=_name_list(item.get("expanded", []), "expanded"),
                 members=members,
                 member_captions=tuple(_text(c, "member caption") for c in captions[: len(members)]),
+                # Page filters only select items, as in Excel.
+                sort=_sort(item.get("sort")) if area != "filters" else None,
+                label_filter=_label_filter(item.get("labelFilter")) if area != "filters" else None,
+                value_filter=_value_filter(item.get("valueFilter")) if area != "filters" else None,
             )
         )
     return tuple(out)
@@ -154,15 +282,20 @@ def _value_list(value: object) -> tuple[ValueField, ...]:
     if len(value) > 64:
         raise _bad("The values area has more than 64 measures.")
     out = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for item in value:
         if not isinstance(item, dict):
             raise _bad("A value field is not an object.")
         measure = validate_unique_name(item.get("measure"))
         if not measure.lower().startswith("[measures]."):
             raise _bad("Only measures can be placed in the Values area.")
-        if measure.lower() in seen:
+        show_as = item.get("showAs") or "normal"
+        if show_as not in SHOW_AS:
+            raise _bad("A value field's 'Show Values As' setting is not valid.")
+        # The same measure may appear twice if it is shown two ways (count and %).
+        key = (measure.lower(), show_as)
+        if key in seen:
             raise _bad("A measure is used twice in the Values area.")
-        seen.add(measure.lower())
-        out.append(ValueField(measure=measure, caption=_text(item.get("caption", ""), "caption")))
+        seen.add(key)
+        out.append(ValueField(measure=measure, caption=_text(item.get("caption", ""), "caption"), show_as=show_as))
     return tuple(out)

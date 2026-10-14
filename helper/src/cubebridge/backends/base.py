@@ -6,12 +6,29 @@ MembersResponse). `query` returns a CellSet, which pivot/grid.py turns into a Gr
 
 from __future__ import annotations
 
+import re
 from typing import Protocol
 
 from ..pivot.model import CellSet, Layout
 
 DEFAULT_MEMBER_LIMIT = 500
 MAX_MEMBER_LIMIT = 5000
+DEFAULT_DETAIL_ROWS = 1000
+MAX_DETAIL_ROWS = 100_000
+
+_PART = re.compile(r"\[((?:[^\]]|\]\])*)\]")
+
+
+def plain_column_names(names: list[str]) -> list[str]:
+    """"[$Trips].[City]" becomes "City", or "Trips City" when another table has a City too."""
+    split = []
+    for name in names:
+        parts = [p.replace("]]", "]") for p in _PART.findall(name)] or [name]
+        split.append((parts[-2].lstrip("$") if len(parts) > 1 else "", parts[-1]))
+    counts: dict[str, int] = {}
+    for _, last in split:
+        counts[last.lower()] = counts.get(last.lower(), 0) + 1
+    return [f"{table} {last}".strip() if counts[last.lower()] > 1 else last for table, last in split]
 
 
 class Backend(Protocol):
@@ -33,6 +50,12 @@ class Backend(Protocol):
 
     def query(self, catalog: str, cube: str, layout: Layout) -> tuple[CellSet, str]:
         """Return the result and the query text that produced it."""
+        ...
+
+    def details(
+        self, catalog: str, cube: str, layout: Layout, members: list[str], measure: str, max_rows: int
+    ) -> dict:
+        """The rows behind one value cell: {"columns", "rows", "truncated"} (DetailsResponse)."""
         ...
 
     def cancel(self) -> None: ...

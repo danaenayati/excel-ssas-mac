@@ -31,7 +31,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import __version__, certs
-from .backends.base import DEFAULT_MEMBER_LIMIT, MAX_MEMBER_LIMIT
+from .backends.base import DEFAULT_DETAIL_ROWS, DEFAULT_MEMBER_LIMIT, MAX_DETAIL_ROWS, MAX_MEMBER_LIMIT
 from .backends.demo_backend import DemoBackend
 from .backends.ssas_backend import SsasBackend
 from .errors import CubeError
@@ -71,6 +71,7 @@ _ROUTES: list[tuple[str, re.Pattern, str]] = [
     ("POST", re.compile(r"^/api/connections/(?P<id>[A-Za-z0-9_-]{1,64})/members$"), "_members"),
     ("POST", re.compile(r"^/api/connections/(?P<id>[A-Za-z0-9_-]{1,64})/query$"), "_query"),
     ("POST", re.compile(r"^/api/connections/(?P<id>[A-Za-z0-9_-]{1,64})/cancel$"), "_cancel"),
+    ("POST", re.compile(r"^/api/connections/(?P<id>[A-Za-z0-9_-]{1,64})/details$"), "_details"),
 ]
 
 Response = tuple[int, dict[str, str], bytes]
@@ -294,6 +295,22 @@ class App:
         cellset, text = self._backend(id).query(catalog, cube, layout)
         elapsed = int((time.monotonic() - started) * 1000)
         return build_grid(cellset, layout, elapsed_ms=elapsed, mdx=text, cell_limit=self.cell_limit)
+
+    def _details(self, id: str, body: dict, **_):
+        members = body.get("members", [])
+        if not isinstance(members, list) or not all(isinstance(m, str) for m in members):
+            raise _bad("'members' must be a list of member names.")
+        max_rows = body.get("maxRows", DEFAULT_DETAIL_ROWS)
+        if not isinstance(max_rows, int) or isinstance(max_rows, bool) or not 1 <= max_rows <= MAX_DETAIL_ROWS:
+            raise _bad(f"'maxRows' must be a whole number from 1 to {MAX_DETAIL_ROWS:,}.")
+        return self._backend(id).details(
+            _text(body, "catalog"),
+            _text(body, "cube"),
+            Layout.from_json(body.get("layout")),
+            [validate_unique_name(m) for m in members],
+            validate_unique_name(body.get("measure")),
+            max_rows,
+        )
 
     def _cancel(self, id: str, **_):
         with self._lock:

@@ -1,9 +1,10 @@
 """A small built-in cube, so the add-in can be tried and tested with no server.
 
 It answers the same `Layout` a real cube would and returns the same `CellSet` shape,
-following the rules in pivot/mdx.py (detail members, drill-down, All-member totals,
-selections as sub-selects, NON EMPTY). It does not parse MDX: it evaluates the layout
-directly over a few thousand generated fact rows.
+following the rules in pivot/mdx.py (detail members, drill-down, sorting, All-member
+totals, selections and label/value filters as sub-selects with visual totals,
+"Show Values As", NON EMPTY, and DRILLTHROUGH refusals). It does not parse MDX: it
+evaluates the layout directly over a few thousand generated fact rows.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from dataclasses import dataclass
 
 from ..errors import CubeError
 from ..pivot import mdx
-from ..pivot.model import AxisMember, Cell, CellSet, Layout, PlacedField
+from ..pivot.model import AxisMember, Cell, CellSet, LabelFilter, Layout, PlacedField, ValueField, ValueFilter
 
 CATALOG = "Sample"
 CUBE = "Ride Sales"
@@ -167,24 +168,49 @@ class DemoBackend:
     def query(self, catalog: str, cube: str, layout: Layout) -> tuple[CellSet, str]:
         self._check(catalog, cube)
         text = mdx.build_query(cube, layout)
+        values = list(layout.values) or [ValueField(_DEFAULT_MEASURE, _MEASURES[_DEFAULT_MEASURE][0])]
+        used = [v.measure for v in values] + [
+            m
+            for placed in (*layout.rows, *layout.columns)
+            for m in (placed.sort.measure if placed.sort else None, placed.value_filter.measure if placed.value_filter else None)
+            if m
+        ]
+        for name in used:
+            if name not in _MEASURES:
+                raise CubeError("server", "The cube rejected the request.", f"The measure {name} was not found in the cube.")
+
         facts = self._filtered_facts(layout)
-        row_tuples = self._axis_tuples(layout.rows, layout) if layout.rows else [()]
-        col_tuples = self._axis_tuples(layout.columns, layout) if layout.columns else [()]
+        # Label and value filters, each evaluated in the space the earlier ones left,
+        # as the nested sub-selects of the real query are.
+        allowed: dict[str, set[tuple]] = {}
+        for placed in (*layout.rows, *layout.columns):
+            if placed.label_filter is None and placed.value_filter is None:
+                continue
+            keep = self._narrow(placed, facts)
+            allowed[placed.hierarchy] = keep
+            facts = [f for f in facts if self._top_path(placed, f) in keep]
+
+        row_tuples = self._axis_tuples(layout.rows, layout, facts, allowed) if layout.rows else [()]
+        col_tuples = self._axis_tuples(layout.columns, layout, facts, allowed) if layout.columns else [()]
         row_index = {t: i for i, t in enumerate(row_tuples)}
         col_index = {t: i for i, t in enumerate(col_tuples)}
         row_shown = [{t[i] for t in row_tuples} for i in range(len(layout.rows))]
         col_shown = [{t[i] for t in col_tuples} for i in range(len(layout.columns))]
 
         totals: dict[tuple[int, int], list[float]] = {}
+        row_totals: dict[int, list[float]] = {}
+        column_totals: dict[int, list[float]] = {}
+        grand = [0, 0.0, 0]
         for fact in facts:
             rows_hit = [row_index[t] for t in self._matching(fact, layout.rows, row_shown) if t in row_index]
             cols_hit = [col_index[t] for t in self._matching(fact, layout.columns, col_shown) if t in col_index]
+            _add(grand, fact)
             for r in rows_hit:
+                _add(row_totals.setdefault(r, [0, 0.0, 0]), fact)
                 for c in cols_hit:
-                    slot = totals.setdefault((r, c), [0, 0.0, 0])
-                    slot[0] += fact["rides"]
-                    slot[1] += fact["revenue"]
-                    slot[2] += fact["cancelled"]
+                    _add(totals.setdefault((r, c), [0, 0.0, 0]), fact)
+            for c in cols_hit:
+                _add(column_totals.setdefault(c, [0, 0.0, 0]), fact)
 
         if layout.options.non_empty:
             keep_rows = sorted({r for r, _ in totals})
@@ -193,19 +219,16 @@ class DemoBackend:
             keep_rows = list(range(len(row_tuples)))
             keep_cols = list(range(len(col_tuples)))
 
-        measures = [v.measure for v in layout.values] or [_DEFAULT_MEASURE]
-        for name in measures:
-            if name not in _MEASURES:
-                raise CubeError("server", "The cube rejected the request.", f"The measure {name} was not found in the cube.")
-
         cellset = CellSet()
         columns_axis = []
         for c in keep_cols:
-            for name in measures:
-                columns_axis.append(
-                    tuple(self._axis_member(k) for k in col_tuples[c])
-                    + (AxisMember(name, _MEASURES[name][0], "[Measures]", 0, 0),)
-                )
+            for value in values:
+                if value.show_as == "normal":
+                    measure = AxisMember(value.measure, _MEASURES[value.measure][0], "[Measures]", 0, 0)
+                else:
+                    caption = mdx.show_as_caption(value)
+                    measure = AxisMember(f"[Measures].[{caption}]", caption, "[Measures]", 0, 0)
+                columns_axis.append(tuple(self._axis_member(k) for k in col_tuples[c]) + (measure,))
         cellset.axes.append(columns_axis)
         if layout.rows:
             cellset.axes.append([tuple(self._axis_member(k) for k in row_tuples[r]) for r in keep_rows])
@@ -216,12 +239,49 @@ class DemoBackend:
                 slot = totals.get((r, c))
                 if slot is None:
                     continue
-                for m_index, name in enumerate(measures):
-                    value = _measure_value(name, slot)
-                    if value is not None:
-                        ordinal = out_r * width + out_c * len(measures) + m_index
-                        cellset.cells[ordinal] = Cell(value, _MEASURES[name][2], "")
+                for m_index, value in enumerate(values):
+                    number = _measure_value(value.measure, slot)
+                    fmt = _MEASURES[value.measure][2]
+                    if value.show_as != "normal":
+                        total = {
+                            "percentOfGrandTotal": grand,
+                            "percentOfColumnTotal": column_totals.get(c),
+                            "percentOfRowTotal": row_totals.get(r),
+                        }[value.show_as]
+                        whole = _measure_value(value.measure, total) if total else None
+                        number = None if number is None or not whole else number / whole
+                        fmt = "Percent"
+                    if number is not None:
+                        ordinal = out_r * width + out_c * len(values) + m_index
+                        cellset.cells[ordinal] = Cell(number, fmt, "")
         return cellset, text
+
+    def details(
+        self, catalog: str, cube: str, layout: Layout, members: list[str], measure: str, max_rows: int
+    ) -> dict:
+        self._check(catalog, cube)
+        slicer = mdx.details_slicer(layout, members, measure)
+        if measure not in _MEASURES:
+            raise CubeError("server", "The cube rejected the request.", f"The measure {measure} was not found in the cube.")
+        facts = self._facts
+        for name in slicer[1:]:
+            key = self._by_name.get(name)
+            if key is None:
+                raise CubeError("not-found", "That item is not in the sample cube.", name)
+            h = self._hierarchies[key[0]]
+            path = key[1]
+            if path:
+                facts = [f for f in facts if tuple(f[attr] for _, attr in h.levels)[: len(path)] == path]
+        rows = [
+            [f["year"], _MONTHS[f["month"] - 1], f["country"], f["city"], f["service"], f["segment"],
+             f["rides"], f["revenue"], f["cancelled"]]
+            for f in facts
+        ]
+        return {
+            "columns": ["Year", "Month", "Country", "City", "Service Type", "Segment", "Rides", "Revenue", "Cancelled Rides"],
+            "rows": rows[:max_rows],
+            "truncated": len(rows) > max_rows,
+        }
 
     def cancel(self) -> None:
         pass
@@ -309,16 +369,22 @@ class DemoBackend:
             return True
         return any(path[: len(s)] == s or s[: len(path)] == path for s in selected)
 
-    def _detail(self, placed: PlacedField) -> list[_Key]:
+    def _detail(self, placed: PlacedField, facts: list[dict], allowed: set[tuple] | None) -> list[_Key]:
         h = self._hierarchy(placed.hierarchy)
         expanded = {self._by_name[name][1] for name in placed.expanded if name in self._by_name}
         selected = self._selection(placed)
+        sort_key = self._sort_key(placed, facts)
         out: list[_Key] = []
 
         def visit(parent: tuple) -> None:
-            for child in self._children.get((h.unique_name, parent), []):
-                if not self._in_space(child, selected):
-                    continue
+            children = [
+                child
+                for child in self._children.get((h.unique_name, parent), [])
+                if self._in_space(child, selected) and (allowed is None or child[:1] in allowed)
+            ]
+            if sort_key is not None:
+                children.sort(key=sort_key, reverse=placed.sort.order == "desc")
+            for child in children:
                 out.append((h.unique_name, child))
                 if child in expanded:
                     visit(child)
@@ -326,8 +392,51 @@ class DemoBackend:
         visit(())
         return out
 
-    def _axis_tuples(self, fields: tuple[PlacedField, ...], layout: Layout) -> list[tuple[_Key, ...]]:
-        details = [self._detail(f) for f in fields]
+    def _sort_key(self, placed: PlacedField, facts: list[dict]):
+        """How siblings are ordered: by caption, or by a measure over the current facts."""
+        if placed.sort is None:
+            return None
+        h = self._hierarchies[placed.hierarchy]
+        if placed.sort.by == "caption":
+            return lambda path: self._caption((h.unique_name, path)).lower()
+        attrs = [attr for _, attr in h.levels]
+        slots: dict[tuple, list[float]] = {}
+        for fact in facts:
+            values = tuple(fact[a] for a in attrs)
+            for depth in range(1, len(values) + 1):
+                _add(slots.setdefault(values[:depth], [0, 0.0, 0]), fact)
+        measure = placed.sort.measure
+
+        def key(path: tuple) -> float:
+            number = _measure_value(measure, slots[path]) if path in slots else None
+            return float("-inf") if number is None else number  # empty sorts lowest, as in MDX
+
+        return key
+
+    def _top_path(self, placed: PlacedField, fact: dict) -> tuple:
+        h = self._hierarchies[placed.hierarchy]
+        return (fact[h.levels[0][1]],)
+
+    def _narrow(self, placed: PlacedField, facts: list[dict]) -> set[tuple]:
+        """The field's top-level items that pass its label and value filters."""
+        h = self._hierarchy(placed.hierarchy)
+        selected = self._selection(placed)
+        items = [p for p in self._children.get((h.unique_name, ()), []) if self._in_space(p, selected)]
+        if placed.label_filter is not None:
+            items = [p for p in items if _label_match(self._caption((h.unique_name, p)), placed.label_filter)]
+        if placed.value_filter is not None:
+            slots: dict[tuple, list[float]] = {}
+            for fact in facts:
+                _add(slots.setdefault(self._top_path(placed, fact), [0, 0.0, 0]), fact)
+            vf = placed.value_filter
+            numbers = {p: _measure_value(vf.measure, slots[p]) if p in slots else None for p in items}
+            items = _apply_value_filter(items, numbers, vf)
+        return set(items)
+
+    def _axis_tuples(
+        self, fields: tuple[PlacedField, ...], layout: Layout, facts: list[dict], allowed: dict[str, set[tuple]]
+    ) -> list[tuple[_Key, ...]]:
+        details = [self._detail(f, facts, allowed.get(f.hierarchy)) for f in fields]
         alls = [(f.hierarchy, ()) for f in fields]
 
         def build(depth: int) -> list[tuple[_Key, ...]]:
@@ -354,6 +463,66 @@ class DemoBackend:
             candidates = [(h.unique_name, values[:depth]) for depth in range(len(values) + 1)]
             per_field.append([k for k in candidates if k in visible])
         return itertools.product(*per_field)
+
+
+def _add(slot: list[float], fact: dict) -> None:
+    slot[0] += fact["rides"]
+    slot[1] += fact["revenue"]
+    slot[2] += fact["cancelled"]
+
+
+def _label_match(caption: str, label: LabelFilter) -> bool:
+    """The same tests the MDX in pivot/mdx.py makes, without regard to case."""
+    text, value, upper = caption.lower(), label.value.lower(), (label.value2 or "").lower()
+    return {
+        "equals": lambda: text == value,
+        "notEquals": lambda: text != value,
+        "beginsWith": lambda: text.startswith(value),
+        "notBeginsWith": lambda: not text.startswith(value),
+        "endsWith": lambda: text.endswith(value),
+        "notEndsWith": lambda: not text.endswith(value),
+        "contains": lambda: value in text,
+        "notContains": lambda: value not in text,
+        "greaterThan": lambda: text > value,
+        "greaterOrEqual": lambda: text >= value,
+        "lessThan": lambda: text < value,
+        "lessOrEqual": lambda: text <= value,
+        "between": lambda: value <= text <= upper,
+        "notBetween": lambda: text < value or text > upper,
+    }[label.operator]()
+
+
+def _apply_value_filter(items: list[tuple], numbers: dict[tuple, object], vf: ValueFilter) -> list[tuple]:
+    """MDX semantics: an empty value compares as 0; Bottom ignores empty items."""
+    if vf.operator in ("top", "bottom"):
+        if vf.operator == "top":
+            ranked = sorted(items, key=lambda p: float("-inf") if numbers[p] is None else numbers[p], reverse=True)
+        else:
+            ranked = sorted((p for p in items if numbers[p] is not None), key=lambda p: numbers[p])
+        if vf.top_by == "items":
+            return ranked[: int(vf.value)]
+        target = vf.value
+        if vf.top_by == "percent":
+            target = sum(numbers[p] or 0 for p in ranked) * vf.value / 100
+        kept, running = [], 0.0
+        for p in ranked:
+            if kept and running >= target:
+                break
+            kept.append(p)
+            running += numbers[p] or 0
+        return kept
+    lo, hi = vf.value, vf.value2 if vf.value2 is not None else vf.value
+    test = {
+        "equals": lambda v: v == lo,
+        "notEquals": lambda v: v != lo,
+        "greaterThan": lambda v: v > lo,
+        "greaterOrEqual": lambda v: v >= lo,
+        "lessThan": lambda v: v < lo,
+        "lessOrEqual": lambda v: v <= lo,
+        "between": lambda v: lo <= v <= hi,
+        "notBetween": lambda v: v < lo or v > hi,
+    }[vf.operator]
+    return [p for p in items if test(numbers[p] if numbers[p] is not None else 0)]
 
 
 def _sort_key(value: object) -> tuple:

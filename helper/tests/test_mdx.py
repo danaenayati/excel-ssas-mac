@@ -240,3 +240,215 @@ def test_filter_showing_all_slices_on_the_all_member_explicitly():
 
 def test_filter_without_all_member_and_without_selection_adds_nothing():
     assert query(filters=[field("[Scenario].[Scenario]", all_member=None)]) == query()
+
+
+# -- sorting, label and value filters, Show Values As, Show Details ------------------
+def with_extras(base, **extras):
+    out = dict(base)
+    out.update(extras)
+    return out
+
+
+def test_layout_validation_of_the_new_settings():
+    good = with_extras(field(CITY), sort={"by": "measure", "measure": "[Measures].[Rides]", "order": "desc"},
+                       labelFilter={"operator": "between", "value": "A", "value2": "M"},
+                       valueFilter={"operator": "top", "measure": "[Measures].[Rides]", "value": 5, "topBy": "items"})
+    placed = Layout.from_json({"rows": [good], "values": [RIDES]}).rows[0]
+    assert placed.sort.by == "measure" and placed.label_filter.value2 == "M" and placed.value_filter.top_by == "items"
+    assert placed.narrowed
+
+    bad = [
+        {"sort": {"by": "colour", "order": "asc"}},
+        {"sort": {"by": "measure", "order": "asc"}},  # no measure
+        {"labelFilter": {"operator": "like", "value": "x"}},
+        {"labelFilter": {"operator": "between", "value": "Z"}},  # no upper bound
+        {"labelFilter": {"operator": "between", "value": "Z", "value2": "A"}},
+        {"labelFilter": {"operator": "equals", "value": "x" * 201}},
+        {"valueFilter": {"operator": "greaterThan", "measure": "[Geo].[City].&[1]", "value": 1}},
+        {"valueFilter": {"operator": "greaterThan", "measure": "[Measures].[Rides]", "value": "10"}},
+        {"valueFilter": {"operator": "greaterThan", "measure": "[Measures].[Rides]", "value": float("nan")}},
+        {"valueFilter": {"operator": "top", "measure": "[Measures].[Rides]", "value": 2.5}},
+        {"valueFilter": {"operator": "top", "measure": "[Measures].[Rides]", "value": 150, "topBy": "percent"}},
+        {"valueFilter": {"operator": "between", "measure": "[Measures].[Rides]", "value": 9, "value2": 1}},
+    ]
+    for extras in bad:
+        with pytest.raises(CubeError):
+            Layout.from_json({"rows": [with_extras(field(CITY), **extras)], "values": [RIDES]})
+
+
+def test_page_filters_ignore_sorting_and_filters_other_than_item_selection():
+    placed = Layout.from_json(
+        {"filters": [with_extras(field(SERVICE), labelFilter={"operator": "equals", "value": "x"})], "values": [RIDES]}
+    ).filters[0]
+    assert placed.label_filter is None and not placed.narrowed
+
+
+def test_same_measure_may_appear_twice_when_shown_two_ways():
+    layout = Layout.from_json({"values": [RIDES, dict(RIDES, showAs="percentOfGrandTotal")]})
+    assert [v.show_as for v in layout.values] == ["normal", "percentOfGrandTotal"]
+    with pytest.raises(CubeError):
+        Layout.from_json({"values": [RIDES, dict(RIDES)]})
+    with pytest.raises(CubeError):
+        Layout.from_json({"values": [dict(RIDES, showAs="percentOfEverything")]})
+
+
+def test_sort_by_caption_and_by_measure_wraps_the_detail_set_in_order():
+    text = query(rows=[with_extras(field(CITY), sort={"by": "caption", "order": "asc"})])
+    assert "NON EMPTY {Order({[Geo].[City].[All].Children}, [Geo].[City].CurrentMember.Member_Caption, ASC), {[Geo].[City].[All]}} ON ROWS" in text
+    text = query(rows=[with_extras(field(DATE, expanded=["[Date].[Calendar].[Year].&[2025]"]), sort={"by": "measure", "measure": "[Measures].[Rides]", "order": "desc"})])
+    assert ("Order(DrilldownMember({[Date].[Calendar].[All].Children}, {[Date].[Calendar].[Year].&[2025]}, RECURSIVE), "
+            "[Measures].[Rides], DESC)") in text
+
+
+@pytest.mark.parametrize(
+    "operator, value, value2, condition",
+    [
+        ("equals", "Tehran", None, 'LCase([Geo].[City].CurrentMember.Member_Caption) = "tehran"'),
+        ("notEquals", "Tehran", None, 'LCase([Geo].[City].CurrentMember.Member_Caption) <> "tehran"'),
+        ("beginsWith", "Te", None, 'InStr(1, LCase([Geo].[City].CurrentMember.Member_Caption), "te") = 1'),
+        ("notBeginsWith", "Te", None, 'InStr(1, LCase([Geo].[City].CurrentMember.Member_Caption), "te") <> 1'),
+        ("endsWith", "ran", None, 'Right(LCase([Geo].[City].CurrentMember.Member_Caption), 3) = "ran"'),
+        ("notEndsWith", "ran", None, 'Right(LCase([Geo].[City].CurrentMember.Member_Caption), 3) <> "ran"'),
+        ("contains", 'a"b', None, 'InStr(1, LCase([Geo].[City].CurrentMember.Member_Caption), "a""b") > 0'),
+        ("notContains", "x", None, 'InStr(1, LCase([Geo].[City].CurrentMember.Member_Caption), "x") = 0'),
+        ("greaterThan", "M", None, 'LCase([Geo].[City].CurrentMember.Member_Caption) > "m"'),
+        ("lessOrEqual", "M", None, 'LCase([Geo].[City].CurrentMember.Member_Caption) <= "m"'),
+        ("between", "A", "M", '(LCase([Geo].[City].CurrentMember.Member_Caption) >= "a" AND LCase([Geo].[City].CurrentMember.Member_Caption) <= "m")'),
+        ("notBetween", "A", "M", '(LCase([Geo].[City].CurrentMember.Member_Caption) < "a" OR LCase([Geo].[City].CurrentMember.Member_Caption) > "m")'),
+    ],
+)
+def test_label_filters_become_a_subselect_on_the_fields_top_level(operator, value, value2, condition):
+    label = {"operator": operator, "value": value}
+    if value2 is not None:
+        label["value2"] = value2
+    text = query(rows=[with_extras(field(CITY), labelFilter=label)])
+    assert text.endswith(f"FROM (SELECT {{Filter({{[Geo].[City].[All].Children}}, {condition})}} ON COLUMNS FROM [Sales])" + TAIL)
+
+
+@pytest.mark.parametrize(
+    "vf, expression",
+    [
+        ({"operator": "greaterThan", "value": 1000}, "Filter({[Geo].[City].[All].Children}, [Measures].[Rides] > 1000)"),
+        ({"operator": "lessThan", "value": 0.25}, "Filter({[Geo].[City].[All].Children}, [Measures].[Rides] < 0.25)"),
+        ({"operator": "between", "value": 10, "value2": 20}, "Filter({[Geo].[City].[All].Children}, [Measures].[Rides] >= 10 AND [Measures].[Rides] <= 20)"),
+        ({"operator": "notBetween", "value": 10, "value2": 20}, "Filter({[Geo].[City].[All].Children}, [Measures].[Rides] < 10 OR [Measures].[Rides] > 20)"),
+        ({"operator": "top", "value": 3}, "TopCount({[Geo].[City].[All].Children}, 3, [Measures].[Rides])"),
+        ({"operator": "top", "value": 30, "topBy": "percent"}, "TopPercent({[Geo].[City].[All].Children}, 30, [Measures].[Rides])"),
+        ({"operator": "top", "value": 5000, "topBy": "sum"}, "TopSum({[Geo].[City].[All].Children}, 5000, [Measures].[Rides])"),
+        ({"operator": "bottom", "value": 2}, "BottomCount(NonEmpty({[Geo].[City].[All].Children}, {[Measures].[Rides]}), 2, [Measures].[Rides])"),
+        ({"operator": "bottom", "value": 10, "topBy": "percent"}, "BottomPercent(NonEmpty({[Geo].[City].[All].Children}, {[Measures].[Rides]}), 10, [Measures].[Rides])"),
+    ],
+)
+def test_value_filters_become_a_subselect(vf, expression):
+    text = query(rows=[with_extras(field(CITY), valueFilter=dict(vf, measure="[Measures].[Rides]"))])
+    assert text.endswith(f"FROM (SELECT {{{expression}}} ON COLUMNS FROM [Sales])" + TAIL)
+
+
+def test_label_then_value_filter_on_one_field_and_item_selection_innermost():
+    text = query(
+        rows=[
+            with_extras(
+                field(CITY, members=["[Geo].[City].&[1]", "[Geo].[City].&[2]"]),
+                labelFilter={"operator": "contains", "value": "a"},
+                valueFilter={"operator": "top", "measure": "[Measures].[Rides]", "value": 1},
+            )
+        ]
+    )
+    assert text.endswith(
+        "FROM (SELECT {TopCount(Filter({[Geo].[City].[All].Children}, "
+        'InStr(1, LCase([Geo].[City].CurrentMember.Member_Caption), "a") > 0), 1, [Measures].[Rides])} ON COLUMNS '
+        "FROM (SELECT ({[Geo].[City].&[1], [Geo].[City].&[2]}) ON COLUMNS FROM [Sales]))" + TAIL
+    )
+
+
+def test_with_a_value_filter_single_page_filters_move_into_the_subselects():
+    # A value filter is evaluated in the sub-select's space, which a WHERE slicer does
+    # not reach, so the page filter must be applied inside it.
+    text = query(
+        rows=[with_extras(field(CITY), valueFilter={"operator": "top", "measure": "[Measures].[Rides]", "value": 3})],
+        filters=[field(SERVICE, members=["[Service].[Type].&[1]"])],
+    )
+    assert "WHERE" not in text
+    assert text.endswith(
+        "FROM (SELECT {TopCount({[Geo].[City].[All].Children}, 3, [Measures].[Rides])} ON COLUMNS "
+        "FROM (SELECT ({[Service].[Type].&[1]}) ON COLUMNS FROM [Sales]))" + TAIL
+    )
+
+
+def test_numbers_are_written_without_exponents():
+    text = query(rows=[with_extras(field(CITY), valueFilter={"operator": "greaterThan", "measure": "[Measures].[Rides]", "value": 1e-7})])
+    assert "[Measures].[Rides] > 0.0000001" in text
+    text = query(rows=[with_extras(field(CITY), valueFilter={"operator": "greaterThan", "measure": "[Measures].[Rides]", "value": 2e20})])
+    assert "[Measures].[Rides] > 200000000000000000000" in text
+
+
+def test_show_values_as_defines_calculated_measures():
+    text = query(
+        rows=[field(CITY)],
+        columns=[field(SERVICE)],
+        values=[RIDES, dict(RIDES, showAs="percentOfGrandTotal"), dict(REVENUE, showAs="percentOfColumnTotal"), dict(RIDES, showAs="percentOfRowTotal")],
+    )
+    assert text.startswith(
+        "WITH "
+        "MEMBER [Measures].[Rides (% of Grand Total)] AS "
+        "IIF(([Measures].[Rides], [Geo].[City].[All], [Service].[Type].[All]) = 0, NULL, "
+        "[Measures].[Rides] / ([Measures].[Rides], [Geo].[City].[All], [Service].[Type].[All])), FORMAT_STRING = \"Percent\" "
+        "MEMBER [Measures].[Revenue (% of Column Total)] AS "
+        "IIF(([Measures].[Revenue], [Geo].[City].[All]) = 0, NULL, [Measures].[Revenue] / ([Measures].[Revenue], [Geo].[City].[All])), "
+        "FORMAT_STRING = \"Percent\" "
+        "MEMBER [Measures].[Rides (% of Row Total)] AS "
+        "IIF(([Measures].[Rides], [Service].[Type].[All]) = 0, NULL, [Measures].[Rides] / ([Measures].[Rides], [Service].[Type].[All])), "
+        "FORMAT_STRING = \"Percent\" "
+        "SELECT "
+    )
+    assert ("{[Measures].[Rides], [Measures].[Rides (% of Grand Total)], [Measures].[Revenue (% of Column Total)], "
+            "[Measures].[Rides (% of Row Total)]}") in text
+
+
+def test_show_values_as_with_nothing_on_the_other_axis_divides_by_itself():
+    text = query(rows=[field(CITY)], values=[dict(RIDES, showAs="percentOfRowTotal")])
+    assert "IIF(([Measures].[Rides]) = 0, NULL, [Measures].[Rides] / ([Measures].[Rides]))" in text
+
+
+# -- Show Details ------------------------------------------------------------------
+def details(layout_json, members, measure="[Measures].[Rides]", max_rows=1000):
+    return mdx.details_query("Sales", Layout.from_json(layout_json), members, measure, max_rows)
+
+
+def test_details_slices_on_the_cell_and_single_page_filters():
+    text = details(
+        {"rows": [field(CITY)], "columns": [field(SERVICE)], "filters": [field(DATE, members=["[Date].[Calendar].[Year].&[2025]"])], "values": [RIDES]},
+        ["[Geo].[City].&[1]", "[Service].[Type].&[2]"],
+    )
+    assert text == (
+        "DRILLTHROUGH MAXROWS 1001 SELECT FROM [Sales] "
+        "WHERE ([Measures].[Rides], [Geo].[City].&[1], [Service].[Type].&[2], [Date].[Calendar].[Year].&[2025])"
+    )
+
+
+def test_details_for_a_total_is_allowed_when_that_field_is_not_filtered():
+    text = details({"rows": [field(CITY)], "values": [RIDES]}, [])
+    assert text == "DRILLTHROUGH MAXROWS 1001 SELECT FROM [Sales] WHERE ([Measures].[Rides])"
+
+
+@pytest.mark.parametrize(
+    "layout_json, members",
+    [
+        ({"filters": [field(SERVICE, members=["[Service].[Type].&[1]", "[Service].[Type].&[2]"])], "values": [RIDES]}, []),
+        ({"rows": [field(CITY, members=["[Geo].[City].&[1]", "[Geo].[City].&[2]"])], "values": [RIDES]}, []),
+        ({"rows": [with_extras(field(CITY), labelFilter={"operator": "contains", "value": "a"})], "values": [RIDES]}, []),
+    ],
+)
+def test_details_are_refused_where_a_filter_covers_several_items(layout_json, members):
+    with pytest.raises(CubeError) as info:
+        details(layout_json, members)
+    assert info.value.category == "bad-request" and "Show Details" in info.value.message
+
+
+def test_details_validate_names_and_the_measure():
+    with pytest.raises(CubeError):
+        details({"values": [RIDES]}, ["[Geo].[City].&[1]) FROM [x]"])
+    with pytest.raises(CubeError):
+        details({"values": [RIDES]}, [], measure="[Geo].[City].&[1]")
+    with pytest.raises(CubeError):
+        details({"values": [RIDES]}, ["[Geo].[City].&[1]", "[Geo].[City].&[2]"])  # two members of one hierarchy

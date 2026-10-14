@@ -69,3 +69,11 @@ def test_the_module_can_only_build_authenticate_discover_and_execute():
         if inspect.isfunction(obj) and obj.__module__ == envelopes.__name__ and not name.startswith("_")
     }
     assert public == {"authenticate", "discover", "execute"}
+
+
+def test_execute_for_a_drillthrough_asks_for_a_typed_tabular_rowset():
+    root = parse(envelopes.execute("DRILLTHROUGH SELECT FROM [Sales]", catalog="Sales", session_id="S", tabular=True))
+    props = root.find(f"{SOAP}Body/{XMLA}Execute/{XMLA}Properties/{XMLA}PropertyList")
+    assert props.find(f"{XMLA}Format").text == "Tabular"
+    assert props.find(f"{XMLA}Content").text == "SchemaData"
+    assert props.find(f"{XMLA}AxisFormat") is None

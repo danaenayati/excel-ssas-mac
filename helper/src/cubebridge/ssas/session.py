@@ -130,6 +130,14 @@ class Session:
 
         return self._roundtrip(build, self._query_timeout).cellset
 
+    def execute_rowset(self, statement: str, catalog: str | None) -> xmla.Parsed:
+        """Run a statement that answers with rows (a DRILLTHROUGH)."""
+
+        def build(session_id: str | None) -> bytes:
+            return envelopes.execute(statement, catalog, session_id, tabular=True)
+
+        return self._roundtrip(build, self._query_timeout)
+
     def _roundtrip(self, build: Callable[[str | None], bytes], timeout: float) -> xmla.Parsed:
         with self._lock:
             if self._channel is None or self._reader is None or self._context is None or self._channel.aborted:

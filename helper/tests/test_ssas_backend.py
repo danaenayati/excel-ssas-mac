@@ -336,3 +336,20 @@ def test_a_named_instance_port_is_looked_up_again_after_a_failed_connect(ntlm_us
         assert len(made.catalogs()) == 2
         assert calls == ["TAB", "TAB"]
         made.close()
+
+
+def test_details_sends_a_drillthrough_and_names_columns_plainly(backend):
+    backend.server.responses["DRILLTHROUGH"] = x.drillthrough_rowset(
+        [("[$Trips].[City]", "xsd:string"), ("[$Trips].[Rides]", "xsd:long"), ("[$Drivers].[City]", "xsd:string")],
+        [["Tehran", "5", "Tehran"], ["Tehran", "7", "Karaj"], ["Tehran", "1", "Tehran"]],
+    )
+    layout = Layout.from_json({"rows": [{"hierarchy": CITY, "caption": "City", "allMember": "[Geo].[City].[All]"}], "values": [{"measure": "[Measures].[Rides]", "caption": "Rides"}]})
+    result = backend.details("Sales", "Sales", layout, ["[Geo].[City].&[1]"], "[Measures].[Rides]", 2)
+    assert result == {
+        "columns": ["Trips City", "Rides", "Drivers City"],
+        "rows": [["Tehran", 5, "Tehran"], ["Tehran", 7, "Karaj"]],
+        "truncated": True,
+    }
+    sent = backend.server.requests[-1]
+    assert "DRILLTHROUGH MAXROWS 3 SELECT FROM [Sales] WHERE ([Measures].[Rides], [Geo].[City].&amp;[1])" in sent
+    assert "<Format>Tabular</Format>" in sent

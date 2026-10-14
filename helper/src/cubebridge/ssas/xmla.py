@@ -17,6 +17,8 @@ from ..errors import CubeError, ProtocolError
 from ..pivot.model import AxisMember, Cell, CellSet
 
 _XSI_TYPE = "{http://www.w3.org/2001/XMLSchema-instance}type"
+_XSD_NS = "{http://www.w3.org/2001/XMLSchema}"
+_SQL_FIELD = "{urn:schemas-microsoft-com:xml-sql}field"
 _ENCODED_CHAR = re.compile(r"_x([0-9A-Fa-f]{4})_")
 
 _INT_TYPES = frozenset(
@@ -36,6 +38,9 @@ class Parsed:
     session_id: str | None = None
     handshake_text: str | None = None
     error: CubeError | None = None
+    # Rowset columns in schema order, as their decoded names, and their XSD types.
+    columns: list[str] = field(default_factory=list)
+    column_types: dict[str, str] = field(default_factory=dict)
 
     @property
     def handshake_token(self) -> bytes | None:
@@ -88,6 +93,13 @@ def parse(data: bytes, *, during_auth: bool = False, raise_errors: bool = True) 
                 parsed.session_id = element.get("SessionId")
             elif tag == "SspiHandshake":
                 parsed.handshake_text = element.text or ""
+            elif element.tag == _XSD_NS + "element" and (element.get("type") or "").startswith("xsd:"):
+                # A column of a typed rowset (DRILLTHROUGH). sql:field holds the readable
+                # name; the element name is its XML-encoded form, used in the rows.
+                name = _decode_name(element.get("name", ""))
+                if name:
+                    parsed.columns.append(name)
+                    parsed.column_types[name] = element.get("type", "")
     except ET.ParseError as exc:
         raise ProtocolError(f"the response is not valid XML ({exc})") from exc
 
@@ -102,6 +114,41 @@ def parse(data: bytes, *, during_auth: bool = False, raise_errors: bool = True) 
         parsed.cellset.axes.append(axes[f"Axis{index}"])
         index += 1
     return parsed
+
+
+def typed_rows(parsed: Parsed) -> list[list[object]]:
+    """Rows in column order, converted by the schema's types; missing cells are None.
+
+    Without a schema, columns are taken in first-seen order and left as text.
+    """
+    columns = list(parsed.columns)
+    if not columns:
+        for row in parsed.rows:
+            for name in row:
+                if name not in columns:
+                    columns.append(name)
+    out = []
+    for row in parsed.rows:
+        line: list[object] = []
+        for name in columns:
+            text = row.get(name)
+            line.append(None if text is None else _convert(text, parsed.column_types.get(name, "")))
+        out.append(line)
+    return out
+
+
+def _convert(text: str, xsd_type: str) -> object:
+    kind = xsd_type.rsplit(":", 1)[-1]
+    try:
+        if kind in _INT_TYPES:
+            return int(text)
+        if kind in _FLOAT_TYPES:
+            return float(text)
+    except ValueError:
+        return text
+    if kind == "boolean":
+        return text.strip().lower() in ("true", "1")
+    return text
 
 
 def _server_error(text: str, during_auth: bool) -> CubeError:

@@ -16,10 +16,12 @@ from collections.abc import Callable
 
 from ..errors import CubeError
 from ..pivot import mdx
+from ..pivot.grid import clean_value
 from ..pivot.model import CellSet, Layout
 from ..pivot.names import validate_unique_name
-from ..ssas import resolve
+from ..ssas import resolve, xmla
 from ..ssas.session import Session
+from .base import plain_column_names
 
 
 def _is_true(value: str | None) -> bool:
@@ -237,6 +239,22 @@ class SsasBackend:
             if t and t[0].unique_name != all_member
         ]
         return {"members": found[:limit], "truncated": len(found) > limit}
+
+    def details(
+        self, catalog: str, cube: str, layout: Layout, members: list[str], measure: str, max_rows: int
+    ) -> dict:
+        text = mdx.details_query(cube, layout, members, measure, max_rows)
+        with self._state:
+            self._active_queries += 1
+            epoch = self._cancel_epoch
+        try:
+            parsed = self._call(lambda s: s.execute_rowset(text, catalog), epoch=epoch)
+        finally:
+            with self._state:
+                self._active_queries -= 1
+        columns = parsed.columns or list(dict.fromkeys(name for row in parsed.rows for name in row))
+        rows = [[clean_value(v) for v in line] for line in xmla.typed_rows(parsed)]
+        return {"columns": plain_column_names(columns), "rows": rows[:max_rows], "truncated": len(rows) > max_rows}
 
     def query(self, catalog: str, cube: str, layout: Layout) -> tuple[CellSet, str]:
         text = mdx.build_query(cube, layout)

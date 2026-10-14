@@ -67,7 +67,7 @@ def build_grid(
                 value_line.append(None)
                 format_line.append(0)
                 continue
-            value_line.append(_clean(cell.value))
+            value_line.append(clean_value(cell.value))
             fmt = to_excel(cell.format_string)
             index = palette_index.get(fmt)
             if index is None:
@@ -173,7 +173,7 @@ def _filter_text(placed: PlacedField) -> str:
     return match.group(1).replace("]]", "]") if match else placed.members[0]
 
 
-def _clean(value: object) -> object:
+def clean_value(value: object) -> object:
     """Make a cell value safe for JSON and for an Excel cell."""
     if isinstance(value, bool) or value is None or isinstance(value, str):
         return value

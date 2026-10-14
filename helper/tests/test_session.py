@@ -229,3 +229,14 @@ def test_whatever_the_last_sign_in_reply_carries_is_not_decoded(ntlm_users):
         session = open_session(server, user, password)
         assert len(session.discover("DBSCHEMA_CATALOGS")) == 2
         session.close()
+
+
+def test_execute_rowset_returns_a_typed_table(ntlm_users):
+    user, password = ntlm_users
+    answer = x.drillthrough_rowset([("[$T].[City]", "xsd:string"), ("[$T].[Rides]", "xsd:int")], [["Tehran", "3"]])
+    with FakeSsas({"DRILLTHROUGH": answer}) as server:
+        session = open_session(server, user, password)
+        parsed = session.execute_rowset("DRILLTHROUGH MAXROWS 11 SELECT FROM [Sales] WHERE ([Measures].[Rides])", catalog="Sales")
+        session.close()
+    assert parsed.columns == ["[$T].[City]", "[$T].[Rides]"]
+    assert "<Format>Tabular</Format>" in server.requests[0]

@@ -191,3 +191,23 @@ def test_a_token_that_really_is_not_base64_is_reported_by_shape_not_content():
     detail = info.value.detail
     assert "U+0021" in detail and "U+002A" in detail and "18 characters" in detail
     assert "secret" not in detail and "token" not in detail.replace("sign-in token", "")
+
+
+# -- Show Details ------------------------------------------------------------------
+def test_drillthrough_rowset_columns_follow_the_schema_and_values_are_typed():
+    data = x.drillthrough_rowset(
+        [("[$Trips].[City]", "xsd:string"), ("[$Trips].[Rides]", "xsd:long"), ("[$Trips].[Fare]", "xsd:double"), ("[$Trips].[Paid]", "xsd:boolean")],
+        [["Tehran", "12", "4.5", "true"], ["Shiraz", None, "3", "false"], ["00123", "7", None, None]],
+    )
+    parsed = xmla.parse(data)
+    assert parsed.columns == ["[$Trips].[City]", "[$Trips].[Rides]", "[$Trips].[Fare]", "[$Trips].[Paid]"]
+    assert xmla.typed_rows(parsed) == [
+        ["Tehran", 12, 4.5, True],
+        ["Shiraz", None, 3.0, False],
+        ["00123", 7, None, None],  # a string column keeps its leading zeros
+    ]
+
+
+def test_a_rowset_without_schema_falls_back_to_first_seen_columns_as_text():
+    parsed = xmla.parse(x.rowset([{"A": "1", "B": "x"}, {"B": "y", "C": "2"}]))
+    assert xmla.typed_rows(parsed) == [["1", "x", None], [None, "y", "2"]]

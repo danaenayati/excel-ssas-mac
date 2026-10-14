@@ -48,12 +48,18 @@ def discover(
     ).encode("utf-8")
 
 
-def execute(statement: str, catalog: str | None = None, session_id: str | None = None) -> bytes:
+def execute(
+    statement: str, catalog: str | None = None, session_id: str | None = None, *, tabular: bool = False
+) -> bytes:
     properties = {}
     if catalog:
         properties["Catalog"] = catalog
-    # A cellset with one Tuple per axis position, without the XSD schema block.
-    properties.update({"Format": "Multidimensional", "AxisFormat": "TupleFormat", "Content": "Data"})
+    if tabular:
+        # A DRILLTHROUGH answers with rows; the schema carries each column's type.
+        properties.update({"Format": "Tabular", "Content": "SchemaData"})
+    else:
+        # A cellset with one Tuple per axis position, without the XSD schema block.
+        properties.update({"Format": "Multidimensional", "AxisFormat": "TupleFormat", "Content": "Data"})
     return (
         f'<Envelope xmlns="{_SOAP_NS}">{_session_header(session_id)}<Body>'
         f'<Execute xmlns="{_XMLA_NS}"><Command><Statement>{escape(statement)}</Statement></Command>'

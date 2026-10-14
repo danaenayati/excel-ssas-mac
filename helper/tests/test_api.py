@@ -356,3 +356,23 @@ def test_a_failed_request_leaves_its_category_and_detail_in_the_log(app, caplog)
     text = caplog.text
     assert "auth" in text and "refused the sign-in" in text
     assert "wrong" not in text  # never the password
+
+
+def test_details_route_with_the_sample_cube(app):
+    status, fields = call(app, "GET", f"/api/connections/demo/fields?catalog={CATALOG}&cube=Ride%20Sales")
+    city = field(fields, "[Geography].[City]")
+    _, members = call(app, "POST", "/api/connections/demo/members", {"catalog": CATALOG, "cube": CUBE, "hierarchy": "[Geography].[City]"})
+    tehran = next(m for m in members["members"] if m["caption"] == "Tehran")
+    body = {
+        "catalog": CATALOG,
+        "cube": CUBE,
+        "layout": {"rows": [city], "values": [{"measure": "[Measures].[Rides]", "caption": "Rides"}]},
+        "members": [tehran["uniqueName"]],
+        "measure": "[Measures].[Rides]",
+        "maxRows": 5,
+    }
+    status, result = call(app, "POST", "/api/connections/demo/details", body)
+    assert status == 200 and len(result["rows"]) == 5 and result["truncated"] is True and result["columns"]
+    for bad in ({"maxRows": 0}, {"maxRows": 200000}, {"members": "x"}, {"measure": None}):
+        status, response = call(app, "POST", "/api/connections/demo/details", dict(body, **bad))
+        assert status == 400, bad
