@@ -83,8 +83,12 @@ You can also add a connection from the panel itself with **Add connection**.
 8. **Refresh** updates the numbers. The view is saved inside the workbook, so you can
    reopen the file later and refresh it. To do that automatically, tick
    **Refresh when the workbook opens** in the report's **⋯** menu.
-   Below the areas: **Grand Totals** (Excel's four choices), **Subtotals**, **Hide
-   empty**, **Repeat All Item Labels**, **For empty cells show**, and **Defer updates**.
+   Below the areas: **Subtotals** (none, at the bottom or at the top of each group),
+   **Grand Totals** (Excel's four choices), **Report layout** (Compact, Outline or
+   Tabular Form; new reports start in Compact Form with subtotals at the top, as in
+   Excel), **Hide empty**, **Repeat All Item Labels**, **For empty cells show**, and
+   **Defer updates**. In Compact Form, clicking **Row Labels** or **Column Labels**
+   first asks which field to filter, as on Windows.
 9. **Each sheet has its own reports**, as on Windows. The panel edits the report on the
    sheet you are looking at; on a new sheet, ticking fields starts a new report at the
    selected cell. **New report here** starts another report on the same sheet. If a
@@ -100,8 +104,6 @@ Your password is kept in the Mac's Keychain. It is never written into a workbook
 - PivotTables that colleagues built on Windows against the cube still do not refresh
   on Mac.
 - It is read-only. It cannot change anything in the cube.
-- The report is laid out in Excel's tabular form (one column per row field). Compact
-  and outline forms are not offered.
 - Not offered because Excel on Windows does not offer them for cube PivotTables
   either: grouping, calculated fields and items, and the same measure twice.
 - Not yet: Date Filters, KPIs and named sets in the field list, and the CUBEVALUE
