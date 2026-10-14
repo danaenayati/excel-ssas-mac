@@ -44,6 +44,8 @@ SERVICE = "[Service].[Type]"
         "[Product].[Name].&[A ]] bracket]",
         "[شهر].[تهران]",
         "[Measures]",
+        # A tabular model's blank item: the key part is a bare "&" (as the server returns it).
+        "[Installs].[campaign_type].&",
     ],
 )
 def test_real_unique_names_are_accepted(name):
@@ -66,6 +68,11 @@ def test_real_unique_names_are_accepted(name):
         "[A]" + ".[B]" * 400,
         "{[A]}",
         "([A].[B])",
+        "[A].[B].&.[C]",
+        "[A].[B].&&",
+        "[A].[B].& , [C]",
+        "[A].&x",
+        "&",
     ],
 )
 def test_anything_else_is_rejected(name):

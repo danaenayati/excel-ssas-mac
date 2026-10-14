@@ -14,7 +14,8 @@ import re
 from ..errors import CubeError
 
 _PART = r"\[(?:[^\]\x00-\x1f]|\]\])*\]"
-_UNIQUE_NAME = re.compile(rf"{_PART}(?:\.{_PART}|\.?&{_PART})*")
+# A tabular model names its blank item with a bare "&" for the key: `[T].[Column].&`.
+_UNIQUE_NAME = re.compile(rf"{_PART}(?:\.{_PART}|\.?&{_PART})*(?:\.&)?")
 MAX_NAME = 1000
 
 
