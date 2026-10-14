@@ -541,6 +541,7 @@ class SampleCube {
     if (n === 0) return [{ nodes: [], totalFrom: 0, kind: "data" }];
     const hiers = fields.map((f) => this.hier(f.hierarchy));
     const details = fields.map((f, i) => this.detail(hiers[i], f, kept[i] ?? null, facts));
+    const atTop = subtotalsAtTop(options);
 
     const build = (k: number): { nodes: Node[]; totalFrom: number }[] => {
       const out: { nodes: Node[]; totalFrom: number }[] = [];
@@ -552,7 +553,10 @@ class SampleCube {
       const wanted = k === 0 ? grandTotal : options.subtotals;
       const rest = hiers.slice(k);
       if (wanted && rest.every((h) => h.all !== null)) {
-        out.push({ nodes: rest.map((h) => h.all as Node), totalFrom: k });
+        // The grand total always ends the axis; a subtotal may head its group.
+        const total = { nodes: rest.map((h) => h.all as Node), totalFrom: k };
+        if (atTop && k > 0) out.unshift(total);
+        else out.push(total);
       }
       return out;
     };
@@ -598,13 +602,14 @@ class SampleCube {
     }
     const node = tuple.nodes[r];
     const member = this.memberRef(node, fields[r]);
-    const repeated =
-      previous !== null &&
-      isMember(previous, r) &&
-      previous.nodes.slice(0, r + 1).every((n, i) => n === tuple.nodes[i]);
-    if (repeated) return { text: "", indent: 0, kind: "blank", member };
+    // As the helper does, a tuple's members are compared with the previous tuple's,
+    // totals included: after a subtotal at the top of its group, the group's item is a
+    // repeat. A blanked repeat keeps its indent.
+    const repeated = previous !== null && previous.nodes.slice(0, r + 1).every((n, i) => n === tuple.nodes[i]);
     const base = hiers[r].all ? 1 : 0;
-    return { text: node.caption, indent: Math.max(0, node.level - base), kind: "member", member };
+    const indent = Math.max(0, node.level - base);
+    if (repeated) return { text: "", indent, kind: "blank", member };
+    return { text: node.caption, indent, kind: "member", member };
   }
 
   query(layout: Layout, elapsedMs: number): Grid {
@@ -1075,6 +1080,15 @@ export function valueFiltered<T>(filter: ValueFilter, items: T[], value: (item: 
   }
 }
 
+/**
+ * Each subtotal before the items it adds up, on both axes; the grand total stays last.
+ * As the helper reads the options: only in compact and outline form (tabular has no
+ * subtotals at the top), and the form defaults to tabular.
+ */
+function subtotalsAtTop(options: LayoutOptions): boolean {
+  return options.subtotalsAt === "top" && (options.form === "compact" || options.form === "outline");
+}
+
 // ---------------------------------------------------------------------------
 // A plausible MDX string, for "Show query". Follows the helper's rules loosely.
 // ---------------------------------------------------------------------------
@@ -1093,7 +1107,8 @@ function sampleMdx(layout: Layout): string {
       const wanted = k === 0 ? grand : options.subtotals;
       if (!wanted || rest.some((f) => f.allMember === null)) return inner;
       const all = rest.map((f) => f.allMember).join(", ");
-      return `{${inner}, {${rest.length > 1 ? `(${all})` : all}}}`;
+      const total = `{${rest.length > 1 ? `(${all})` : all}}`;
+      return k > 0 && subtotalsAtTop(options) ? `{${total}, ${inner}}` : `{${inner}, ${total}}`;
     };
     return build(0);
   };
