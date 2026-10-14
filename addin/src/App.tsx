@@ -27,7 +27,7 @@ import {
   type SheetSelection,
 } from "./sheet/host";
 import { REFRESH_ON_OPEN } from "./sheet/host";
-import { guessFieldCell, type MemberHit } from "./sheet/layout";
+import { guessFieldCell, labelsCaption, type MemberHit } from "./sheet/layout";
 import { PreviewHost } from "./sheet/preview";
 import {
   findField,
@@ -36,9 +36,13 @@ import {
   layoutReducer,
   locate,
   needsBaseField,
+  reportForm,
   selectionSummary,
+  subtotalsChoice,
   type BooleanOption,
   type LayoutAction,
+  type ReportForm,
+  type SubtotalsChoice,
 } from "./state/layout";
 import { currentReducer, decidePlace, newReportDef, placeLabel, reportForSheet } from "./state/report";
 import {
@@ -102,9 +106,22 @@ function useLatest<T>(value: T) {
 }
 
 const OPTION_LABELS: [BooleanOption, string][] = [
-  ["subtotals", "Subtotals"],
   ["nonEmpty", "Hide empty"],
   ["repeatLabels", "Repeat All Item Labels"],
+];
+
+/** Excel's Subtotals choices (Design tab), in Excel's words. */
+const SUBTOTALS: { value: SubtotalsChoice; label: string }[] = [
+  { value: "none", label: "Do Not Show Subtotals" },
+  { value: "bottom", label: "Show all Subtotals at Bottom of Group" },
+  { value: "top", label: "Show all Subtotals at Top of Group" },
+];
+
+/** Excel's Report Layout choices (Design tab). */
+const REPORT_LAYOUTS: { value: ReportForm; label: string }[] = [
+  { value: "compact", label: "Compact Form" },
+  { value: "outline", label: "Outline Form" },
+  { value: "tabular", label: "Tabular Form" },
 ];
 
 /** Excel's Grand Totals choices (Design tab), with Excel's own reading of rows/columns. */
@@ -160,6 +177,11 @@ export function App({ api, host, mock }: Props) {
   const [ran, setRan] = useState<{ id: string; revision: number } | null>(null);
   const [question, setQuestion] = useState<Question | null>(null);
   const [picker, setPicker] = useState<string | null>(null);
+  /** Set while the checklist was opened from "Row Labels" or "Column Labels": it offers that area's fields. */
+  const [pickerFrom, setPickerFrom] = useState<"rows" | "columns" | null>(null);
+  useEffect(() => {
+    if (picker === null) setPickerFrom(null);
+  }, [picker]);
   const [search, setSearch] = useState("");
   const [reportMenu, setReportMenu] = useState<HTMLElement | null>(null);
   const [generation, setGeneration] = useState(0);
@@ -479,26 +501,36 @@ export function App({ api, host, mock }: Props) {
       if (!target) return;
 
       let onSheet: PlacedField | null = null;
+      // Compact form's "Row Labels" / "Column Labels": the checklist offers every field of that area.
+      let labels: "rows" | "columns" | null = null;
       const known = runner.buttonAt(id, click.report);
       if (known !== undefined) {
         onSheet = known;
+        labels = runner.labelsAt(id, click.report);
       } else if (saved) {
         // No result in memory (the workbook was just reopened): go by where the saved
         // layout puts its filter cells, and for a caption cell believe it only if the
         // cell really holds that field's caption.
         const guess = guessFieldCell(saved.layout, click.report.row, click.report.col);
         const field = guess ? saved.layout[guess.area][guess.index] ?? null : null;
-        if (guess && field && (guess.area === "filters" || click.value === field.caption)) onSheet = field;
+        const caption = guess && guess.labels ? labelsCaption(guess.area) : field ? field.caption : null;
+        if (guess && field && (guess.area === "filters" || click.value === caption)) {
+          onSheet = field;
+          if (guess.labels && guess.area !== "filters") labels = guess.area;
+        }
       }
       if (!onSheet) return; // an ordinary cell
 
       // The field may have been taken out of the layout in the pane since.
-      const field = findField(target.layout, onSheet.hierarchy);
+      const field = labels ? target.layout[labels][0] ?? null : findField(target.layout, onSheet.hierarchy);
       if (!field) return;
       if (!cur || cur.def.id !== id) openReport(target);
       else setScreen("explorer");
       // Without its connection the report shows the "choose a connection" banner instead.
-      if (connectionsRef.current.some((c) => c.id === target.connectionId)) setPicker(field.hierarchy);
+      if (connectionsRef.current.some((c) => c.id === target.connectionId)) {
+        setPickerFrom(labels);
+        setPicker(field.hierarchy);
+      }
     },
     [connectionsRef, currentRef, openReport, reportsRef, runner],
   );
@@ -834,6 +866,7 @@ export function App({ api, host, mock }: Props) {
   // What the selected cell offers: drill for a member, "Filter <field>…" for a field.
   let drill: Drill = { state: "none" };
   let filterField: PlacedField | null = null;
+  let filterLabels: "rows" | "columns" | null = null;
   let detailsTarget: ReturnType<ReportRunner["detailsFor"]> = null;
   if (def && selection && selection.report && selection.report.id === def.id) {
     const at = selection.report;
@@ -848,10 +881,22 @@ export function App({ api, host, mock }: Props) {
     } else {
       const hit = runner.memberAt(def.id, at.row, at.col);
       if (hit) drill = { state: "member", hit };
+      filterLabels = runner.labelsAt(def.id, at);
     }
     // Offer it only if the field is still in the layout being edited.
-    if (onSheet) filterField = findField(def.layout, onSheet.hierarchy);
+    if (onSheet) filterField = filterLabels ? def.layout[filterLabels][0] ?? null : findField(def.layout, onSheet.hierarchy);
   }
+  // "Row Labels" with several fields: Windows names the button, and each field's selection.
+  const labelsFields = def && filterLabels ? def.layout[filterLabels] : [];
+  const filterSummary =
+    filterField && filterLabels && labelsFields.length > 1
+      ? {
+          caption: labelsCaption(filterLabels),
+          summary: labelsFields.map((f) => `${f.caption}: ${selectionSummary(f)}`).join("; "),
+        }
+      : filterField
+        ? { caption: filterField.caption, summary: selectionSummary(filterField) }
+        : null;
 
   const expand = (hit: MemberHit) =>
     act({ type: "expand", hierarchy: hit.member.hierarchy, member: hit.member.uniqueName }, true);
@@ -971,6 +1016,7 @@ export function App({ api, host, mock }: Props) {
     const others = reports.filter((d) => d.id !== def.id);
     const showSwitch = others.length > 0;
     const lost = current.persisted && !location;
+    const form = reportForm(def.layout.options);
     body = (
       <div className="screen explorer">
         <header className="bar">
@@ -1130,6 +1176,21 @@ export function App({ api, host, mock }: Props) {
 
         <div className="options">
           <label className="row-field options-wide">
+            <span className="row-label">Subtotals</span>
+            <select
+              className="select"
+              value={subtotalsChoice(def.layout.options)}
+              onChange={(event) => act({ type: "setSubtotals", at: event.target.value as SubtotalsChoice })}
+            >
+              {SUBTOTALS.map((s) => (
+                // Tabular form has no subtotals at the top of a group; Excel greys the choice out.
+                <option key={s.value} value={s.value} disabled={s.value === "top" && form === "tabular"}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="row-field options-wide">
             <span className="row-label">Grand totals</span>
             <select
               className="select"
@@ -1146,16 +1207,35 @@ export function App({ api, host, mock }: Props) {
               ))}
             </select>
           </label>
-          {OPTION_LABELS.map(([option, label]) => (
-            <label key={option} className="check">
-              <input
-                type="checkbox"
-                checked={Boolean(def.layout.options[option])}
-                onChange={(event) => act({ type: "setOption", option, value: event.target.checked })}
-              />
-              {label}
-            </label>
-          ))}
+          <label className="row-field options-wide">
+            <span className="row-label">Report layout</span>
+            <select
+              className="select"
+              value={form}
+              onChange={(event) => act({ type: "setForm", form: event.target.value as ReportForm })}
+            >
+              {REPORT_LAYOUTS.map((l) => (
+                <option key={l.value} value={l.value}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {OPTION_LABELS.map(([option, label]) => {
+            // Compact form writes every row field in one column: nothing to repeat (Excel greys it out).
+            const off = option === "repeatLabels" && form === "compact";
+            return (
+              <label key={option} className={off ? "check is-disabled" : "check"}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(def.layout.options[option])}
+                  disabled={off}
+                  onChange={(event) => act({ type: "setOption", option, value: event.target.checked })}
+                />
+                {label}
+              </label>
+            );
+          })}
           <label className="check">
             <input type="checkbox" checked={defer} onChange={(event) => setDefer(event.target.checked)} />
             Defer updates
@@ -1196,12 +1276,12 @@ export function App({ api, host, mock }: Props) {
           note={note}
           runtime={runtime}
           drill={drill}
-          filter={
-            filterField && connection
-              ? { caption: filterField.caption, summary: selectionSummary(filterField) }
-              : null
-          }
-          onFilter={() => filterField && setPicker(filterField.hierarchy)}
+          filter={connection ? filterSummary : null}
+          onFilter={() => {
+            if (!filterField) return;
+            setPickerFrom(filterLabels);
+            setPicker(filterField.hierarchy);
+          }}
           details={Boolean(detailsTarget) && connection !== null}
           onDetails={() => void showDetails()}
           onExpand={expand}
@@ -1234,6 +1314,11 @@ export function App({ api, host, mock }: Props) {
             catalog={def.catalog}
             cube={def.cube}
             field={pickerField}
+            choose={
+              pickerFrom && pickerArea === pickerFrom
+                ? { fields: def.layout[pickerFrom], onChoose: (hierarchy) => setPicker(hierarchy) }
+                : undefined
+            }
             onCancel={() => setPicker(null)}
             onApply={(members, captions) => {
               setPicker(null);

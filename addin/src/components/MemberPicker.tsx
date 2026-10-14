@@ -43,6 +43,14 @@ interface Props {
     /** For Expand / Collapse Entire Field; null without a result. */
     expandable: { members: string[]; anyChildren: boolean } | null;
   };
+  /**
+   * Opened from compact form's "Row Labels" or "Column Labels": the fields of that area,
+   * to choose from first (Windows' "Select field:"). Shown when there are several.
+   */
+  choose?: {
+    fields: PlacedField[];
+    onChoose: (hierarchy: string) => void;
+  };
 }
 
 const SEARCH_DELAY_MS = 300;
@@ -55,7 +63,7 @@ interface SearchState {
   error: UiError | null;
 }
 
-export function MemberPicker({ api, connectionId, catalog, cube, field, onApply, onCancel, menu }: Props) {
+export function MemberPicker({ api, connectionId, catalog, cube, field, onApply, onCancel, menu, choose }: Props) {
   const [state, setState] = useState<PickerState>(() => initPicker(field));
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const [loading, setLoading] = useState<ReadonlySet<string>>(new Set([ROOT]));
@@ -234,6 +242,23 @@ export function MemberPicker({ api, connectionId, catalog, cube, field, onApply,
           <Icon name="close" />
         </button>
       </header>
+
+      {choose && choose.fields.length > 1 && (
+        <label className="row-field picker-choose">
+          <span className="row-label">Select field:</span>
+          <select
+            className="select"
+            value={field.hierarchy}
+            onChange={(event) => choose.onChoose(event.target.value)}
+          >
+            {choose.fields.map((f) => (
+              <option key={f.hierarchy} value={f.hierarchy}>
+                {f.caption}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       <div className="picker-body">
       {menu && (

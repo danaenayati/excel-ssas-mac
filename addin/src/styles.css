@@ -881,6 +881,11 @@ input[type="checkbox"] {
   white-space: normal;
 }
 
+/* An option that does not apply to the current report layout, greyed out as in Excel. */
+.options .check.is-disabled {
+  color: var(--text-2);
+}
+
 .options-label {
   width: auto;
 }
@@ -1122,6 +1127,16 @@ input[type="checkbox"] {
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
+}
+
+/* "Select field:" above the menu, when the panel was opened from Row Labels or Column Labels. */
+.picker-choose {
+  flex: none;
+  padding: 8px 8px 0;
+}
+
+.picker-choose .row-label {
+  width: auto;
 }
 
 .picker-heading {
