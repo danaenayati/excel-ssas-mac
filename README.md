@@ -1,11 +1,21 @@
-# Cube Explorer: SSAS cubes in Excel for Mac (SQL Server Analysis Services For Mac)
+# Cube Explorer: SQL Server Analysis Services (SSAS) cubes in Excel for Mac
 
-Excel for Windows can connect to a **SQL Server Analysis Services (SSAS)** cube and
-build PivotTables from it. Excel for Mac cannot: the option is simply not there.
-**Cube Explorer** adds it. You get a PivotTable-style panel inside Excel for Mac that
-connects to your company's cube, lets you pick measures and fields, filter, drill
-down and calculate, and writes refreshable results into your sheet. It works the way
-Excel on Windows does, with the same menus and words.
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+![macOS 13.5+](https://img.shields.io/badge/macOS-13.5%2B-lightgrey.svg)
+![Excel for Mac](https://img.shields.io/badge/Excel-for%20Mac-217346.svg)
+
+**Connect Excel for Mac to an SSAS cube and build PivotTable reports from it, with no
+Windows PC, no Parallels and no virtual machine.** Free and open source.
+
+Excel for Windows can connect to a **SQL Server Analysis Services (SSAS)** cube
+(*Data > Get Data > From Database > From Analysis Services*) and build PivotTables from
+it. Excel for Mac cannot: the option is simply not there, and OLAP PivotTables do not
+exist on the Mac. **Cube Explorer** adds them. You get a PivotTable-style panel inside
+Excel for Mac that connects to your company's cube (tabular or multidimensional), lets
+you pick measures and fields, filter, drill down and calculate, and writes refreshable
+results into your sheet. It also brings cube formulas like `CUBEVALUE` and
+`CUBEMEMBER`, slicers and charts. It works the way Excel on Windows does, with the same
+menus and words.
 
 ![The Cube Explorer panel next to a report built from the built-in Sample cube, in Compact Form](docs/images/panel-compact.png)
 
@@ -29,6 +39,7 @@ the same way Windows Excel does, with your Windows (domain) user name and passwo
 - [Uninstall](#uninstall)
 - [If something goes wrong](#if-something-goes-wrong)
 - [How it compares with Excel on Windows](#how-it-compares-with-excel-on-windows)
+- [Questions](#questions)
 - [Privacy and security](#privacy-and-security)
 - [How it works (for developers)](#how-it-works-for-developers)
 - [License](#license)
@@ -146,13 +157,8 @@ curl -fsSL https://raw.githubusercontent.com/danaenayati/excel-ssas-mac/main/get
 That downloads Cube Explorer into a folder called **CubeExplorer** in your home
 folder and installs it. It takes a few minutes the first time.
 
-**While this repository is private**, the line above cannot download it without your
-GitHub login. Use one of these instead:
+Other ways, if you prefer:
 
-- With the [GitHub command-line tool](https://cli.github.com) signed in:
-  ```bash
-  gh repo clone danaenayati/excel-ssas-mac ~/CubeExplorer && ~/CubeExplorer/install.sh
-  ```
 - With git:
   ```bash
   git clone https://github.com/danaenayati/excel-ssas-mac.git ~/CubeExplorer && ~/CubeExplorer/install.sh
@@ -344,6 +350,48 @@ on Windows greys out Group for cube PivotTables).
   a web address (`msmdpump.dll`) can also use Basic over `https://`.
 - PivotTables your colleagues built on Windows do not refresh on a Mac; build the
   report again here once.
+
+---
+
+## Questions
+
+### Can Excel for Mac connect to SQL Server Analysis Services?
+
+Not on its own. Excel for Mac has no *From Analysis Services* connection and cannot
+make OLAP PivotTables. Cube Explorer adds both: a connection to the SSAS server and a
+PivotTable-style panel that writes the report into your sheet.
+
+### Do I need Windows, Parallels or a virtual machine?
+
+No. Cube Explorer runs on the Mac itself. It talks to the server the way Excel on
+Windows does (the same native protocol, MDX queries and Windows sign-in), so nothing
+has to be installed or changed on the server either.
+
+### Does it work with tabular models and multidimensional cubes?
+
+Both are queried the same way (MDX over the same protocol). It has been used with a
+tabular model on SQL Server Analysis Services and with the built-in Sample cube.
+
+### Does it work with Azure Analysis Services or Power BI datasets?
+
+Not yet. Those need a Microsoft Entra ID (Azure AD) sign-in, which Cube Explorer does
+not have. It supports NTLM and Kerberos (Windows sign-in), and Basic over `https://`.
+
+### Can I use CUBEVALUE and CUBEMEMBER formulas on a Mac?
+
+Yes, as `CUBE.VALUE`, `CUBE.MEMBER`, `CUBE.MEMBERPROPERTY`, `CUBE.RANKEDMEMBER` and
+`CUBE.SETCOUNT`, and **Convert to Formulas** turns a report into them. See
+[Use it, step by step](#use-it-step-by-step), step 11.
+
+### Is there a Power Pivot for Mac?
+
+No; Microsoft does not make one. If your data is already in an SSAS cube, Cube
+Explorer lets you work with it from Excel for Mac.
+
+### Is it free? Does it change data on the server?
+
+It is free and open source (GPL-3.0). It only reads from the cube and cannot change
+anything on the server.
 
 ---
 

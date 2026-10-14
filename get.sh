@@ -6,9 +6,8 @@
 # It puts the project in ~/CubeExplorer (or $CUBE_EXPLORER_DIR) and runs its install.sh,
 # which needs nothing installed beforehand. Run the same command again to update.
 #
-# While the repository is private, the plain download above needs a GitHub login:
-# this script then uses the GitHub command-line tool (`gh`) if it is signed in, or a
-# git clone, which asks for your GitHub credentials.
+# If the plain download fails (a network that blocks it, say), the script falls back
+# to the GitHub command-line tool (`gh`) if it is signed in, then to a git clone.
 set -euo pipefail
 
 SLUG="danaenayati/excel-ssas-mac"
@@ -32,7 +31,7 @@ else
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   say "Downloading Cube Explorer"
-  # While the repository is private this download is refused; the next ways sign in.
+  # If this download is refused, the next ways try GitHub's own tools.
   if curl -fsSL "https://codeload.github.com/$SLUG/tar.gz/refs/heads/$BRANCH" -o "$tmp/source.tar.gz" 2>/dev/null; then
     mkdir -p "$tmp/source"
     tar -xzf "$tmp/source.tar.gz" -C "$tmp/source" --strip-components 1
@@ -40,9 +39,9 @@ else
     gh repo clone "$SLUG" "$tmp/source" -- --quiet --branch "$BRANCH" || fail "gh could not download $SLUG."
   elif have_git; then
     git clone --quiet --branch "$BRANCH" "https://github.com/$SLUG.git" "$tmp/source" \
-      || fail "git could not download $SLUG. Is your GitHub account allowed to see it?"
+      || fail "git could not download $SLUG. Check the internet connection."
   else
-    fail "the download needs a GitHub login while the project is private. Download it as a ZIP from https://github.com/$SLUG, unzip it, and run install.sh inside it."
+    fail "could not download Cube Explorer. Download it as a ZIP from https://github.com/$SLUG, unzip it, and run install.sh inside it."
   fi
   [ -f "$tmp/source/install.sh" ] || fail "the download does not look like Cube Explorer."
   # Keep nothing from an older copy but replace it whole: it holds no settings.

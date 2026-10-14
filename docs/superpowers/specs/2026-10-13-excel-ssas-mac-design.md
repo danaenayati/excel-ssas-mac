@@ -1,6 +1,6 @@
 # Cube for Mac Excel: design
 
-Date: 2026-10-13. Status: approved by Dana ("do all project").
+Date: 2026-10-13. Status: approved.
 
 ## Goal
 
@@ -8,12 +8,12 @@ Let a Mac Excel user explore an on-premises SQL Server Analysis Services (SSAS) 
 the way a Windows user does with a cube PivotTable: pick measures and dimensions from
 a field list, filter, drill, and get refreshable numbers in the sheet.
 
-Constraints set by the user:
+Constraints:
 
 - Server is reached by company server name with Windows sign-in (native TCP, port 2383).
-- No help from IT: nothing may be changed or added on the company side, no Windows machine.
+- Nothing may be changed or added on the server side, and no Windows machine is used.
 - The user is not a developer. One install, then everything happens inside Excel.
-- Built for Dana's Mac first. Distribution to colleagues is out of scope.
+- One person's Mac first; packaging for wider distribution came later.
 
 ## What is impossible, and what replaces it
 
