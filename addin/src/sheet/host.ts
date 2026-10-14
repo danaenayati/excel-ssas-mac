@@ -111,6 +111,18 @@ export interface SheetHost {
   /** A workbook setting that is on or off, such as `cube.refreshOnOpen`. Off when absent. */
   getFlag(key: string): Promise<boolean>;
   setFlag(key: string, on: boolean): Promise<void>;
+
+  /**
+   * Convert to Formulas: write formulas into the report's block. Both matrices are the
+   * block's size as last written; null leaves a cell's formula or number format as it
+   * is. Number formats go first, so that a cell changed from text to General takes its
+   * formula as a formula. Rejects with a SheetError when the block is gone or has
+   * another size (rows or columns were inserted). The report's name is left in place.
+   */
+  writeFormulas(reportId: string, formulas: (string | null)[][], numberFormats: (string | null)[][]): Promise<void>;
+
+  /** Recalculate every formula in the open workbooks, as Cmd+Option+F9 does; cube formulas ask the cube again. */
+  recalculate(): Promise<void>;
 }
 
 /** Workbook setting: refresh every report when the workbook is opened. */

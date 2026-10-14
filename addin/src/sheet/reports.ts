@@ -9,10 +9,11 @@
 // "Filter <field>…" action for the selected cell.
 
 import { parseReportDef, serializeReportDef } from "../state/report";
-import { cellA1, containsCell, parseA1, type Rect } from "./geometry";
+import { cellA1, chunkRect, containsCell, offsetRect, parseA1, rectA1, type Rect } from "./geometry";
 import {
   NAME_PREFIX,
   SETTING_PREFIX,
+  SheetError,
   reportName,
   settingKey,
   type CellAddress,
@@ -22,7 +23,7 @@ import {
   type SheetHost,
   type SheetSelection,
 } from "./host";
-import type { Block } from "./layout";
+import { MAX_CHUNK_CELLS, sliceMatrix, type Block } from "./layout";
 import {
   clearBlock,
   hasContentOutside,
@@ -438,6 +439,40 @@ export class ExcelHost implements SheetHost {
     return runExcel(async (context) => {
       if (on) context.workbook.settings.add(name, true);
       else context.workbook.settings.getItemOrNullObject(name).delete();
+      await context.sync();
+    });
+  }
+
+  writeFormulas(reportId: string, formulas: (string | null)[][], numberFormats: (string | null)[][]): Promise<void> {
+    return runExcel(async (context) => {
+      const extent = await readExtent(context, reportId);
+      if (!extent) throw new SheetError("This report is no longer on a sheet.");
+      const cols = formulas.length > 0 ? formulas[0].length : 0;
+      if (extent.rows !== formulas.length || extent.cols !== cols) {
+        throw new SheetError("The report's cells have moved since it was last refreshed. Refresh it, then try again.");
+      }
+      const sheet = context.workbook.worksheets.getItem(extent.sheetId);
+      const modern = supportsExcelApi("1.9");
+      // ExcelApi 1.1: a null in a 2-D array leaves that cell's formula or format alone.
+      for (const chunk of chunkRect({ row: 0, col: 0, rows: extent.rows, cols }, MAX_CHUNK_CELLS)) {
+        const chunkFormulas = sliceMatrix(formulas, chunk);
+        const chunkFormats = sliceMatrix(numberFormats, chunk);
+        const anything = (m: (string | null)[][]) => m.some((line) => line.some((cell) => cell !== null));
+        if (!anything(chunkFormulas) && !anything(chunkFormats)) continue;
+        if (modern) context.application.suspendScreenUpdatingUntilNextSync();
+        const range = sheet.getRange(rectA1(offsetRect(chunk, extent.row, extent.col)));
+        if (anything(chunkFormats)) range.numberFormat = chunkFormats;
+        range.formulas = chunkFormulas;
+        await context.sync();
+      }
+    });
+  }
+
+  recalculate(): Promise<void> {
+    return runExcel(async (context) => {
+      // ExcelApi 1.1. "Full" recalculates every formula, including cube formulas whose
+      // arguments did not change: the cube's numbers may have.
+      context.application.calculate(Excel.CalculationType.full);
       await context.sync();
     });
   }

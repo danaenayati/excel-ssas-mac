@@ -35,6 +35,11 @@ export interface PreviewCell {
   indent?: number;
   /** A KPI Status or Trend cell: drawn as an icon, as Excel does. */
   icon?: "status" | "trend";
+  /**
+   * A formula written by Convert to Formulas. The preview cannot run cube formulas, so
+   * the cell keeps showing the value it had, which is what the formula gives in Excel.
+   */
+  formula?: string;
 }
 
 export interface PreviewSnapshot {
@@ -267,6 +272,33 @@ export class PreviewHost implements SheetHost {
     if (on) this.settings.set(name, "true");
     else this.settings.delete(name);
     this.changed();
+  }
+
+  async writeFormulas(reportId: string, formulas: (string | null)[][], numberFormats: (string | null)[][]): Promise<void> {
+    const named = this.names.get(reportId);
+    const sheet = named ? this.sheetById(named.sheetId) : null;
+    if (!named || !sheet) throw new SheetError("This report is no longer on a sheet.");
+    const cols = formulas.length > 0 ? formulas[0].length : 0;
+    if (named.rect.rows !== formulas.length || named.rect.cols !== cols) {
+      throw new SheetError("The report's cells have moved since it was last refreshed. Refresh it, then try again.");
+    }
+    for (let r = 0; r < formulas.length; r++) {
+      for (let c = 0; c < cols; c++) {
+        const formula = formulas[r][c];
+        const format = numberFormats[r] ? numberFormats[r][c] : null;
+        if (formula === null && (format === null || format === undefined)) continue;
+        const at = key(named.rect.row + r, named.rect.col + c);
+        const cell = sheet.cells.get(at) ?? { value: "", format: "General" };
+        if (format !== null && format !== undefined) cell.format = format;
+        if (formula !== null) cell.formula = formula;
+        sheet.cells.set(at, cell);
+      }
+    }
+    this.changed();
+  }
+
+  async recalculate(): Promise<void> {
+    // Nothing to do: the preview shows the values cube formulas had when written.
   }
 
   // -- Preview only ---------------------------------------------------------

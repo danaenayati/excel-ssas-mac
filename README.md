@@ -224,6 +224,12 @@ Your password is stored in the Mac's **Keychain**, never in a workbook or a file
     server has more than one. The other arguments are unique member names, as the
     cube writes them. Or choose **Convert to Formulas** in the report's **⋯** menu to
     turn a whole report into formulas you can rearrange freely.
+    `CUBE.RANKEDMEMBER` and `CUBE.SETCOUNT` take the set as MDX text, such as
+    `"[Geography].[City].Children"`. A wrong argument shows `#VALUE!`, a member the cube
+    does not have `#N/A`; point at the cell to read why. The formulas ask the cube again
+    on Cmd+Option+F9 or **Refresh All**. Convert to Formulas cannot be undone, and is
+    refused for numbers no single formula can give: Show Values As, KPIs, calculated
+    measures, groups, named sets, and a page filter with several items.
 12. **More reports.** **New report here** starts another report at the selected cell.
     Each sheet's report comes back when you go to that sheet.
 
@@ -332,6 +338,9 @@ docs/     Design notes and images
   the answer into a grid the panel writes into the sheet. The JSON contract between the
   two is `addin/src/types.ts`.
 - Tests: `cd helper && uv run pytest` and `cd addin && npm test`.
+- `npm run build` builds the panel, then the cube functions (`addin/src/functions/`)
+  into `dist/functions.js`, `functions.html` and `functions.json`, which Excel runs in
+  its own JavaScript-only runtime, apart from the panel.
 - Try the panel in a browser without Excel, against the built-in Sample cube:
   `cd addin && npm run dev`, then open `http://localhost:5173/`.
 - The undocumented parts of the SSAS wire protocol come from the

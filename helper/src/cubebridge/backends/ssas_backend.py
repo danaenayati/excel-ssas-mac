@@ -14,6 +14,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 
+from .. import formulas
 from ..errors import CubeError
 from ..pivot import mdx
 from ..pivot.grid import clean_value
@@ -390,3 +391,17 @@ class SsasBackend:
         finally:
             with self._state:
                 self._active_queries -= 1
+
+    # -- cube formulas -------------------------------------------------------------
+    def cells(self, catalog: str, cube: str, tuples: list[list[str]]) -> list[dict]:
+        return formulas.evaluate_cells(cube, tuples, self._formula_runner(catalog))
+
+    def lookup(self, catalog: str, cube: str, items: list[dict]) -> list[dict]:
+        return formulas.evaluate_lookups(cube, items, self._formula_runner(catalog))
+
+    def _formula_runner(self, catalog: str):
+        # Formula queries run without an epoch, as metadata requests do, so they are not
+        # "running queries": the pane's Cancel is aimed at the pane's own report, and
+        # must not turn cells all over the workbook into #N/A. If such a Cancel shuts
+        # the shared connection down under a formula query, `_call` quietly asks again.
+        return lambda text: self._call(lambda s: s.execute(text, catalog))

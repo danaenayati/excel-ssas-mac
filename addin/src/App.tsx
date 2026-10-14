@@ -17,6 +17,7 @@ import { CopyButton, Dialog, ErrorNote, Icon, Spinner } from "./components/commo
 import { CalculatedItemDialog, CalculatedMeasureDialog, GroupDialog } from "./components/CalculationDialogs";
 import { NumberFormatDialog } from "./components/NumberFormatDialog";
 import { ShowAsDialog } from "./components/ShowAsDialog";
+import { conversionBlocker, convertReport, formulaConnection } from "./sheet/convert";
 import { rectA1 } from "./sheet/geometry";
 import {
   describeCell,
@@ -81,6 +82,7 @@ type Screen = "connections" | "explorer";
 type Question =
   | { kind: "overwrite"; target: Extent; answer: (ok: boolean) => void }
   | { kind: "deleteReport"; def: ReportDef; onSheet: boolean }
+  | { kind: "convert"; def: ReportDef }
   | { kind: "reset"; what: "database" | "cube"; apply: () => void }
   | { kind: "query"; mdx: string }
   | { kind: "numberFormat"; measure: string; caption: string; current: string }
@@ -772,7 +774,11 @@ export function App({ api, host, mock }: Props) {
   const refreshAll = async () => {
     const cur = currentRef.current;
     const list = reportsRef.current.map((d) => (cur && cur.def.id === d.id ? cur.def : d));
-    if (list.length === 0) return;
+    if (list.length === 0) {
+      // No reports, but there may be cube formulas (Convert to Formulas): ask them again.
+      if (await recalculateFormulas()) setNote("Cube formulas recalculated.");
+      return;
+    }
     setError(null);
     setNote(null);
     let done = 0;
@@ -814,6 +820,8 @@ export function App({ api, host, mock }: Props) {
     }
     busyPrefix.current = "";
     if (!runner.busy) setBusy(null);
+    // As Windows' Refresh All does for cube formulas: they ask the cube again.
+    if (!stopped) await recalculateFormulas();
     const parts = [stopped ? `Cancelled after ${plural(done, "report", "reports")}.` : `${plural(done, "report", "reports")} refreshed.`];
     if (unbound > 0) parts.push(`${unbound} ${unbound === 1 ? "needs" : "need"} a connection.`);
     if (lost > 0) parts.push(`${lost} could not be found on a sheet.`);
@@ -863,6 +871,100 @@ export function App({ api, host, mock }: Props) {
         ? "Report deleted and its cells cleared."
         : "Report deleted. Its numbers stay as plain cells.",
     );
+  };
+
+  /** Convert to Formulas, step 1: say why not, or ask (Windows warns it cannot be undone). */
+  const askConvert = (target: ReportDef) => {
+    const blocker = conversionBlocker(target.layout);
+    if (blocker) {
+      setNote(null);
+      setError({ message: blocker });
+      return;
+    }
+    setQuestion({ kind: "convert", def: target });
+  };
+
+  /**
+   * Convert to Formulas, step 2: the report's cells become cube formulas, and the report
+   * itself is removed (its definition and name; the cells stay). Works from the pane's
+   * memory of the last result, so a report not shown in this session is refreshed first.
+   */
+  const convertToFormulas = async (target: ReportDef) => {
+    setQuestion(null);
+    setError(null);
+    const conn = connectionsRef.current.find((c) => c.id === target.connectionId);
+    const connection = conn ? formulaConnection(conn.name, target.catalog, target.cube) : null;
+    if (!conn || !connection) {
+      setError({
+        message: conn
+          ? "The database or cube name contains \"/\", which a cube formula cannot name. This report cannot be converted."
+          : "Choose a connection for this report first.",
+      });
+      return;
+    }
+    let extent: Extent | null;
+    try {
+      extent = await liveExtent(target.id);
+    } catch (failure) {
+      setError(toUiError(failure));
+      return;
+    }
+    if (!extent) {
+      setNote("This report is not on a sheet, so there is nothing to convert.");
+      return;
+    }
+    let runtime = runner.runtimes.get(target.id) ?? null;
+    if (!runtime || !runtime.sheet || runtime.rows !== extent.rows || runtime.cols !== extent.cols) {
+      const cur = currentRef.current;
+      if (!cur || cur.def.id !== target.id) return;
+      const outcome = await execute(cur.def, cur.revision, { anchor: null, useSelection: false });
+      if (!outcome || outcome.kind !== "written") return; // the run has said why
+      runtime = outcome.runtime;
+    }
+    const result = convertReport(runtime, connection);
+    if ("refused" in result) {
+      setError({ message: result.refused });
+      return;
+    }
+    setBusy("Writing formulas…");
+    try {
+      await host.writeFormulas(target.id, result.formulas, result.numberFormats);
+      await host.deleteReport(target.id);
+    } catch (failure) {
+      setError(toUiError(failure));
+      return;
+    } finally {
+      setBusy(runner.busy ? "Asking the cube…" : null);
+    }
+    runner.forget(target.id);
+    const rest = reportsRef.current.filter((d) => d.id !== target.id);
+    setReports(rest);
+    setLocations((map) => {
+      const next = { ...map };
+      delete next[target.id];
+      return next;
+    });
+    refreshSelection();
+    const cur = currentRef.current;
+    if (cur && cur.def.id === target.id) {
+      if (rest.length > 0) openReport(rest[0]);
+      else startDraft(target.connectionId, target.catalog, target.cube);
+    }
+    setNote(
+      "Converted to cube formulas. They read the cube again whenever Excel recalculates (Cmd+Option+F9, or Refresh All here)." +
+        (result.filtered ? " Totals now count every item, including those the report's filters hid." : ""),
+    );
+  };
+
+  /** Recalculate the workbook so that cube formulas ask the cube again. False when it failed. */
+  const recalculateFormulas = async (): Promise<boolean> => {
+    if (host.kind !== "excel") return false;
+    try {
+      await host.recalculate();
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   // -- what to show -------------------------------------------------------------
@@ -988,6 +1090,11 @@ export function App({ api, host, mock }: Props) {
     if (current && current.persisted) {
       const target = current.def;
       items.push("separator", {
+        label: "Convert to Formulas…",
+        disabled: !location || busy !== null || isEmptyLayout(target.layout),
+        run: () => askConvert(target),
+      });
+      items.push({
         label: "Delete report…",
         danger: true,
         run: () => void askDeleteReport(target),
@@ -1325,7 +1432,7 @@ export function App({ api, host, mock }: Props) {
           onRefresh={() => dispatch({ type: "touch" })}
           onRefreshAll={() => void refreshAll()}
           canRefresh={connection !== null && catalog !== "" && cube !== ""}
-          canRefreshAll={reports.length > 0}
+          canRefreshAll={reports.length > 0 || host.kind === "excel" /* cube formulas, even with no report */}
         />
 
         {reportMenu && (
@@ -1535,6 +1642,23 @@ export function App({ api, host, mock }: Props) {
                 ? "It will no longer refresh. You can keep its numbers as plain cells, or clear them from the sheet."
                 : "It will be removed from this workbook."}
             </p>
+          </Dialog>
+        )}
+
+        {question && question.kind === "convert" && (
+          <Dialog
+            title="Convert to Formulas?"
+            onCancel={() => setQuestion(null)}
+            buttons={[
+              { label: "Cancel", run: () => setQuestion(null), focus: true },
+              { label: "Convert", run: () => void convertToFormulas(question.def), danger: true },
+            ]}
+          >
+            <p>
+              Each cell of this report becomes a cube formula (CUBE.MEMBER, CUBE.VALUE) that you can move,
+              copy and edit. The formulas keep their numbers up to date when Excel recalculates.
+            </p>
+            <p>The report itself is removed and cannot be changed from this pane again. This cannot be undone.</p>
           </Dialog>
         )}
 

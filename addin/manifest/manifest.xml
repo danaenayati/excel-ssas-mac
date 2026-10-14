@@ -5,7 +5,7 @@
            xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
            xsi:type="TaskPaneApp">
   <Id>9dcc8fab-dcab-4acc-93d0-c5938eaa1342</Id>
-  <Version>1.0.0.0</Version>
+  <Version>1.1.0.0</Version>
   <ProviderName>CubeBridge</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Cube Explorer"/>
@@ -31,6 +31,28 @@
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
     <Hosts>
       <Host xsi:type="Workbook">
+        <!--
+          The cube functions (CUBE.VALUE, CUBE.MEMBER, ...). functions.js runs in Excel's
+          JavaScript-only runtime, apart from the pane, whose lifecycle is unchanged.
+          CustomFunctionsRuntime is deliberately not listed in a <Requirements>: in the
+          top-level one it would stop the whole add-in from loading in an Excel without
+          custom functions, and in this VersionOverrides it would hide the ribbon button
+          as well. An Excel that does not know this extension point leaves it out.
+        -->
+        <AllFormFactors>
+          <ExtensionPoint xsi:type="CustomFunctions">
+            <Script>
+              <SourceLocation resid="Functions.Script.Url"/>
+            </Script>
+            <Page>
+              <SourceLocation resid="Functions.Page.Url"/>
+            </Page>
+            <Metadata>
+              <SourceLocation resid="Functions.Metadata.Url"/>
+            </Metadata>
+            <Namespace resid="Functions.Namespace"/>
+          </ExtensionPoint>
+        </AllFormFactors>
         <DesktopFormFactor>
           <GetStarted>
             <Title resid="GetStarted.Title"/>
@@ -77,11 +99,15 @@
       <bt:Urls>
         <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:47613/index.html"/>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://localhost:47613/index.html"/>
+        <bt:Url id="Functions.Script.Url" DefaultValue="https://localhost:47613/functions.js"/>
+        <bt:Url id="Functions.Page.Url" DefaultValue="https://localhost:47613/functions.html"/>
+        <bt:Url id="Functions.Metadata.Url" DefaultValue="https://localhost:47613/functions.json"/>
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="Group.Label" DefaultValue="Cube"/>
         <bt:String id="Button.Label" DefaultValue="Cube Explorer"/>
         <bt:String id="GetStarted.Title" DefaultValue="Cube Explorer is ready"/>
+        <bt:String id="Functions.Namespace" DefaultValue="CUBE"/>
       </bt:ShortStrings>
       <bt:LongStrings>
         <bt:String id="Button.Tooltip" DefaultValue="Open the panel to explore an Analysis Services cube and put the results in this sheet."/>

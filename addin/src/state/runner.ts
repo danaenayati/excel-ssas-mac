@@ -90,6 +90,8 @@ export interface ReportRuntime {
   lines: DataLine[];
   /** Per value column of the block, the column members behind it. */
   columnMembers: string[][];
+  /** What the block wrote into its cells, for Convert to Formulas (sheet/convert.ts). */
+  sheet?: Pick<Block, "values" | "numberFormats">;
 }
 
 export type RunOutcome =
@@ -369,6 +371,7 @@ export class ReportRunner {
       colValueIndex: shown.colValueIndex ?? [],
       lines: block.lines,
       columnMembers: block.columnMembers,
+      sheet: { values: block.values, numberFormats: block.numberFormats },
     };
     this.runtimes.set(def.id, runtime);
     await this.deps.host.saveReport(def);

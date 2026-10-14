@@ -61,3 +61,13 @@ class Backend(Protocol):
     def cancel(self) -> None: ...
 
     def close(self) -> None: ...
+
+    # Cube formulas in the sheet (formulas.py). Both answer one item per item asked,
+    # {"value": …} or {"error": {category, message}} (FormulaResult in types.ts).
+    def cells(self, catalog: str, cube: str, tuples: list[list[str]]) -> list[dict]:
+        """CUBE.VALUE: the value of each tuple of member unique names."""
+        ...
+
+    def lookup(self, catalog: str, cube: str, items: list[dict]) -> list[dict]:
+        """CUBE.MEMBER, CUBE.MEMBERPROPERTY, CUBE.SETCOUNT, CUBE.RANKEDMEMBER (`formulas.read_lookups` shapes)."""
+        ...

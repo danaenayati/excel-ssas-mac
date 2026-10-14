@@ -12,6 +12,25 @@ Three checks protect it from web pages open in the user's browser:
 
 No CORS headers are sent, so no other origin can read a response either.
 
+The cube formulas' routes (`_FORMULA_ROUTES`) are the one exception, made as narrow as
+it can be. Excel runs custom functions in a JavaScript-only runtime, not in the pane's
+web view, and Microsoft documents only that it enforces the same-origin policy with
+"simple" CORS: no custom headers, no preflight. What it sends as Origin is not
+documented: nothing, "null", or the script's own origin. So for those routes only:
+
+- Origin may be absent, "null" or our own; any other origin is still refused. A
+  response then names that origin in Access-Control-Allow-Origin, so the runtime may
+  read it. A sandboxed frame on any web page also says "null", which is why the next
+  point matters.
+- The token is still required on every request. It may come in the JSON body instead of
+  the header, so that the runtime can send a "simple" request (POST, text/plain) with no
+  preflight. A web page cannot read the token from anywhere (see `_static`), so letting
+  "null" through gives it nothing it could use: without the token it gets 403.
+- A preflight (OPTIONS) is answered without the token, which it can never carry. It
+  reveals nothing and allows only POST with Content-Type and X-Cube-Token.
+
+These routes only read from cubes and change nothing on this Mac.
+
 `App.handle` is plain data in, plain data out, so it is tested without sockets; the
 HTTP server at the bottom is a thin wrapper.
 """
@@ -30,7 +49,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import __version__, certs
+from . import __version__, certs, formulas
 from .backends.base import DEFAULT_DETAIL_ROWS, DEFAULT_MEMBER_LIMIT, MAX_DETAIL_ROWS, MAX_MEMBER_LIMIT
 from .backends.demo_backend import DemoBackend
 from .backends.ssas_backend import SsasBackend
@@ -74,6 +93,17 @@ _ROUTES: list[tuple[str, re.Pattern, str]] = [
     ("POST", re.compile(r"^/api/connections/(?P<id>[A-Za-z0-9_-]{1,64})/details$"), "_details"),
 ]
 
+# Called by the cube formulas in the sheet (addin/src/functions/), which run outside
+# the pane. See the module docstring for how their requests are let in.
+_FORMULA_ROUTES: list[tuple[str, re.Pattern, str]] = [
+    ("POST", re.compile(r"^/api/formulas/connections$"), "_formula_connections"),
+    ("POST", re.compile(r"^/api/connections/(?P<id>[A-Za-z0-9_-]{1,64})/cells$"), "_cells"),
+    ("POST", re.compile(r"^/api/connections/(?P<id>[A-Za-z0-9_-]{1,64})/lookup$"), "_lookup"),
+]
+
+# The functions script, which carries the token the way index.html does (`_static`).
+TOKEN_SCRIPTS = frozenset({"functions.js"})
+
 Response = tuple[int, dict[str, str], bytes]
 
 
@@ -115,6 +145,7 @@ class App:
     # -- entry point -------------------------------------------------------------
     def handle(self, method: str, target: str, headers: dict[str, str], body: bytes) -> Response:
         headers = {name.lower(): value for name, value in headers.items()}
+        cors: dict[str, str] = {}  # only ever filled for the formula routes
         try:
             try:
                 parts = urlsplit(target)
@@ -123,26 +154,34 @@ class App:
                 raise _bad("The request address is not valid.") from exc
             self._check_host(headers)
             if not path.startswith("/api/"):
-                return self._static(method, path)
-            self._check_origin_and_token(headers)
-            for route_method, pattern, handler_name in _ROUTES:
+                return self._static(method, path, headers)
+            payload: dict | None = None
+            if any(pattern.match(path) for _, pattern, _ in _FORMULA_ROUTES):
+                cors = self._formula_cors(headers)
+                if method == "OPTIONS":
+                    return self._preflight(cors)
+                payload = self._check_formula_token(headers, method, body)
+            else:
+                self._check_origin_and_token(headers)
+            for route_method, pattern, handler_name in _ROUTES + _FORMULA_ROUTES:
                 match = pattern.match(path)
                 if match and route_method == method:
                     query = {k: v[-1] for k, v in parse_qs(parts.query, keep_blank_values=True).items()}
-                    payload = self._json_body(body) if method == "POST" else {}
+                    if payload is None:
+                        payload = self._json_body(body) if method == "POST" else {}
                     result = getattr(self, handler_name)(query=query, body=payload, **match.groupdict())
-                    return self._json(200, result)
+                    return self._json(200, result, cors)
             raise CubeError("not-found", "The helper does not know that request.")
         except CubeError as exc:
             # Category and detail go to the log so a failure can be diagnosed from it.
             # Neither ever holds a password or a sign-in token.
             if exc.category != "cancelled":
                 log.warning("%s request failed: %s: %s%s", method, exc.category, exc.message, f" [{exc.detail}]" if exc.detail else "")
-            return self._json(exc.http_status, {"error": exc.to_json()})
+            return self._json(exc.http_status, {"error": exc.to_json()}, cors)
         except Exception:
             log.exception("unhandled error in %s request", method)
             error = CubeError("internal", "Something went wrong inside the helper. See its log for details.")
-            return self._json(500, {"error": error.to_json()})
+            return self._json(500, {"error": error.to_json()}, cors)
 
     # -- access control ----------------------------------------------------------
     def _allowed_hosts(self) -> set[str]:
@@ -160,15 +199,61 @@ class App:
         if not supplied or not hmac.compare_digest(supplied.encode(), self.store.token.encode()):
             raise CubeError("forbidden", "The request did not come from the Cube task pane.")
 
+    def _formula_cors(self, headers: dict[str, str]) -> dict[str, str]:
+        """For a formula route: refuse any Origin but none, "null" or our own, and
+        return the CORS headers its response needs (none when no Origin was sent)."""
+        origin = headers.get("origin")
+        if origin is None:
+            return {}
+        if origin.lower() != "null" and origin.lower() not in {f"https://{h}" for h in self._allowed_hosts()}:
+            raise CubeError("forbidden", "This helper only answers requests from Cube Explorer.")
+        return {"Access-Control-Allow-Origin": origin, "Vary": "Origin"}
+
+    @staticmethod
+    def _preflight(cors: dict[str, str]) -> Response:
+        """A CORS preflight for a formula route. It never carries the token and is not
+        given anything but permission to send the real request, which needs it."""
+        headers = {
+            **cors,
+            "Access-Control-Allow-Methods": "POST",
+            "Access-Control-Allow-Headers": "Content-Type, X-Cube-Token",
+            "Access-Control-Max-Age": "600",
+            "Cache-Control": "no-store",
+        }
+        return 204, headers, b""
+
+    def _check_formula_token(self, headers: dict[str, str], method: str, body: bytes) -> dict | None:
+        """The token of a formula request, from the header or else from the JSON body.
+
+        Returns the parsed body when it had to be read for the token. A body that is not
+        JSON has no token in it, so it is refused as forbidden rather than as malformed.
+        """
+        supplied = headers.get("x-cube-token", "")
+        payload = None
+        if not supplied and method == "POST":
+            try:
+                payload = self._json_body(body)
+            except CubeError:
+                payload = {}
+            value = payload.get("token")
+            supplied = value if isinstance(value, str) else ""
+        expected = self.store.token.encode()
+        if not supplied or not hmac.compare_digest(supplied.encode("utf-8", "backslashreplace"), expected):
+            raise CubeError("forbidden", "The request did not come from Cube Explorer.")
+        return payload
+
     # -- responses ---------------------------------------------------------------
     @staticmethod
-    def _json(status: int, data: object) -> Response:
+    def _json(status: int, data: object, extra: dict[str, str] | None = None) -> Response:
         # backslashreplace: text that is not valid Unicode (a lone surrogate echoed
         # back in an error message) must not stop a response from being sent.
         payload = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode(
             "utf-8", "backslashreplace"
         )
-        return status, {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store"}, payload
+        headers = {"Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store"}
+        if extra:
+            headers.update(extra)
+        return status, headers, payload
 
     @staticmethod
     def _json_body(body: bytes) -> dict:
@@ -182,7 +267,7 @@ class App:
             raise _bad("The request body must be a JSON object.")
         return data
 
-    def _static(self, method: str, path: str) -> Response:
+    def _static(self, method: str, path: str, request_headers: dict[str, str] | None = None) -> Response:
         missing = (404, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"}, b"Not found")
         if method != "GET" or self.pane_dir is None:
             return missing
@@ -194,6 +279,9 @@ class App:
             return missing
         if not candidate.is_relative_to(root) or not candidate.is_file():
             return missing
+        token_script = candidate.parent == root and candidate.name in TOKEN_SCRIPTS
+        if token_script and self._loaded_by_another_site(request_headers or {}):
+            return 403, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"}, b"Forbidden"
         data = candidate.read_bytes()
         headers = {
             "Content-Type": _CONTENT_TYPES.get(candidate.suffix.lower(), "application/octet-stream"),
@@ -201,10 +289,34 @@ class App:
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "no-referrer",
         }
-        if candidate.suffix.lower() == ".html":
+        if candidate.suffix.lower() == ".html" or token_script:
             data = data.replace(TOKEN_PLACEHOLDER, self.store.token.encode())
             headers["Cache-Control"] = "no-store"
         return 200, headers, data
+
+    def _loaded_by_another_site(self, headers: dict[str, str]) -> bool:
+        """True when a browser says another site is loading the functions script.
+
+        Unlike HTML, a script can be run by any web page with a <script> tag, which is
+        how the token in it could leak (the page would stub `CustomFunctions` and
+        `fetch` and watch what the script sends). Browsers say where such a load comes
+        from: Sec-Fetch-Site is "cross-site" or "same-site" (another localhost port), or
+        the Referer names another origin. Excel itself loads the script either directly
+        (no such headers) or from functions.html on this origin ("same-origin"; that
+        page sends no Referer, see Referrer-Policy below).
+        """
+        site = headers.get("sec-fetch-site")
+        if site is not None and site.lower() not in ("same-origin", "none"):
+            return True
+        referer = headers.get("referer")
+        if referer:
+            try:
+                parts = urlsplit(referer)
+            except ValueError:
+                return True
+            if f"{parts.scheme}://{parts.netloc}".lower() not in {f"https://{h}" for h in self._allowed_hosts()}:
+                return True
+        return False
 
     # -- backends ----------------------------------------------------------------
     def _backend(self, connection_id: str):
@@ -318,6 +430,45 @@ class App:
         if backend is not None:
             backend.cancel()
         return {"ok": True}
+
+    # -- cube formulas (formulas.py) ----------------------------------------------
+    def _formula_connections(self, **_):
+        # Names and ids only: what a formula's first argument is matched against.
+        return {"connections": [{"id": c["id"], "name": c["name"]} for c in self.store.connections()]}
+
+    def _cells(self, id: str, body: dict, **_):
+        tuples = formulas.read_tuples(body.get("tuples"))
+        backend, catalog, cube = self._formula_target(id, body)
+        return {"results": backend.cells(catalog, cube, tuples)}
+
+    def _lookup(self, id: str, body: dict, **_):
+        items = formulas.read_lookups(body.get("items"))
+        backend, catalog, cube = self._formula_target(id, body)
+        return {"results": backend.lookup(catalog, cube, items)}
+
+    def _formula_target(self, id: str, body: dict):
+        """The backend, database and cube a formula asks. A formula that names only the
+        connection gets its one database and cube; with several, it must say which."""
+        backend = self._backend(id)
+        catalog = _text(body, "catalog", required=False)
+        cube = _text(body, "cube", required=False)
+        if not catalog:
+            catalog = self._only_one(id, "database", [c["name"] for c in backend.catalogs()])
+        if not cube:
+            cube = self._only_one(id, "cube", [c["name"] for c in backend.cubes(catalog)])
+        return backend, catalog, cube
+
+    def _only_one(self, id: str, what: str, names: list[str]) -> str:
+        if len(names) == 1:
+            return names[0]
+        name = self.store.get(id)["name"]
+        if not names:
+            raise CubeError("not-found", f'"{name}" has no {what} you can open.')
+        shown = ", ".join(names[:5]) + (", …" if len(names) > 5 else "")
+        raise CubeError(
+            "bad-request",
+            f'"{name}" has more than one {what} ({shown}). Write the connection as "{name}/Database/Cube" in the formula.',
+        )
 
 
 class _Handler(BaseHTTPRequestHandler):

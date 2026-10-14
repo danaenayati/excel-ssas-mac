@@ -787,6 +787,19 @@ class DemoBackend:
             per_field.append([k for k in candidates if k in visible])
         return itertools.product(*per_field)
 
+    # -- cube formulas (worked out in demo_formulas.py) ----------------------------
+    def cells(self, catalog: str, cube: str, tuples: list[list[str]]) -> list[dict]:
+        from . import demo_formulas
+
+        self._check(catalog, cube)
+        return demo_formulas.cells(self, tuples)
+
+    def lookup(self, catalog: str, cube: str, items: list[dict]) -> list[dict]:
+        from . import demo_formulas
+
+        self._check(catalog, cube)
+        return demo_formulas.lookup(self, items)
+
 
 _SHOWN_AS_FORMATS = {
     **dict.fromkeys(

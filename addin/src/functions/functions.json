@@ -1,0 +1,131 @@
+{
+  "functions": [
+    {
+      "id": "VALUE",
+      "name": "VALUE",
+      "description": "Returns a value from the cube, like CUBEVALUE. Give members by unique name, such as [Date].[Year].&[2025] or [Measures].[Sales].",
+      "result": { "type": "any", "dimensionality": "scalar" },
+      "parameters": [
+        {
+          "name": "connection",
+          "description": "A Cube Explorer connection, such as \"Sample cube\", or \"Name/Database/Cube\" when it has several cubes.",
+          "type": "string",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "member_expression1",
+          "description": "A member's or measure's unique name, such as [Measures].[Sales], or a range of them. Not a CUBE.MEMBER cell: that one holds a caption.",
+          "type": "any",
+          "dimensionality": "matrix",
+          "repeating": true
+        }
+      ]
+    },
+    {
+      "id": "MEMBER",
+      "name": "MEMBER",
+      "description": "Shows a member's caption once the cube confirms it exists, like CUBEMEMBER.",
+      "result": { "type": "string", "dimensionality": "scalar" },
+      "parameters": [
+        {
+          "name": "connection",
+          "description": "A Cube Explorer connection, such as \"Sample cube\", or \"Name/Database/Cube\".",
+          "type": "string",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "member_expression",
+          "description": "A member's unique name, such as [Date].[Year].&[2025], or a range of names (a tuple: its last member is shown).",
+          "type": "any",
+          "dimensionality": "matrix"
+        },
+        {
+          "name": "caption",
+          "description": "Text to show instead of the cube's caption.",
+          "type": "string",
+          "dimensionality": "scalar",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "id": "MEMBERPROPERTY",
+      "name": "MEMBERPROPERTY",
+      "description": "Returns a property of a member, such as its Key, like CUBEMEMBERPROPERTY.",
+      "result": { "type": "any", "dimensionality": "scalar" },
+      "parameters": [
+        {
+          "name": "connection",
+          "description": "A Cube Explorer connection, such as \"Sample cube\", or \"Name/Database/Cube\".",
+          "type": "string",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "member_expression",
+          "description": "A member's unique name, such as [Geography].[City].&[Tehran].",
+          "type": "string",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "property",
+          "description": "The property's name, such as Key or Caption.",
+          "type": "string",
+          "dimensionality": "scalar"
+        }
+      ]
+    },
+    {
+      "id": "RANKEDMEMBER",
+      "name": "RANKEDMEMBER",
+      "description": "Shows the caption of the n-th item of a set, like CUBERANKEDMEMBER. The set is written in MDX.",
+      "result": { "type": "string", "dimensionality": "scalar" },
+      "parameters": [
+        {
+          "name": "connection",
+          "description": "A Cube Explorer connection, such as \"Sample cube\", or \"Name/Database/Cube\".",
+          "type": "string",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "set_expression",
+          "description": "An MDX set, such as TopCount([Geography].[City].Children, 10, [Measures].[Sales]).",
+          "type": "string",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "rank",
+          "description": "Which item: 1 for the first.",
+          "type": "number",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "caption",
+          "description": "Text to show instead of the cube's caption.",
+          "type": "string",
+          "dimensionality": "scalar",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "id": "SETCOUNT",
+      "name": "SETCOUNT",
+      "description": "Returns how many items a set has, like CUBESETCOUNT. The set is written in MDX.",
+      "result": { "type": "number", "dimensionality": "scalar" },
+      "parameters": [
+        {
+          "name": "connection",
+          "description": "A Cube Explorer connection, such as \"Sample cube\", or \"Name/Database/Cube\".",
+          "type": "string",
+          "dimensionality": "scalar"
+        },
+        {
+          "name": "set_expression",
+          "description": "An MDX set, such as [Geography].[City].Children.",
+          "type": "string",
+          "dimensionality": "scalar"
+        }
+      ]
+    }
+  ]
+}

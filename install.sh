@@ -98,7 +98,8 @@ step "Installing the helper"
 "$PYTHON" -m cubebridge --version >/dev/null || fail "the helper did not install correctly."
 
 step "Installing the Excel panel"
-if [ -n "$REBUILD" ] || [ ! -f "$REPO/addin/dist/index.html" ]; then
+# functions.js: a build from before the cube formulas existed is built again.
+if [ -n "$REBUILD" ] || [ ! -f "$REPO/addin/dist/index.html" ] || [ ! -f "$REPO/addin/dist/functions.js" ]; then
   # Node.js: the Mac's own when it is new enough for the build (20.19+ or 22.12+), else ours.
   if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 \
     && node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=12)||(a===20&&b>=19)?0:1)'; then
@@ -116,6 +117,7 @@ if [ -n "$REBUILD" ] || [ ! -f "$REPO/addin/dist/index.html" ]; then
     || fail "the panel could not be built. Run ./install.sh --rebuild again; if it keeps failing, see the messages above."
 fi
 [ -f "$REPO/addin/dist/index.html" ] || fail "the panel build did not produce addin/dist/index.html."
+[ -f "$REPO/addin/dist/functions.js" ] || fail "the panel build did not produce addin/dist/functions.js."
 rm -rf "$APP/pane.new"
 cp -R "$REPO/addin/dist" "$APP/pane.new"
 rm -rf "$APP/pane"

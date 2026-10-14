@@ -506,3 +506,50 @@ export interface Grid {
     mdx: string;
   };
 }
+
+// -- Cube formulas in the sheet ---------------------------------------------------
+// CUBE.VALUE, CUBE.MEMBER, CUBE.MEMBERPROPERTY, CUBE.RANKEDMEMBER and CUBE.SETCOUNT
+// (addin/src/functions/) ask the helper through these routes (helper formulas.py).
+// They run in Excel's JavaScript-only functions runtime, which allows only "simple"
+// requests: every body is sent as text/plain and also carries `token`.
+
+/** `POST /formulas/connections`: what a formula's connection argument is matched against. */
+export interface FormulaConnectionsResponse {
+  connections: { id: string; name: string }[];
+}
+
+/**
+ * `POST /connections/{id}/cells`: CUBE.VALUE. Each tuple is a list of member unique
+ * names, at most 64; a tuple without a measure gets the cube's default measure. At most
+ * 5000 tuples. Without `catalog` and `cube`, the connection's only database and cube.
+ */
+export interface FormulaCellsRequest {
+  catalog?: string;
+  cube?: string;
+  tuples: string[][];
+}
+
+/** One question of `POST /connections/{id}/lookup`. Sets are MDX set expressions. */
+export type FormulaLookupItem =
+  /** CUBE.MEMBER: the caption of the (last) member, after checking they all exist. */
+  | { kind: "member"; members: string[] }
+  /** CUBE.MEMBERPROPERTY: the property's value, as text. */
+  | { kind: "property"; member: string; property: string }
+  /** CUBE.SETCOUNT: how many items the set has. */
+  | { kind: "count"; set: string }
+  /** CUBE.RANKEDMEMBER: the caption of the set's `rank`-th item, from 1. */
+  | { kind: "ranked"; set: string; rank: number };
+
+/** At most 5000 items. `catalog` and `cube` as in `FormulaCellsRequest`. */
+export interface FormulaLookupRequest {
+  catalog?: string;
+  cube?: string;
+  items: FormulaLookupItem[];
+}
+
+/** One answer per tuple or item, in the order asked. */
+export type FormulaResult = { value: CellValue } | { error: ApiError };
+
+export interface FormulaResponse {
+  results: FormulaResult[];
+}
