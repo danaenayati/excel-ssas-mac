@@ -54,17 +54,61 @@ export type LayoutAction =
   | { type: "setMembers"; hierarchy: string; members: string[]; captions: string[] }
   | { type: "expand"; hierarchy: string; member: string }
   | { type: "collapse"; hierarchy: string; member: string; descendants?: string[] }
-  | { type: "setOption"; option: keyof LayoutOptions; value: boolean }
+  | { type: "setOption"; option: BooleanOption; value: boolean }
+  /** Excel's Grand Totals choice: the Grand Total row (bottom) and column (right). */
+  | { type: "setGrandTotals"; row: boolean; column: boolean }
+  /** "For empty cells show": text written into value cells without a value. */
+  | { type: "setEmptyCellText"; text: string }
+  /** "Expand Entire Field": these members of the field, one level deeper. */
+  | { type: "expandField"; hierarchy: string; members: string[] }
+  /** "Collapse Entire Field". */
+  | { type: "collapseField"; hierarchy: string }
   /** Order of a field's items; null for the cube's own order. */
   | { type: "setSort"; hierarchy: string; sort: FieldSort | null }
   | { type: "setLabelFilter"; hierarchy: string; filter: LabelFilter | null }
   | { type: "setValueFilter"; hierarchy: string; filter: ValueFilter | null }
   /** "Clear Filter From <field>": items, label filter and value filter. Not the sort. */
   | { type: "clearFilters"; hierarchy: string }
-  | { type: "setShowAs"; measure: string; showAs: ShowValuesAs }
+  /** Show Values As, with the base field and item the kind needs (others are dropped). */
+  | { type: "setShowAs"; measure: string; showAs: ShowValuesAs; baseField?: string | null; baseItem?: string | null }
   /** A value field's number format; null for the cube's own. */
   | { type: "setNumberFormat"; measure: string; format: string | null }
   | { type: "replace"; layout: Layout };
+
+/** The on/off options that `setOption` toggles. */
+export type BooleanOption = "grandTotals" | "grandTotalRow" | "grandTotalColumn" | "subtotals" | "nonEmpty" | "repeatLabels";
+
+/** Longest "For empty cells show" text. */
+export const MAX_EMPTY_CELL_TEXT = 20;
+
+/** Show Values As kinds that need a base field, and those that need a base item too. */
+const NEEDS_BASE_FIELD: readonly ShowValuesAs[] = [
+  "percentOf",
+  "percentOfParentTotal",
+  "differenceFrom",
+  "percentDifferenceFrom",
+  "runningTotalIn",
+  "percentRunningTotalIn",
+  "rankAscending",
+  "rankDescending",
+];
+const NEEDS_BASE_ITEM: readonly ShowValuesAs[] = ["percentOf", "differenceFrom", "percentDifferenceFrom"];
+
+export function needsBaseField(showAs: ShowValuesAs | undefined): boolean {
+  return showAs !== undefined && NEEDS_BASE_FIELD.indexOf(showAs) >= 0;
+}
+
+export function needsBaseItem(showAs: ShowValuesAs | undefined): boolean {
+  return showAs !== undefined && NEEDS_BASE_ITEM.indexOf(showAs) >= 0;
+}
+
+/** Whether the Grand Total row (bottom) and column (right) are shown. */
+export function grandTotalsShown(options: LayoutOptions): { row: boolean; column: boolean } {
+  return {
+    row: options.grandTotalRow ?? options.grandTotals,
+    column: options.grandTotalColumn ?? options.grandTotals,
+  };
+}
 
 export const DEFAULT_OPTIONS: LayoutOptions = {
   grandTotals: true,
@@ -209,7 +253,30 @@ function moveTo(layout: Layout, name: string, area: Area, index: number | undefi
   return { ...layout, [from]: without, [to]: insertAt(layout[to], item, index) };
 }
 
+/**
+ * Value fields whose Show Values As needs a base field that is no longer in Rows or
+ * Columns go back to No Calculation, as in Excel. `reset` lists the ones changed so the
+ * pane can say so.
+ */
+export function resetOrphanedShowAs(layout: Layout): { layout: Layout; reset: ValueField[] } {
+  const axis = new Set([...layout.rows, ...layout.columns].map((f) => f.hierarchy));
+  const reset: ValueField[] = [];
+  const values = layout.values.map((value) => {
+    if (!needsBaseField(value.showAs) || (value.baseField && axis.has(value.baseField))) return value;
+    reset.push(value);
+    let next = withOptional(value, "showAs", null);
+    next = withOptional(next, "baseField", null);
+    return withOptional(next, "baseItem", null);
+  });
+  return reset.length === 0 ? { layout, reset } : { layout: { ...layout, values }, reset };
+}
+
 export function layoutReducer(layout: Layout, action: LayoutAction): Layout {
+  const next = applyAction(layout, action);
+  return next === layout ? layout : resetOrphanedShowAs(next).layout;
+}
+
+function applyAction(layout: Layout, action: LayoutAction): Layout {
   switch (action.type) {
     case "addMeasure": {
       if (locate(layout, action.measure.uniqueName)) return layout;
@@ -285,8 +352,39 @@ export function layoutReducer(layout: Layout, action: LayoutAction): Layout {
       });
 
     case "setOption":
-      if (layout.options[action.option] === action.value) return layout;
+      if ((layout.options[action.option] ?? false) === action.value) return layout;
       return { ...layout, options: { ...layout.options, [action.option]: action.value } };
+
+    case "setGrandTotals": {
+      const now = grandTotalsShown(layout.options);
+      const o = layout.options;
+      if (now.row === action.row && now.column === action.column && o.grandTotalRow !== undefined) return layout;
+      // `grandTotals` stays true when either is on, for helpers that only know it.
+      return {
+        ...layout,
+        options: { ...o, grandTotals: action.row || action.column, grandTotalRow: action.row, grandTotalColumn: action.column },
+      };
+    }
+
+    case "setEmptyCellText": {
+      const text = action.text.slice(0, MAX_EMPTY_CELL_TEXT);
+      if ((layout.options.emptyCellText ?? "") === text) return layout;
+      const options = { ...layout.options };
+      if (text === "") delete options.emptyCellText;
+      else options.emptyCellText = text;
+      return { ...layout, options };
+    }
+
+    case "expandField":
+      return updateField(layout, action.hierarchy, (field) => {
+        const fresh = action.members.filter((m, i) => field.expanded.indexOf(m) < 0 && action.members.indexOf(m) === i);
+        return fresh.length === 0 ? field : { ...field, expanded: [...field.expanded, ...fresh] };
+      });
+
+    case "collapseField":
+      return updateField(layout, action.hierarchy, (field) =>
+        field.expanded.length === 0 ? field : { ...field, expanded: [] },
+      );
 
     case "setSort":
       return updateField(layout, action.hierarchy, (field) =>
@@ -316,9 +414,18 @@ export function layoutReducer(layout: Layout, action: LayoutAction): Layout {
 
     case "setShowAs":
       return updateValue(layout, action.measure, (field) => {
-        const current = field.showAs ?? "normal";
-        if (current === action.showAs) return field;
-        return withOptional(field, "showAs", action.showAs === "normal" ? null : action.showAs);
+        const baseField = needsBaseField(action.showAs) ? action.baseField ?? null : null;
+        const baseItem = needsBaseItem(action.showAs) ? action.baseItem ?? null : null;
+        if (
+          (field.showAs ?? "normal") === action.showAs &&
+          (field.baseField ?? null) === baseField &&
+          (field.baseItem ?? null) === baseItem
+        ) {
+          return field;
+        }
+        let next = withOptional(field, "showAs", action.showAs === "normal" ? null : action.showAs);
+        next = withOptional(next, "baseField", baseField);
+        return withOptional(next, "baseItem", baseItem);
       });
 
     case "setNumberFormat":

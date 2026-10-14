@@ -15,6 +15,7 @@ import { PreviewSheet } from "./components/PreviewSheet";
 import { StatusBar, type Drill } from "./components/StatusBar";
 import { CopyButton, Dialog, ErrorNote, Icon, Spinner } from "./components/common";
 import { NumberFormatDialog } from "./components/NumberFormatDialog";
+import { ShowAsDialog } from "./components/ShowAsDialog";
 import { rectA1 } from "./sheet/geometry";
 import {
   describeCell,
@@ -28,7 +29,17 @@ import {
 import { REFRESH_ON_OPEN } from "./sheet/host";
 import { guessFieldCell, type MemberHit } from "./sheet/layout";
 import { PreviewHost } from "./sheet/preview";
-import { findField, isEmptyLayout, locate, selectionSummary, type LayoutAction } from "./state/layout";
+import {
+  findField,
+  grandTotalsShown,
+  isEmptyLayout,
+  layoutReducer,
+  locate,
+  needsBaseField,
+  selectionSummary,
+  type BooleanOption,
+  type LayoutAction,
+} from "./state/layout";
 import { currentReducer, decidePlace, newReportDef, placeLabel } from "./state/report";
 import {
   ReportRunner,
@@ -38,7 +49,16 @@ import {
   type UiError,
 } from "./state/runner";
 import { useCached, type Cache } from "./state/useCached";
-import type { Catalog, Connection, Cube, Fields, LayoutOptions, PlacedField, Status } from "./types";
+import type {
+  Catalog,
+  Connection,
+  Cube,
+  Fields,
+  LayoutOptions,
+  PlacedField,
+  ShowValuesAs,
+  Status,
+} from "./types";
 import { plural } from "./util";
 
 interface Props {
@@ -55,7 +75,8 @@ type Question =
   | { kind: "deleteReport"; def: ReportDef; onSheet: boolean }
   | { kind: "reset"; what: "database" | "cube"; apply: () => void }
   | { kind: "query"; mdx: string }
-  | { kind: "numberFormat"; measure: string; caption: string; current: string };
+  | { kind: "numberFormat"; measure: string; caption: string; current: string }
+  | { kind: "showAs"; measure: string; showAs: ShowValuesAs };
 
 /** Pause between a layout change and its query, so that ticking three fields is one query. */
 const DEBOUNCE_MS = 400;
@@ -80,11 +101,48 @@ function useLatest<T>(value: T) {
   return ref;
 }
 
-const OPTION_LABELS: [keyof LayoutOptions, string][] = [
-  ["grandTotals", "Grand totals"],
+const OPTION_LABELS: [BooleanOption, string][] = [
   ["subtotals", "Subtotals"],
   ["nonEmpty", "Hide empty"],
+  ["repeatLabels", "Repeat All Item Labels"],
 ];
+
+/** Excel's Grand Totals choices (Design tab), with Excel's own reading of rows/columns. */
+const GRAND_TOTALS: { value: string; label: string; row: boolean; column: boolean }[] = [
+  { value: "none", label: "Off for Rows and Columns", row: false, column: false },
+  { value: "both", label: "On for Rows and Columns", row: true, column: true },
+  // "Rows" means the total at the end of each row: the Grand Total column.
+  { value: "rows", label: "On for Rows Only", row: false, column: true },
+  { value: "columns", label: "On for Columns Only", row: true, column: false },
+];
+
+function grandTotalsChoice(options: LayoutOptions): string {
+  const shown = grandTotalsShown(options);
+  const found = GRAND_TOTALS.find((g) => g.row === shown.row && g.column === shown.column);
+  return found ? found.value : "both";
+}
+
+/** "For empty cells show": applied when the box is left or Return is pressed. */
+function EmptyCellText({ value, onCommit }: { value: string; onCommit: (text: string) => void }) {
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+  return (
+    <input
+      className="input empty-text"
+      value={text}
+      maxLength={20}
+      aria-label="For empty cells show"
+      placeholder="(nothing)"
+      onChange={(event) => setText(event.target.value)}
+      onBlur={() => {
+        if (text !== value) onCommit(text);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") onCommit(text);
+      }}
+    />
+  );
+}
 
 export function App({ api, host, mock }: Props) {
   const [phase, setPhase] = useState<"loading" | "ready" | UiError>("loading");
@@ -119,6 +177,8 @@ export function App({ api, host, mock }: Props) {
   const lastSheet = useRef<string | null>(null);
   const lastLocationRead = useRef(0);
   const locationSeq = useRef(0);
+  /** Set to keep the note through the next run, which would otherwise clear it. */
+  const keepNote = useRef(false);
   /** The Show Details request in flight, so that Cancel can stop it. */
   const detailsFlight = useRef<{ abort: AbortController; connectionId: string } | null>(null);
 
@@ -239,7 +299,8 @@ export function App({ api, host, mock }: Props) {
         return null;
       }
       setError(null);
-      setNote(null);
+      if (keepNote.current) keepNote.current = false;
+      else setNote(null);
       busyPrefix.current = "";
       setBusy(empty ? "Writing to the sheet…" : "Asking the cube…");
       const outcome = await runner.run(def, options);
@@ -450,7 +511,31 @@ export function App({ api, host, mock }: Props) {
 
   // -- actions ----------------------------------------------------------------
 
-  const act = (action: LayoutAction, urgent = false) => dispatch({ type: "layout", action, urgent });
+  const act = (action: LayoutAction, urgent = false) => {
+    // A value shown along a base field that has just left Rows and Columns goes back
+    // to No Calculation (the reducer does that); say so, as Excel would.
+    const cur = currentRef.current;
+    if (cur && action.type !== "setShowAs") {
+      const before = cur.def.layout;
+      const after = layoutReducer(before, action);
+      const lost = before.values.filter((v) => {
+        if (!needsBaseField(v.showAs)) return false;
+        const now = after.values.find((a) => a.measure === v.measure && a.caption === v.caption);
+        return now !== undefined && !needsBaseField(now.showAs);
+      });
+      if (lost.length > 0) {
+        const fieldCaption = (name: string | null | undefined) =>
+          [...before.rows, ...before.columns, ...before.filters].find((f) => f.hierarchy === name)?.caption ?? "its base field";
+        keepNote.current = true;
+        setNote(
+          lost
+            .map((v) => `${v.caption} is back to No Calculation: ${fieldCaption(v.baseField)} is no longer in Rows or Columns.`)
+            .join(" "),
+        );
+      }
+    }
+    dispatch({ type: "layout", action, urgent });
+  };
 
   const chooseConnection = (chosen: Connection) => {
     const cur = currentRef.current;
@@ -996,6 +1081,7 @@ export function App({ api, host, mock }: Props) {
           layout={def.layout}
           dispatch={act}
           onFilter={setPicker}
+          onShowAsForm={(measure, showAs) => setQuestion({ kind: "showAs", measure, showAs })}
           onCustomFormat={(measure) => {
             const value = def.layout.values.find((v) => v.measure === measure);
             if (value) {
@@ -1010,11 +1096,28 @@ export function App({ api, host, mock }: Props) {
         />
 
         <div className="options">
+          <label className="row-field options-wide">
+            <span className="row-label">Grand totals</span>
+            <select
+              className="select"
+              value={grandTotalsChoice(def.layout.options)}
+              onChange={(event) => {
+                const chosen = GRAND_TOTALS.find((g) => g.value === event.target.value);
+                if (chosen) act({ type: "setGrandTotals", row: chosen.row, column: chosen.column });
+              }}
+            >
+              {GRAND_TOTALS.map((g) => (
+                <option key={g.value} value={g.value}>
+                  {g.label}
+                </option>
+              ))}
+            </select>
+          </label>
           {OPTION_LABELS.map(([option, label]) => (
             <label key={option} className="check">
               <input
                 type="checkbox"
-                checked={def.layout.options[option]}
+                checked={Boolean(def.layout.options[option])}
                 onChange={(event) => act({ type: "setOption", option, value: event.target.checked })}
               />
               {label}
@@ -1034,6 +1137,13 @@ export function App({ api, host, mock }: Props) {
               Update
             </button>
           )}
+          <label className="row-field options-wide">
+            <span className="row-label options-label">For empty cells show</span>
+            <EmptyCellText
+              value={def.layout.options.emptyCellText ?? ""}
+              onCommit={(text) => act({ type: "setEmptyCellText", text })}
+            />
+          </label>
         </div>
 
         <StatusBar
@@ -1106,6 +1216,7 @@ export function App({ api, host, mock }: Props) {
                         : fields.data && fields.data.measures.length > 0
                           ? fields.data.measures[0].uniqueName
                           : "",
+                    expandable: runner.expandable(def.id, pickerField.hierarchy),
                     onAction: (action) => {
                       setPicker(null);
                       act(action);
@@ -1115,6 +1226,27 @@ export function App({ api, host, mock }: Props) {
             }
           />
         )}
+
+        {question && question.kind === "showAs" && def && connection && (() => {
+          const value = def.layout.values.find((v) => v.measure === question.measure);
+          if (!value) return null;
+          return (
+            <ShowAsDialog
+              api={api}
+              connectionId={connection.id}
+              catalog={def.catalog}
+              cube={def.cube}
+              value={value}
+              showAs={question.showAs}
+              axisFields={[...def.layout.rows, ...def.layout.columns]}
+              onCancel={() => setQuestion(null)}
+              onApply={(choice) => {
+                setQuestion(null);
+                act({ type: "setShowAs", measure: question.measure, ...choice });
+              }}
+            />
+          );
+        })()}
 
         {question && question.kind === "numberFormat" && (
           <NumberFormatDialog

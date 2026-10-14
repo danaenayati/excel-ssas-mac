@@ -872,6 +872,24 @@ input[type="checkbox"] {
   grid-column: 2;
 }
 
+/* A setting with a control of its own (Grand totals, For empty cells show) spans both columns. */
+.options-wide {
+  grid-column: 1 / -1;
+}
+
+.options .check {
+  white-space: normal;
+}
+
+.options-label {
+  width: auto;
+}
+
+.empty-text {
+  flex: 0 1 96px;
+  width: 96px;
+}
+
 /* ---- explorer: status -------------------------------------------------- */
 
 .status {
@@ -991,6 +1009,13 @@ input[type="checkbox"] {
 }
 
 .menu-back {
+  color: var(--text-2);
+}
+
+.menu-note {
+  max-width: 240px;
+  margin: 2px 8px 4px 18px;
+  font-size: 11px;
   color: var(--text-2);
 }
 

@@ -92,10 +92,17 @@ export interface BlockFields {
    * cube's. Applied to every value cell of that field.
    */
   valueFormats?: (string | null)[];
+  /** "Repeat All Item Labels": write a repeated outer row label on every line. */
+  repeatLabels?: boolean;
+  /** "For empty cells show": the text for value cells that have no value. */
+  emptyCellText?: string;
 }
 
 export function blockFields(
-  layout: Pick<Layout, "filters" | "rows" | "columns"> & { values?: Layout["values"] },
+  layout: Pick<Layout, "filters" | "rows" | "columns"> & {
+    values?: Layout["values"];
+    options?: Layout["options"];
+  },
 ): BlockFields {
   return {
     filters: layout.filters.length,
@@ -104,6 +111,8 @@ export function blockFields(
     rowsFiltered: layout.rows.map(isFiltered),
     columnsFiltered: layout.columns.map(isFiltered),
     valueFormats: (layout.values ?? []).map((value) => value.numberFormat || null),
+    repeatLabels: Boolean(layout.options && layout.options.repeatLabels),
+    emptyCellText: (layout.options && layout.options.emptyCellText) || "",
   };
 }
 
@@ -289,6 +298,7 @@ export function buildBlock(grid: Grid, fields: BlockFields = { filters: 0, rows:
 
   // Data rows: R row-header cells, then C values.
   const palette = grid.formatPalette;
+  const emptyText = fields.emptyCellText ?? "";
   const valueFormats = fields.valueFormats ?? [];
   const override = (c: number): string | null => {
     const index = valueFieldIndex(grid.colValueIndex, c, valueFormats.length);
@@ -299,7 +309,13 @@ export function buildBlock(grid: Grid, fields: BlockFields = { filters: 0, rows:
     const headers = grid.rowHeaders[n] ?? [];
     for (let r = 0; r < R; r++) {
       const cell = headers[r];
-      setText(row, r, cell ? cell.text : "");
+      // A repeat of the outer label is sent blank, with its member: shown again if asked.
+      const text = !cell
+        ? ""
+        : cell.kind === "blank" && cell.member && fields.repeatLabels
+          ? cell.member.caption
+          : cell.text;
+      setText(row, r, text);
       if (cell && cell.member) {
         members.set(memberKey(row, r), { member: cell.member, axis: "rows" });
       }
@@ -307,7 +323,9 @@ export function buildBlock(grid: Grid, fields: BlockFields = { filters: 0, rows:
     const line = grid.values[n] ?? [];
     const formats = grid.cellFormats[n] ?? [];
     for (let c = 0; c < C; c++) {
-      const value = toSheetValue(line[c]);
+      const raw = line[c];
+      const empty = raw === null || raw === undefined;
+      const value = empty && emptyText !== "" ? emptyText : toSheetValue(raw);
       values[row][R + c] = value;
       numberFormats[row][R + c] =
         typeof value === "string" && value !== ""
@@ -579,4 +597,26 @@ export function detailsCells(
     numberFormats.push(formats);
   }
   return { values, numberFormats, cols };
+}
+
+/**
+ * What "Expand Entire Field" works on: the field's members shown in the last result
+ * that have children and are not expanded yet (one level deeper each time, as in
+ * Excel), and whether any of its shown members has children at all.
+ */
+export function expandableMembers(
+  headers: GridHeaders,
+  hierarchy: string,
+): { members: string[]; anyChildren: boolean } {
+  const members: string[] = [];
+  let anyChildren = false;
+  const look = (cell: HeaderCell | undefined) => {
+    const ref = cell ? cell.member : null;
+    if (!ref || ref.hierarchy !== hierarchy || !ref.hasChildren) return;
+    anyChildren = true;
+    if (!ref.expanded && members.indexOf(ref.uniqueName) < 0) members.push(ref.uniqueName);
+  };
+  for (const line of headers.rowHeaders) line.forEach(look);
+  for (const line of headers.colHeaderRows) line.forEach(look);
+  return { members, anyChildren };
 }

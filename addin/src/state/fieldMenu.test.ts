@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  RELATIVE_ITEMS,
+  checkEmptyCellText,
+  checkShowAs,
+  showAsChoice,
   LABEL_OPERATORS,
   NUMBER_FORMAT_CHOICES,
   SHOW_AS_CHOICES,
@@ -58,6 +62,26 @@ describe("the wording", () => {
       "% of Grand Total",
       "% of Column Total",
       "% of Row Total",
+      "% Of…",
+      "% of Parent Row Total",
+      "% of Parent Column Total",
+      "% of Parent Total…",
+      "Difference From…",
+      "% Difference From…",
+      "Running Total In…",
+      "% Running Total In…",
+      "Rank Smallest to Largest…",
+      "Rank Largest to Smallest…",
+      "Index",
+    ]);
+    // An item asks for something exactly when its wording ends with "…".
+    for (const choice of SHOW_AS_CHOICES) {
+      expect(choice.label.endsWith("…")).toBe(choice.needs !== "nothing");
+    }
+    expect(SHOW_AS_CHOICES.filter((c) => c.needs === "fieldAndItem").map((c) => c.showAs)).toEqual([
+      "percentOf",
+      "differenceFrom",
+      "percentDifferenceFrom",
     ]);
     expect(NUMBER_FORMAT_CHOICES.map((c) => c.format)).toEqual([
       null,
@@ -215,5 +239,70 @@ describe("describing what is set", () => {
     expect(describeValueFilter({ operator: "between", measure: RIDES, value: 1, value2: 2 }, caption)).toBe(
       "Rides is between 1 and 2",
     );
+  });
+});
+
+describe("Show Values As form", () => {
+  const CITY = "[Geography].[City]";
+  const YEAR = "[Date].[Year]";
+  const axis = [CITY, YEAR];
+
+  it("needs nothing for the kinds without …, and drops any base it is given", () => {
+    for (const showAs of ["normal", "percentOfGrandTotal", "percentOfParentRowTotal", "index"] as const) {
+      expect(checkShowAs({ showAs, baseField: CITY, baseItem: "previous", axisFields: axis })).toEqual({
+        ok: true,
+        value: { showAs, baseField: null, baseItem: null },
+      });
+    }
+    expect(checkShowAs({ showAs: "percentOfColumnTotal", baseField: "", baseItem: "", axisFields: [] }).ok).toBe(true);
+  });
+
+  it("requires a base field in Rows or Columns for the field kinds", () => {
+    for (const showAs of ["percentOfParentTotal", "runningTotalIn", "percentRunningTotalIn", "rankAscending", "rankDescending"] as const) {
+      expect(checkShowAs({ showAs, baseField: "", baseItem: "", axisFields: axis })).toEqual({
+        ok: false,
+        message: "Choose a base field.",
+      });
+      expect(checkShowAs({ showAs, baseField: "[Service].[Type]", baseItem: "", axisFields: axis }).ok).toBe(false);
+      expect(checkShowAs({ showAs, baseField: YEAR, baseItem: "next", axisFields: axis })).toEqual({
+        ok: true,
+        value: { showAs, baseField: YEAR, baseItem: null },
+      });
+    }
+  });
+
+  it("requires a base item too for % Of, Difference From and % Difference From", () => {
+    for (const showAs of ["percentOf", "differenceFrom", "percentDifferenceFrom"] as const) {
+      expect(checkShowAs({ showAs, baseField: CITY, baseItem: "", axisFields: axis })).toEqual({
+        ok: false,
+        message: "Choose a base item.",
+      });
+      expect(checkShowAs({ showAs, baseField: "", baseItem: "previous", axisFields: axis }).ok).toBe(false);
+      expect(checkShowAs({ showAs, baseField: CITY, baseItem: "[Geography].[City].&[1]", axisFields: axis })).toEqual({
+        ok: true,
+        value: { showAs, baseField: CITY, baseItem: "[Geography].[City].&[1]" },
+      });
+    }
+  });
+
+  it("offers (previous) and (next) before the field's items", () => {
+    expect(RELATIVE_ITEMS).toEqual([
+      { item: "previous", label: "(previous)" },
+      { item: "next", label: "(next)" },
+    ]);
+  });
+
+  it("finds a choice by kind, and No Calculation for none", () => {
+    expect(showAsChoice("runningTotalIn").label).toBe("Running Total In…");
+    expect(showAsChoice(undefined).label).toBe("No Calculation");
+  });
+});
+
+describe("For empty cells show", () => {
+  it("accepts up to 20 characters, and nothing", () => {
+    expect(checkEmptyCellText("")).toEqual({ ok: true, value: "" });
+    expect(checkEmptyCellText("-")).toEqual({ ok: true, value: "-" });
+    expect(checkEmptyCellText("x".repeat(20)).ok).toBe(true);
+    expect(checkEmptyCellText("x".repeat(21)).ok).toBe(false);
   });
 });

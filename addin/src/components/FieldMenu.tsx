@@ -28,6 +28,12 @@ interface Props {
   defaultMeasure: string;
   /** Apply a change to this field. The panel closes afterwards. */
   onAction: (action: LayoutAction) => void;
+  /**
+   * Expand / Collapse Entire Field: the members of the last result that can be opened
+   * one level deeper, and whether any shown item has children. Null when there is no
+   * result to go by.
+   */
+  expandable: { members: string[]; anyChildren: boolean } | null;
 }
 
 type Mode =
@@ -105,7 +111,7 @@ function MeasureSelect(props: {
   );
 }
 
-export function FieldMenu({ field, measures, defaultMeasure, onAction }: Props) {
+export function FieldMenu({ field, measures, defaultMeasure, onAction, expandable }: Props) {
   const [mode, setMode] = useState<Mode>({ kind: "menu" });
   const [error, setError] = useState<string | null>(null);
   const caption = (name: string) => measures.find((m) => m.uniqueName === name)?.caption ?? name;
@@ -402,6 +408,20 @@ export function FieldMenu({ field, measures, defaultMeasure, onAction }: Props) 
           </MenuButton>
         </div>
       )}
+
+      <div className="fm-sep" role="separator" />
+      <MenuButton
+        disabled={!expandable || !expandable.anyChildren || expandable.members.length === 0}
+        onClick={() => expandable && onAction({ type: "expandField", hierarchy, members: expandable.members })}
+      >
+        Expand Entire Field
+      </MenuButton>
+      <MenuButton
+        disabled={!expandable || !expandable.anyChildren || field.expanded.length === 0}
+        onClick={() => onAction({ type: "collapseField", hierarchy })}
+      >
+        Collapse Entire Field
+      </MenuButton>
 
       <div className="fm-sep" role="separator" />
       <MenuButton

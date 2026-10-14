@@ -22,6 +22,7 @@ import {
   buildBlock,
   columnHeaderAt,
   detailsMembers,
+  expandableMembers,
   expandedDescendants,
   memberKey,
   placeholderBlock,
@@ -226,6 +227,16 @@ export class ReportRunner {
       measure: runtime.layout.values[index].measure,
       layout: runtime.layout,
     };
+  }
+
+  /**
+   * For "Expand Entire Field": the field's members in the report's last result that
+   * have children and are not expanded, and whether any shown member has children.
+   * Null when there is no result in memory.
+   */
+  expandable(reportId: string, hierarchy: string): { members: string[]; anyChildren: boolean } | null {
+    const runtime = this.runtimes.get(reportId);
+    return runtime ? expandableMembers(runtime.headers, hierarchy) : null;
   }
 
   forget(reportId: string): void {

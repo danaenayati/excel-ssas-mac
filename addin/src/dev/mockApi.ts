@@ -431,6 +431,14 @@ class SampleCube {
     return def;
   }
 
+  private nodeCaption(name: string): string {
+    for (const h of this.hiers.values()) {
+      const node = h.nodes.get(name);
+      if (node) return node.caption;
+    }
+    return name;
+  }
+
   private findNode(name: string): Node {
     for (const h of this.hiers.values()) {
       const node = h.nodes.get(name);
@@ -525,6 +533,7 @@ class SampleCube {
   private axis(
     fields: PlacedField[],
     options: LayoutOptions,
+    grandTotal: boolean,
     kept: (Set<Node> | null)[],
     facts: Fact[],
   ): Tuple[] {
@@ -540,7 +549,7 @@ class SampleCube {
         if (tail) for (const t of tail) out.push({ nodes: [d, ...t.nodes], totalFrom: t.totalFrom });
         else out.push({ nodes: [d], totalFrom: n });
       }
-      const wanted = k === 0 ? options.grandTotals : options.subtotals;
+      const wanted = k === 0 ? grandTotal : options.subtotals;
       const rest = hiers.slice(k);
       if (wanted && rest.every((h) => h.all !== null)) {
         out.push({ nodes: rest.map((h) => h.all as Node), totalFrom: k });
@@ -607,14 +616,39 @@ class SampleCube {
         ? layout.values.map((v) => {
             const showAs = v.showAs ?? "normal";
             const label = SHOW_AS_CAPTIONS[showAs];
-            return { def: this.measureDef(v.measure), caption: label ? `${v.caption} (${label})` : v.caption, showAs };
+            // As the helper words it: "Rides (Difference From City, previous)".
+            const field = v.baseField ? lastBracketed(v.baseField) : "";
+            const item =
+              v.baseItem === "previous" || v.baseItem === "next"
+                ? v.baseItem
+                : v.baseItem
+                  ? this.nodeCaption(v.baseItem)
+                  : "";
+            const detail = (field ? " " + field : "") + (item ? ", " + item : "");
+            return {
+              def: this.measureDef(v.measure),
+              caption: label ? `${v.caption} (${label}${detail})` : v.caption,
+              showAs,
+              baseField: v.baseField ?? null,
+              baseItem: v.baseItem ?? null,
+            };
           })
-        : [{ def: MEASURES[0], caption: MEASURES[0].info.caption, showAs: "normal" as ShowValuesAs }];
+        : [
+            {
+              def: MEASURES[0],
+              caption: MEASURES[0].info.caption,
+              showAs: "normal" as ShowValuesAs,
+              baseField: null as string | null,
+              baseItem: null as string | null,
+            },
+          ];
 
     const { base, keptRows, keptCols } = this.restricted(layout);
 
-    let rowTuples = this.axis(layout.rows, layout.options, keptRows, base);
-    let colTuples = this.axis(layout.columns, layout.options, keptCols, base);
+    // The Grand Total row closes the rows axis; the Grand Total column, the columns axis.
+    const options = layout.options;
+    let rowTuples = this.axis(layout.rows, options, options.grandTotalRow ?? options.grandTotals, keptRows, base);
+    let colTuples = this.axis(layout.columns, options, options.grandTotalColumn ?? options.grandTotals, keptCols, base);
     const cellCount = rowTuples.length * colTuples.length * measures.length;
     if (cellCount > CELL_LIMIT) {
       throw fail(
@@ -643,26 +677,14 @@ class SampleCube {
         .map((line) => line.filter((_, c) => keepCol[c]));
     }
 
-    // "Show Values As": each value over the grand total, its column's total or its row's.
-    const denominators = measures.map((measure) => {
-      if (measure.showAs === "percentOfGrandTotal") {
-        const all = valueOf(measure.def, base);
-        return { at: () => all };
-      }
-      if (measure.showAs === "percentOfColumnTotal") {
-        const byCol = colTuples.map((tuple) => valueOf(measure.def, matches(tuple, base)));
-        return { at: (_r: number, c: number) => byCol[c] };
-      }
-      if (measure.showAs === "percentOfRowTotal") {
-        const byRow = rowTuples.map((tuple) => valueOf(measure.def, matches(tuple, base)));
-        return { at: (r: number) => byRow[r] };
-      }
-      return null;
-    });
+    // "Show Values As": every kind is worked out from the facts, cell by cell.
+    const shown = measures.map((measure) =>
+      measure.showAs === "normal" ? null : this.showAs(measure, layout, base),
+    );
 
     const formatPalette = ["General"];
     const formatIndex = measures.map((m) => {
-      const format = m.showAs === "normal" ? m.def.format : "0.00%";
+      const format = SHOW_AS_FORMATS[m.showAs] ?? m.def.format;
       let index = formatPalette.indexOf(format);
       if (index < 0) index = formatPalette.push(format) - 1;
       return index;
@@ -705,13 +727,8 @@ class SampleCube {
       line.forEach((t, c) => {
         measures.forEach((measure, m) => {
           const raw = t.count > 0 ? measure.def.compute(t) : null;
-          const share = denominators[m];
-          if (share && raw !== null) {
-            const total = share.at(r, c);
-            out.push(total ? raw / total : null);
-          } else {
-            out.push(raw);
-          }
+          const calc = shown[m];
+          out.push(calc && raw !== null ? calc(rowTuples[r].nodes, colTuples[c].nodes, raw) : raw);
           formats.push(formatIndex[m]);
         });
       });
@@ -749,6 +766,145 @@ class SampleCube {
         mdx: sampleMdx(layout),
       },
     };
+  }
+
+  /**
+   * One Show Values As kind as a function of a cell's row nodes, column nodes and own
+   * value. Every other value it needs is computed from the same facts, so the sample
+   * numbers obey the same arithmetic the cube's would.
+   */
+  private showAs(
+    measure: { def: MeasureDef; showAs: ShowValuesAs; baseField: string | null; baseItem: string | null },
+    layout: Layout,
+    facts: Fact[],
+  ): (rowNodes: Node[], colNodes: Node[], value: number) => number | null {
+    const memo = new Map<string, number | null>();
+    const at = (rowNodes: Node[], colNodes: Node[]): number | null => {
+      const nodes = [...rowNodes, ...colNodes];
+      const key = nodes.map((n) => n.uniqueName).join("|");
+      if (memo.has(key)) return memo.get(key) as number | null;
+      const result = valueOf(measure.def, facts.filter((f) => nodes.every((n) => n.test(f))));
+      memo.set(key, result);
+      return result;
+    };
+    const ratio = (a: number | null, b: number | null) => (a === null || b === null || b === 0 ? null : a / b);
+    const allNodes = new Set<Node>();
+    for (const h of this.hiers.values()) if (h.all) allNodes.add(h.all);
+    const isAll = (n: Node) => allNodes.has(n);
+    /** Its parent on its axis: the parent member, or (at the top) the outer item. */
+    const parentOn = (nodes: Node[]): Node[] | null => {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        if (isAll(nodes[i])) continue;
+        const copy = nodes.slice();
+        const parent = nodes[i].parent;
+        if (parent) copy[i] = parent;
+        else return null;
+        return copy;
+      }
+      return null;
+    };
+
+    switch (measure.showAs) {
+      case "percentOfGrandTotal":
+        return (_r, _c, v) => ratio(v, at([], []));
+      case "percentOfColumnTotal":
+        return (_r, c, v) => ratio(v, at([], c));
+      case "percentOfRowTotal":
+        return (r, _c, v) => ratio(v, at(r, []));
+      case "index":
+        return (r, c, v) => ratio(v * (at([], []) ?? 0), (at(r, []) ?? 0) * (at([], c) ?? 0));
+      case "percentOfParentRowTotal":
+        return (r, c, v) => {
+          const up = parentOn(r);
+          return up ? ratio(v, at(up, c)) : 1;
+        };
+      case "percentOfParentColumnTotal":
+        return (r, c, v) => {
+          const up = parentOn(c);
+          return up ? ratio(v, at(r, up)) : 1;
+        };
+      default:
+        break;
+    }
+
+    // The kinds that work along a base field.
+    const onRows = layout.rows.findIndex((f) => f.hierarchy === measure.baseField);
+    const onCols = layout.columns.findIndex((f) => f.hierarchy === measure.baseField);
+    if (onRows < 0 && onCols < 0) return () => null;
+    const h = this.hier(measure.baseField as string);
+    const position = onRows >= 0 ? onRows : onCols;
+    const pick = (r: Node[], c: Node[]) => (onRows >= 0 ? r : c)[position];
+    const put = (r: Node[], c: Node[], node: Node): [Node[], Node[]] => {
+      const copy = (onRows >= 0 ? r : c).slice();
+      copy[position] = node;
+      return onRows >= 0 ? [copy, c] : [r, copy];
+    };
+    const siblings = (n: Node) => (n.parent ? n.parent.children : h.top);
+    const baseOf = (n: Node): Node | null => {
+      const list = siblings(n);
+      const i = list.indexOf(n);
+      if (measure.baseItem === "previous") return i > 0 ? list[i - 1] : null;
+      if (measure.baseItem === "next") return i >= 0 && i < list.length - 1 ? list[i + 1] : null;
+      return h.nodes.get(measure.baseItem ?? "") ?? null;
+    };
+    const valueWith = (r: Node[], c: Node[], n: Node) => {
+      const [rr, cc] = put(r, c, n);
+      return at(rr, cc);
+    };
+
+    switch (measure.showAs) {
+      case "percentOf":
+        return (r, c, v) => {
+          const n = pick(r, c);
+          const b = n && !isAll(n) ? baseOf(n) : null;
+          return b ? ratio(v, valueWith(r, c, b)) : null;
+        };
+      case "differenceFrom":
+      case "percentDifferenceFrom":
+        return (r, c, v) => {
+          const n = pick(r, c);
+          const b = n && !isAll(n) ? baseOf(n) : null;
+          if (!b || b === n) return null;
+          const other = valueWith(r, c, b);
+          if (other === null) return null;
+          return measure.showAs === "differenceFrom" ? v - other : ratio(v - other, other);
+        };
+      case "percentOfParentTotal":
+        return (r, c, v) => {
+          // Everything nested inside the base field, on its axis, at All.
+          const own = (onRows >= 0 ? r : c).map((node, i) => {
+            if (i <= position) return node;
+            const field = (onRows >= 0 ? layout.rows : layout.columns)[i];
+            return this.hier(field.hierarchy).all ?? node;
+          });
+          return ratio(v, onRows >= 0 ? at(own, c) : at(r, own));
+        };
+      case "runningTotalIn":
+      case "percentRunningTotalIn":
+        return (r, c) => {
+          const n = pick(r, c);
+          if (!n || isAll(n)) return null;
+          const list = siblings(n);
+          let running = 0;
+          for (const s of list.slice(0, list.indexOf(n) + 1)) running += valueWith(r, c, s) ?? 0;
+          if (measure.showAs === "runningTotalIn") return running;
+          const whole = list.reduce((sum, s) => sum + (valueWith(r, c, s) ?? 0), 0);
+          return ratio(running, whole);
+        };
+      case "rankAscending":
+      case "rankDescending":
+        return (r, c, v) => {
+          const n = pick(r, c);
+          if (!n || isAll(n)) return null;
+          const others = siblings(n)
+            .map((s) => valueWith(r, c, s))
+            .filter((x): x is number => x !== null);
+          const better = others.filter((x) => (measure.showAs === "rankAscending" ? x < v : x > v)).length;
+          return better + 1;
+        };
+      default:
+        return () => null;
+    }
   }
 
   /** The fact rows behind one value cell, as Show Details on a PivotTable returns them. */
@@ -793,7 +949,43 @@ const SHOW_AS_CAPTIONS: Record<ShowValuesAs, string | null> = {
   percentOfGrandTotal: "% of Grand Total",
   percentOfColumnTotal: "% of Column Total",
   percentOfRowTotal: "% of Row Total",
+  percentOf: "% Of",
+  percentOfParentRowTotal: "% of Parent Row Total",
+  percentOfParentColumnTotal: "% of Parent Column Total",
+  percentOfParentTotal: "% of Parent Total",
+  differenceFrom: "Difference From",
+  percentDifferenceFrom: "% Difference From",
+  runningTotalIn: "Running Total In",
+  percentRunningTotalIn: "% Running Total In",
+  rankAscending: "Rank Smallest to Largest",
+  rankDescending: "Rank Largest to Smallest",
+  index: "Index",
 };
+
+/** Number format of each kind; absent keeps the measure's own. */
+const SHOW_AS_FORMATS: Partial<Record<ShowValuesAs, string>> = {
+  percentOfGrandTotal: "0.00%",
+  percentOfColumnTotal: "0.00%",
+  percentOfRowTotal: "0.00%",
+  percentOf: "0.00%",
+  percentOfParentRowTotal: "0.00%",
+  percentOfParentColumnTotal: "0.00%",
+  percentOfParentTotal: "0.00%",
+  percentDifferenceFrom: "0.00%",
+  percentRunningTotalIn: "0.00%",
+  rankAscending: "#,##0",
+  rankDescending: "#,##0",
+  index: "0.00",
+  // As the helper: no format of their own, so a user number format matters most here.
+  differenceFrom: "General",
+  runningTotalIn: "General",
+};
+
+/** "[Geography].[City]" -> "City". */
+function lastBracketed(uniqueName: string): string {
+  const match = /\[([^\]]*)\]\s*$/.exec(uniqueName);
+  return match ? match[1] : uniqueName;
+}
 
 function valueOf(def: MeasureDef, facts: Fact[]): number | null {
   const t = totalsOf(facts);
@@ -894,11 +1086,11 @@ function sampleMdx(layout: Layout): string {
       ? `DrilldownMember(${set}, {${f.expanded.join(", ")}}, RECURSIVE)`
       : set;
   };
-  const axisSet = (fields: PlacedField[], options: LayoutOptions): string => {
+  const axisSet = (fields: PlacedField[], options: LayoutOptions, grand: boolean): string => {
     const build = (k: number): string => {
       const rest = fields.slice(k);
       const inner = k + 1 < fields.length ? `CrossJoin(${detail(fields[k])}, ${build(k + 1)})` : detail(fields[k]);
-      const wanted = k === 0 ? options.grandTotals : options.subtotals;
+      const wanted = k === 0 ? grand : options.subtotals;
       if (!wanted || rest.some((f) => f.allMember === null)) return inner;
       const all = rest.map((f) => f.allMember).join(", ");
       return `{${inner}, {${rest.length > 1 ? `(${all})` : all}}}`;
@@ -911,7 +1103,7 @@ function sampleMdx(layout: Layout): string {
   const nonEmpty = layout.options.nonEmpty ? "NON EMPTY " : "";
   const columns =
     layout.columns.length > 0
-      ? `CrossJoin(${axisSet(layout.columns, layout.options)}, ${measures})`
+      ? `CrossJoin(${axisSet(layout.columns, layout.options, layout.options.grandTotalColumn ?? layout.options.grandTotals)}, ${measures})`
       : measures;
 
   let from = `[${CUBE}]`;
@@ -929,7 +1121,7 @@ function sampleMdx(layout: Layout): string {
   const lines = [`SELECT`, `  ${nonEmpty}${columns} ON COLUMNS`];
   if (layout.rows.length > 0) {
     lines[1] += ",";
-    lines.push(`  ${nonEmpty}${axisSet(layout.rows, layout.options)} ON ROWS`);
+    lines.push(`  ${nonEmpty}${axisSet(layout.rows, layout.options, layout.options.grandTotalRow ?? layout.options.grandTotals)} ON ROWS`);
   }
   lines.push(`FROM ${from}`);
   if (where.length > 0) lines.push(`WHERE (${where.join(", ")})`);

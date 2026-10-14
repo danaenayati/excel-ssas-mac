@@ -10,6 +10,8 @@ import { cx } from "../util";
 export type MenuEntry =
   | { label: string; run: () => void; disabled?: boolean; danger?: boolean; checked?: boolean }
   | { label: string; submenu: MenuEntry[]; disabled?: boolean }
+  /** A line of explanation, not a choice. */
+  | { note: string }
   | "separator";
 
 interface MenuProps {
@@ -119,6 +121,13 @@ export function Menu({ anchor, items: topItems, onClose, label }: MenuProps) {
       )}
       {items.map((item, index) => {
         if (item === "separator") return <div key={`s${index}`} className="menu-separator" role="separator" />;
+        if ("note" in item) {
+          return (
+            <p key={`n${index}`} className="menu-note">
+              {item.note}
+            </p>
+          );
+        }
         if ("submenu" in item) {
           return (
             <button

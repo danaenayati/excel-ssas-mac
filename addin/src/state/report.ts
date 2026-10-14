@@ -14,7 +14,15 @@ import type {
   ValueFilter,
   ValueOperator,
 } from "../types";
-import { DEFAULT_OPTIONS, emptyLayout, layoutReducer, type LayoutAction } from "./layout";
+import {
+  DEFAULT_OPTIONS,
+  MAX_EMPTY_CELL_TEXT,
+  emptyLayout,
+  layoutReducer,
+  needsBaseField,
+  needsBaseItem,
+  type LayoutAction,
+} from "./layout";
 
 export interface Current {
   def: ReportDef;
@@ -205,6 +213,17 @@ const SHOW_AS: readonly ShowValuesAs[] = [
   "percentOfGrandTotal",
   "percentOfColumnTotal",
   "percentOfRowTotal",
+  "percentOf",
+  "percentOfParentRowTotal",
+  "percentOfParentColumnTotal",
+  "percentOfParentTotal",
+  "differenceFrom",
+  "percentDifferenceFrom",
+  "runningTotalIn",
+  "percentRunningTotalIn",
+  "rankAscending",
+  "rankDescending",
+  "index",
 ];
 const TWO_BOUNDS = ["between", "notBetween"];
 
@@ -285,7 +304,18 @@ function valueFields(value: unknown): ValueField[] {
       measure: item.measure,
       caption: typeof item.caption === "string" ? item.caption : item.measure,
     };
-    if (isOneOf(SHOW_AS, item.showAs) && item.showAs !== "normal") field.showAs = item.showAs;
+    if (isOneOf(SHOW_AS, item.showAs) && item.showAs !== "normal") {
+      // A kind whose base is missing cannot be shown as asked: it reads as No Calculation.
+      const baseField = typeof item.baseField === "string" && item.baseField !== "" ? item.baseField : null;
+      const baseItem = typeof item.baseItem === "string" && item.baseItem !== "" ? item.baseItem : null;
+      const complete =
+        (!needsBaseField(item.showAs) || baseField !== null) && (!needsBaseItem(item.showAs) || baseItem !== null);
+      if (complete) {
+        field.showAs = item.showAs;
+        if (needsBaseField(item.showAs) && baseField) field.baseField = baseField;
+        if (needsBaseItem(item.showAs) && baseItem) field.baseItem = baseItem;
+      }
+    }
     if (typeof item.numberFormat === "string" && item.numberFormat.trim() !== "" && item.numberFormat.length <= 100) {
       field.numberFormat = item.numberFormat;
     }
@@ -297,7 +327,7 @@ function valueFields(value: unknown): ValueField[] {
 export function parseLayout(value: unknown): Layout {
   if (!isRecord(value)) return emptyLayout();
   const options = isRecord(value.options) ? value.options : {};
-  const flag = (key: keyof typeof DEFAULT_OPTIONS) =>
+  const flag = (key: "grandTotals" | "subtotals" | "nonEmpty") =>
     typeof options[key] === "boolean" ? (options[key] as boolean) : DEFAULT_OPTIONS[key];
 
   // A hierarchy may sit in one area only; keep the first place it appears.
@@ -311,7 +341,7 @@ export function parseLayout(value: unknown): Layout {
   // The same measure may be in Values twice, shown two ways (plain and as a percent).
   const shown = new Set<string>();
   const values = valueFields(value.values).filter((v) => {
-    const key = v.measure + "\u0001" + (v.showAs ?? "normal");
+    const key = [v.measure, v.showAs ?? "normal", v.baseField ?? "", v.baseItem ?? ""].join("\u0001");
     return shown.has(key) ? false : (shown.add(key), true);
   });
 
@@ -320,12 +350,27 @@ export function parseLayout(value: unknown): Layout {
     columns,
     values,
     filters,
-    options: {
-      grandTotals: flag("grandTotals"),
-      subtotals: flag("subtotals"),
-      nonEmpty: flag("nonEmpty"),
-    },
+    options: parsedOptions(options, flag),
   };
+}
+
+function parsedOptions(
+  options: Record<string, unknown>,
+  flag: (key: "grandTotals" | "subtotals" | "nonEmpty") => boolean,
+): Layout["options"] {
+  const out: Layout["options"] = {
+    grandTotals: flag("grandTotals"),
+    subtotals: flag("subtotals"),
+    nonEmpty: flag("nonEmpty"),
+  };
+  // Optional settings are kept only when they are what they claim to be.
+  if (typeof options.grandTotalRow === "boolean") out.grandTotalRow = options.grandTotalRow;
+  if (typeof options.grandTotalColumn === "boolean") out.grandTotalColumn = options.grandTotalColumn;
+  if (options.repeatLabels === true) out.repeatLabels = true;
+  if (typeof options.emptyCellText === "string" && options.emptyCellText !== "") {
+    out.emptyCellText = options.emptyCellText.slice(0, MAX_EMPTY_CELL_TEXT);
+  }
+  return out;
 }
 
 const ID_PATTERN = /^[A-Za-z0-9]{1,40}$/;

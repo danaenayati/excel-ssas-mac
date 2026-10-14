@@ -40,6 +40,8 @@ interface Props {
     defaultMeasure: string;
     /** Apply a sort or filter change; the panel is closed by the caller. */
     onAction: (action: LayoutAction) => void;
+    /** For Expand / Collapse Entire Field; null without a result. */
+    expandable: { members: string[]; anyChildren: boolean } | null;
   };
 }
 
@@ -241,6 +243,7 @@ export function MemberPicker({ api, connectionId, catalog, cube, field, onApply,
             measures={menu.measures}
             defaultMeasure={menu.defaultMeasure}
             onAction={menu.onAction}
+            expandable={menu.expandable}
           />
           <h3 className="picker-heading">Select items</h3>
         </>

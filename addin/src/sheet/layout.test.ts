@@ -13,6 +13,7 @@ import {
   columnHeaderAt,
   detailsCells,
   detailsMembers,
+  expandableMembers,
   excelText,
   excelValues,
   expandedDescendants,
@@ -750,6 +751,8 @@ describe("blockFields", () => {
       rowsFiltered: [false, false],
       columnsFiltered: [false],
       valueFormats: [],
+      repeatLabels: false,
+      emptyCellText: "",
     });
     expect(blockFields({ filters: [], rows: [], columns: [] })).toMatchObject({ filters: 0, rows: 0, columns: [] });
   });
@@ -1002,5 +1005,94 @@ describe("the cells of a details sheet", () => {
   it("still has a header row with no rows, and one column with no columns", () => {
     expect(detailsCells(["A"], []).values).toEqual([["A"]]);
     expect(detailsCells([], []).cols).toBe(1);
+  });
+});
+
+describe("Repeat All Item Labels", () => {
+  // Outer field City, inner Calendar: the city is sent once, then as blank repeats.
+  function nested(): Grid {
+    const grid = plainGrid(2, 1, 4);
+    grid.rowFieldCaptions = ["City", "Calendar"];
+    const y2026 = ref(CAL, "2026", 1);
+    grid.rowHeaders = [
+      [member(tehran), member(y2025)],
+      [blank(tehran), member(y2026)],
+      [member(shiraz), member(y2025)],
+      [blank(shiraz), member(y2026)],
+    ];
+    return grid;
+  }
+
+  it("leaves repeats empty by default", () => {
+    const block = buildBlock(nested(), { filters: 0, rows: 2, columns: [] });
+    expect(block.values.slice(1).map((line) => line[0])).toEqual(["Tehran", "", "Shiraz", ""]);
+  });
+
+  it("writes each repeat's caption when on, as text, and keeps the member behind it", () => {
+    const block = buildBlock(nested(), { filters: 0, rows: 2, columns: [], repeatLabels: true });
+    expect(block.values.slice(1).map((line) => line[0])).toEqual(["Tehran", "Tehran", "Shiraz", "Shiraz"]);
+    expect(block.numberFormats[2][0]).toBe(TEXT_FORMAT);
+    expect(memberAt(block, 2, 0)).toEqual({ member: tehran, axis: "rows" });
+  });
+
+  it("does not invent labels for totals", () => {
+    const grid = nested();
+    grid.rowHeaders.push([label("Grand Total", "grandTotal"), label("", "grandTotal")]);
+    grid.values.push([1]);
+    grid.cellFormats.push([0]);
+    grid.rowKinds.push("grandTotal");
+    const block = buildBlock(grid, { filters: 0, rows: 2, columns: [], repeatLabels: true });
+    expect(block.values[5].slice(0, 2)).toEqual(["Grand Total", ""]);
+  });
+});
+
+describe("For empty cells show", () => {
+  it("writes the text, as text, where a value is missing, and nowhere else", () => {
+    const block = buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"], emptyCellText: "n/a" });
+    expect(block.values[5][4]).toBe("n/a");
+    expect(block.numberFormats[5][4]).toBe(TEXT_FORMAT);
+    expect(block.values[5][3]).toBe(2);
+    expect(block.values[2].every((v) => v === "")).toBe(true); // the blank row is not a value cell
+  });
+
+  it("is guarded like any text when it starts with =", () => {
+    const block = buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"], emptyCellText: "-" });
+    expect(excelValues(block, false)[5][4]).toBe("'-");
+  });
+
+  it("leaves missing values empty by default", () => {
+    const block = buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"], emptyCellText: "" });
+    expect(block.values[5][4]).toBe("");
+  });
+});
+
+describe("Expand Entire Field", () => {
+  const q2 = ref(CAL, "Q2", 2, { hasChildren: true });
+  const opened = ref(CAL, "2025", 1, { hasChildren: true, expanded: true });
+  const closed = ref(CAL, "2026", 1, { hasChildren: true });
+
+  it("lists the field's shown members that have children and are not open yet", () => {
+    const headers = {
+      rowHeaders: [[member(opened)], [member(q1, 1)], [member(q2, 1)], [member(closed)], [blank(closed)]],
+      colHeaderRows: [[member(tehran)]],
+    };
+    // q1 (from the fixtures above) is already expanded.
+    expect(expandableMembers(headers, CAL)).toEqual({ members: [q2.uniqueName, closed.uniqueName], anyChildren: true });
+  });
+
+  it("finds members on the columns too", () => {
+    const headers = { rowHeaders: [], colHeaderRows: [[member(closed), blank(closed)]] };
+    expect(expandableMembers(headers, CAL)).toEqual({ members: [closed.uniqueName], anyChildren: true });
+  });
+
+  it("says when no item has children, and when all are already open", () => {
+    expect(expandableMembers({ rowHeaders: [[member(tehran)], [member(shiraz)]], colHeaderRows: [] }, CITY)).toEqual({
+      members: [],
+      anyChildren: false,
+    });
+    expect(expandableMembers({ rowHeaders: [[member(opened)]], colHeaderRows: [] }, CAL)).toEqual({
+      members: [],
+      anyChildren: true,
+    });
   });
 });

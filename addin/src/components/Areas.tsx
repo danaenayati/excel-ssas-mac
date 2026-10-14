@@ -25,7 +25,7 @@ import {
   type FieldArea,
   type LayoutAction,
 } from "../state/layout";
-import type { Layout, PlacedField, ValueField } from "../types";
+import type { Layout, PlacedField, ShowValuesAs, ValueField } from "../types";
 import { cx } from "../util";
 import { Icon } from "./common";
 import { dragged, endDrag, startDrag } from "./drag";
@@ -38,6 +38,8 @@ interface Props {
   onFilter: (hierarchy: string) => void;
   /** Ask for a custom number format for a value field. */
   onCustomFormat: (measure: string) => void;
+  /** Ask for the base field (and item) of a Show Values As kind that needs one. */
+  onShowAsForm: (measure: string, showAs: ShowValuesAs) => void;
 }
 
 interface ChipInfo {
@@ -49,6 +51,25 @@ interface ChipInfo {
 
 const ORDER: Area[] = ["filters", "columns", "rows", "values"];
 
+/** A one-glance mark on a value chip for how its values are shown. */
+const SHOW_AS_MARKS: Record<ShowValuesAs, string> = {
+  normal: "",
+  percentOfGrandTotal: "%",
+  percentOfColumnTotal: "%",
+  percentOfRowTotal: "%",
+  percentOf: "%",
+  percentOfParentRowTotal: "%",
+  percentOfParentColumnTotal: "%",
+  percentOfParentTotal: "%",
+  differenceFrom: "Δ",
+  percentDifferenceFrom: "Δ%",
+  runningTotalIn: "Σ",
+  percentRunningTotalIn: "Σ%",
+  rankAscending: "#",
+  rankDescending: "#",
+  index: "ix",
+};
+
 function chipsOf(layout: Layout, area: Area): ChipInfo[] {
   if (area === "values") {
     return layout.values.map((v) => ({ name: v.measure, caption: v.caption, field: null, value: v }));
@@ -56,7 +77,7 @@ function chipsOf(layout: Layout, area: Area): ChipInfo[] {
   return layout[area].map((f) => ({ name: f.hierarchy, caption: f.caption, field: f, value: null }));
 }
 
-export function Areas({ layout, dispatch, onFilter, onCustomFormat }: Props) {
+export function Areas({ layout, dispatch, onFilter, onCustomFormat, onShowAsForm }: Props) {
   const [menu, setMenu] = useState<{ area: Area; name: string; anchor: HTMLElement } | null>(null);
   const [hover, setHover] = useState<{ area: Area; index: number | null } | null>(null);
 
@@ -134,17 +155,29 @@ export function Areas({ layout, dispatch, onFilter, onCustomFormat }: Props) {
       }
     } else if (chip.value) {
       const value = chip.value;
+      const hasAxisFields = layout.rows.length + layout.columns.length > 0;
       const showAs = value.showAs ?? "normal";
       const format = value.numberFormat ?? null;
       items.push(
         "separator",
         {
           label: "Show Values As",
-          submenu: SHOW_AS_CHOICES.map((choice) => ({
-            label: choice.label,
-            checked: choice.showAs === showAs,
-            run: () => dispatch({ type: "setShowAs", measure: name, showAs: choice.showAs }),
-          })),
+          submenu: [
+            ...(hasAxisFields
+              ? []
+              : [{ note: "The items with … need a field in Rows or Columns." } as MenuEntry]),
+            ...SHOW_AS_CHOICES.map(
+              (choice): MenuEntry => ({
+                label: choice.label,
+                checked: choice.showAs === showAs,
+                disabled: choice.needs !== "nothing" && !hasAxisFields,
+                run: () =>
+                  choice.needs === "nothing"
+                    ? dispatch({ type: "setShowAs", measure: name, showAs: choice.showAs })
+                    : onShowAsForm(name, choice.showAs),
+              }),
+            ),
+          ],
         },
         {
           label: "Number Format",
@@ -279,7 +312,11 @@ export function Areas({ layout, dispatch, onFilter, onCustomFormat }: Props) {
                         }
                       >
                         <span className="chip-caption">{chip.caption}</span>
-                        {percent && <span className="chip-mark">%</span>}
+                        {percent && chip.value && (
+                          <span className="chip-mark" aria-hidden="true">
+                            {SHOW_AS_MARKS[chip.value.showAs ?? "normal"]}
+                          </span>
+                        )}
                         {sorted && <Icon name="sort" className="chip-funnel" />}
                         {restricted && <Icon name="funnel" className="chip-funnel" />}
                         <Icon name="chevron-down" className="chip-caret" />

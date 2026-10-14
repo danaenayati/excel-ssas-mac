@@ -313,3 +313,46 @@ describe("reading sorts, filters, show-as and formats back", () => {
     ]);
   });
 });
+
+describe("reading the Windows options back", () => {
+  it("round-trips grand totals per axis, repeat labels, empty-cell text and a base field", () => {
+    const def = newReportDef("demo", "Sample", "Rides");
+    def.layout.options = {
+      grandTotals: true,
+      grandTotalRow: false,
+      grandTotalColumn: true,
+      subtotals: false,
+      nonEmpty: true,
+      repeatLabels: true,
+      emptyCellText: "-",
+    };
+    def.layout.rows.push({ hierarchy: "[A].[B]", caption: "B", allMember: null, expanded: [], members: [], memberCaptions: [] });
+    def.layout.values.push({ measure: "[M]", caption: "M", showAs: "differenceFrom", baseField: "[A].[B]", baseItem: "previous" });
+    def.layout.values.push({ measure: "[M]", caption: "M", showAs: "rankAscending", baseField: "[A].[B]" });
+    expect(parseReportDef(serializeReportDef(def), def.id)).toEqual(def);
+  });
+
+  it("reads an incomplete show-as as No Calculation, and drops a base it does not need", () => {
+    const def = parseReportDef(
+      JSON.stringify({
+        id: "abc",
+        layout: {
+          values: [
+            { measure: "[A]", showAs: "percentOf", baseField: "[X].[Y]" }, // no base item
+            { measure: "[B]", showAs: "runningTotalIn" }, // no base field
+            { measure: "[C]", showAs: "index", baseField: "[X].[Y]", baseItem: "next" },
+            { measure: "[D]", showAs: "percentOf", baseField: "[X].[Y]", baseItem: "[X].[Y].&[1]" },
+          ],
+          options: { grandTotalRow: "yes", repeatLabels: "true", emptyCellText: "x".repeat(25) },
+        },
+      }),
+    )!;
+    expect(def.layout.values).toEqual([
+      { measure: "[A]", caption: "[A]" },
+      { measure: "[B]", caption: "[B]" },
+      { measure: "[C]", caption: "[C]", showAs: "index" },
+      { measure: "[D]", caption: "[D]", showAs: "percentOf", baseField: "[X].[Y]", baseItem: "[X].[Y].&[1]" },
+    ]);
+    expect(def.layout.options).toEqual({ grandTotals: true, subtotals: false, nonEmpty: true, emptyCellText: "x".repeat(20) });
+  });
+});

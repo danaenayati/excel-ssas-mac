@@ -859,3 +859,124 @@ describe("Show Details", () => {
     ).rejects.toMatchObject({ error: { category: "bad-request", message: expect.stringContaining("filtered to several items") } });
   });
 });
+
+describe("the Windows options through the sample cube", () => {
+  const cityRows = (extra: LayoutAction[] = []) =>
+    layoutOf([
+      { type: "addMeasure", measure: measure("Rides") },
+      { type: "addHierarchy", hierarchy: hierarchy("City") },
+      ...extra,
+    ]);
+  const lastRowText = (extent: Extent) => cellText(extent.rows - 1, 0);
+  const lastColText = (extent: Extent) => cellText(1, extent.cols - 1);
+
+  it("shows the grand total row and column separately", async () => {
+    host.select(0, 0);
+    const both = cityRows([{ type: "addHierarchy", hierarchy: hierarchy("Year"), area: "columns" }]);
+    const def = report(both);
+    const all = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    expect(lastRowText(all.extent)).toBe("Grand Total");
+    expect(cellText(0, all.extent.cols - 1)).toBe("Grand Total");
+
+    // "On for Rows Only": the total at the end of each row, no total row.
+    const rowsOnly = report(layoutOf([{ type: "setGrandTotals", row: false, column: true }], both), def.id);
+    const r = expectWritten(await runner.run(rowsOnly, { anchor: null, useSelection: false }));
+    expect(lastRowText(r.extent)).not.toBe("Grand Total");
+    expect(cellText(0, r.extent.cols - 1)).toBe("Grand Total");
+
+    // "On for Columns Only": the total row, no total column.
+    const columnsOnly = report(layoutOf([{ type: "setGrandTotals", row: true, column: false }], both), def.id);
+    const c = expectWritten(await runner.run(columnsOnly, { anchor: null, useSelection: false }));
+    expect(lastRowText(c.extent)).toBe("Grand Total");
+    expect(cellText(0, c.extent.cols - 1)).not.toBe("Grand Total");
+    expect(lastColText(c.extent)).toBe("Rides");
+  });
+
+  it("repeats outer labels and fills empty cells when asked", async () => {
+    host.select(0, 0);
+    const layout = layoutOf([
+      { type: "addMeasure", measure: measure("Rides") },
+      { type: "addHierarchy", hierarchy: hierarchy("City") },
+      { type: "addHierarchy", hierarchy: hierarchy("Service Type") },
+      { type: "setOption", option: "repeatLabels", value: true },
+      { type: "setOption", option: "nonEmpty", value: false },
+      { type: "setEmptyCellText", text: "-" },
+    ]);
+    expectWritten(await runner.run(report(layout), { anchor: null, useSelection: true }));
+    // Tehran on each of its service lines; Rey has no Box rides, shown as "-".
+    expect([cellText(1, 0), cellText(2, 0), cellText(3, 0)]).toEqual(["Tehran", "Tehran", "Tehran"]);
+    const reyBox = [4, 5, 6].find((row) => cellText(row, 1) === "Box" && cellText(row, 0) === "Rey");
+    expect(reyBox).toBeDefined();
+    expect(cellText(reyBox as number, 2)).toBe("-");
+  });
+
+  it("computes the base-field kinds the way Excel defines them", async () => {
+    host.select(0, 0);
+    const city = hierarchy("City").uniqueName;
+    const rides = measure("Rides").uniqueName;
+    const base = layoutOf([
+      { type: "addMeasure", measure: measure("Rides") },
+      { type: "addHierarchy", hierarchy: hierarchy("City") },
+    ]);
+    const at = (row: number) => ({ sheetId: "preview-sheet-1", sheetName: "Sheet1", row, col: 0 });
+    const plain = expectWritten(await runner.run(report(base, "plain"), { anchor: at(0), useSelection: false }));
+    const n = plain.runtime.dataRows - 1; // without the Grand Total line
+    const ridesCol = Array.from({ length: n }, (_, i) => Number(cellText(1 + i, 1)));
+    const column = (top: number) => Array.from({ length: n }, (_, i) => cellText(top + 1 + i, 1));
+
+    const running = layoutOf([{ type: "setShowAs", measure: rides, showAs: "runningTotalIn", baseField: city }], base);
+    expectWritten(await runner.run(report(running, "running"), { anchor: at(20), useSelection: false }));
+    expect(cellText(20, 1)).toBe("Rides (Running Total In City)");
+    const runningCol = column(20).map(Number);
+    expect(runningCol[1]).toBe(ridesCol[0] + ridesCol[1]);
+    expect(runningCol[n - 1]).toBe(ridesCol.reduce((a, b) => a + b, 0));
+
+    const diff = layoutOf(
+      [{ type: "setShowAs", measure: rides, showAs: "differenceFrom", baseField: city, baseItem: "previous" }],
+      base,
+    );
+    expectWritten(await runner.run(report(diff, "diff"), { anchor: at(40), useSelection: false }));
+    expect(cellText(40, 1)).toBe("Rides (Difference From City, previous)");
+    expect(cellText(41, 1) ?? "").toBe(""); // the first item has no previous
+    expect(Number(cellText(42, 1))).toBe(ridesCol[1] - ridesCol[0]);
+
+    const percentOf = layoutOf(
+      [{ type: "setShowAs", measure: rides, showAs: "percentOf", baseField: city, baseItem: "[Geography].[City].&[1]" }],
+      base,
+    );
+    expectWritten(await runner.run(report(percentOf, "pct"), { anchor: at(60), useSelection: false }));
+    expect(cellText(60, 1)).toBe("Rides (% Of City, Tehran)");
+    expect(Number(cellText(61, 1))).toBe(1); // Tehran against itself
+    expect(Number(cellText(62, 1))).toBeCloseTo(ridesCol[1] / ridesCol[0], 12);
+
+    const rank = layoutOf([{ type: "setShowAs", measure: rides, showAs: "rankDescending", baseField: city }], base);
+    expectWritten(await runner.run(report(rank, "rank"), { anchor: at(80), useSelection: false }));
+    const ranks = column(80).map(Number);
+    expect(ranks.slice().sort((a, b) => a - b)).toEqual(Array.from({ length: n }, (_, i) => i + 1));
+    expect(ranks[ridesCol.indexOf(Math.max(...ridesCol))]).toBe(1);
+    expect(host.snapshot().cells.get("81,1")?.format).toBe("#,##0");
+  });
+
+  it("finds what Expand Entire Field opens, one level at a time", async () => {
+    host.select(0, 0);
+    const calendar = hierarchy("Calendar").uniqueName;
+    const def = report(layoutOf([{ type: "addMeasure", measure: measure("Rides") }, { type: "addHierarchy", hierarchy: hierarchy("Calendar") }]));
+    expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    const years = runner.expandable(def.id, calendar)!;
+    expect(years.anyChildren).toBe(true);
+    expect(years.members).toEqual(["[Date].[Calendar].[Year].&[2025]", "[Date].[Calendar].[Year].&[2026]"]);
+
+    const deeper = { ...def, layout: layoutOf([{ type: "expandField", hierarchy: calendar, members: years.members }], def.layout) };
+    expectWritten(await runner.run(deeper, { anchor: null, useSelection: false }));
+    const quarters = runner.expandable(def.id, calendar)!;
+    expect(quarters.members).toHaveLength(8);
+    expect(quarters.members.every((m) => m.indexOf("[Quarter]") >= 0)).toBe(true);
+
+    const flat = report(layoutOf([{ type: "addMeasure", measure: measure("Rides") }, { type: "addHierarchy", hierarchy: hierarchy("City") }]));
+    expectWritten(
+      await runner.run(flat, { anchor: { sheetId: "preview-sheet-1", sheetName: "Sheet1", row: 40, col: 5 }, useSelection: false }),
+    );
+    expect(runner.expandable(flat.id, hierarchy("City").uniqueName)).toEqual({ members: [], anyChildren: false });
+    expect(runner.expandable("unknown", calendar)).toBeNull();
+  });
+});

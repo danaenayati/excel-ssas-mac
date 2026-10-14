@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { Layout } from "../types";
 import {
+  grandTotalsShown,
+  needsBaseField,
+  needsBaseItem,
+  resetOrphanedShowAs,
   emptyLayout,
   filterValueText,
   findField,
@@ -769,5 +773,146 @@ describe("Show Values As and number format", () => {
   it("does nothing for a measure that is not in Values", () => {
     expect(layoutReducer(start, { type: "setShowAs", measure: "[Measures].[Nope]", showAs: "percentOfGrandTotal" })).toBe(start);
     expect(layoutReducer(start, { type: "setNumberFormat", measure: "[Measures].[Nope]", format: "0" })).toBe(start);
+  });
+});
+
+describe("grand totals per axis", () => {
+  it("reads both from grandTotals until set one by one", () => {
+    expect(grandTotalsShown(emptyLayout().options)).toEqual({ row: true, column: true });
+    const off = layoutReducer(emptyLayout(), { type: "setOption", option: "grandTotals", value: false });
+    expect(grandTotalsShown(off.options)).toEqual({ row: false, column: false });
+  });
+
+  it("sets each, keeping grandTotals true while either is on", () => {
+    const rowsOnly = layoutReducer(emptyLayout(), { type: "setGrandTotals", row: false, column: true });
+    expect(rowsOnly.options).toMatchObject({ grandTotals: true, grandTotalRow: false, grandTotalColumn: true });
+    expect(grandTotalsShown(rowsOnly.options)).toEqual({ row: false, column: true });
+    const columnsOnly = layoutReducer(rowsOnly, { type: "setGrandTotals", row: true, column: false });
+    expect(columnsOnly.options).toMatchObject({ grandTotals: true, grandTotalRow: true, grandTotalColumn: false });
+    const none = layoutReducer(columnsOnly, { type: "setGrandTotals", row: false, column: false });
+    expect(none.options).toMatchObject({ grandTotals: false, grandTotalRow: false, grandTotalColumn: false });
+    expect(layoutReducer(none, { type: "setGrandTotals", row: false, column: false })).toBe(none);
+  });
+});
+
+describe("pane-only options", () => {
+  it("toggles Repeat All Item Labels", () => {
+    const on = layoutReducer(emptyLayout(), { type: "setOption", option: "repeatLabels", value: true });
+    expect(on.options.repeatLabels).toBe(true);
+    expect(layoutReducer(emptyLayout(), { type: "setOption", option: "repeatLabels", value: false })).toEqual(emptyLayout());
+  });
+
+  it("sets the empty-cell text, cut to 20 characters, and removes it when emptied", () => {
+    const set = layoutReducer(emptyLayout(), { type: "setEmptyCellText", text: "-" });
+    expect(set.options.emptyCellText).toBe("-");
+    const long = layoutReducer(emptyLayout(), { type: "setEmptyCellText", text: "x".repeat(30) });
+    expect(long.options.emptyCellText).toBe("x".repeat(20));
+    const cleared = layoutReducer(set, { type: "setEmptyCellText", text: "" });
+    expect("emptyCellText" in cleared.options).toBe(false);
+    expect(layoutReducer(set, { type: "setEmptyCellText", text: "-" })).toBe(set);
+  });
+});
+
+describe("Expand and Collapse Entire Field", () => {
+  const start = run([{ type: "addHierarchy", hierarchy: calendar }]);
+  const name = calendar.uniqueName;
+
+  it("adds the given members once each, after the ones already open", () => {
+    const one = layoutReducer(start, { type: "expandField", hierarchy: name, members: ["a", "b", "a"] });
+    expect(one.rows[0].expanded).toEqual(["a", "b"]);
+    const two = layoutReducer(one, { type: "expandField", hierarchy: name, members: ["b", "c"] });
+    expect(two.rows[0].expanded).toEqual(["a", "b", "c"]);
+    expect(layoutReducer(two, { type: "expandField", hierarchy: name, members: ["a"] })).toBe(two);
+  });
+
+  it("collapse clears every open member", () => {
+    const open = layoutReducer(start, { type: "expandField", hierarchy: name, members: ["a", "b"] });
+    expect(layoutReducer(open, { type: "collapseField", hierarchy: name }).rows[0].expanded).toEqual([]);
+    expect(layoutReducer(start, { type: "collapseField", hierarchy: name })).toBe(start);
+  });
+});
+
+describe("Show Values As with a base field", () => {
+  const start = run([
+    { type: "addHierarchy", hierarchy: city },
+    { type: "addHierarchy", hierarchy: calendar, area: "columns" },
+    { type: "addMeasure", measure: rides },
+    { type: "addMeasure", measure: fare },
+  ]);
+
+  it("knows which kinds need a base field and which a base item too", () => {
+    expect(needsBaseField("runningTotalIn")).toBe(true);
+    expect(needsBaseItem("runningTotalIn")).toBe(false);
+    expect(needsBaseField("differenceFrom") && needsBaseItem("differenceFrom")).toBe(true);
+    expect(needsBaseField("percentOfParentRowTotal")).toBe(false);
+    expect(needsBaseField("index")).toBe(false);
+    expect(needsBaseField(undefined)).toBe(false);
+  });
+
+  it("stores the base field and item a kind needs, and drops the rest", () => {
+    const diff = layoutReducer(start, {
+      type: "setShowAs",
+      measure: rides.uniqueName,
+      showAs: "differenceFrom",
+      baseField: city.uniqueName,
+      baseItem: "previous",
+    });
+    expect(diff.values[0]).toEqual({
+      measure: rides.uniqueName,
+      caption: "Rides",
+      showAs: "differenceFrom",
+      baseField: city.uniqueName,
+      baseItem: "previous",
+    });
+    const running = layoutReducer(diff, {
+      type: "setShowAs",
+      measure: rides.uniqueName,
+      showAs: "runningTotalIn",
+      baseField: calendar.uniqueName,
+      baseItem: "previous",
+    });
+    expect(running.values[0]).toEqual({
+      measure: rides.uniqueName,
+      caption: "Rides",
+      showAs: "runningTotalIn",
+      baseField: calendar.uniqueName,
+    });
+    const plain = layoutReducer(running, { type: "setShowAs", measure: rides.uniqueName, showAs: "index", baseField: city.uniqueName });
+    expect(plain.values[0]).toEqual({ measure: rides.uniqueName, caption: "Rides", showAs: "index" });
+    expect(layoutReducer(plain, { type: "setShowAs", measure: rides.uniqueName, showAs: "index" })).toBe(plain);
+  });
+
+  it("goes back to No Calculation when its base field leaves Rows and Columns", () => {
+    const shown = layoutReducer(start, {
+      type: "setShowAs",
+      measure: fare.uniqueName,
+      showAs: "rankDescending",
+      baseField: city.uniqueName,
+    });
+    // Moving between Rows and Columns keeps it.
+    const moved = layoutReducer(shown, { type: "move", name: city.uniqueName, area: "columns" });
+    expect(moved.values[1].showAs).toBe("rankDescending");
+    // To Filters, or out of the layout, it does not.
+    const filtered = layoutReducer(shown, { type: "move", name: city.uniqueName, area: "filters" });
+    expect(filtered.values[1]).toEqual({ measure: fare.uniqueName, caption: "Fare" });
+    const removed = layoutReducer(shown, { type: "remove", name: city.uniqueName });
+    expect(removed.values[1]).toEqual({ measure: fare.uniqueName, caption: "Fare" });
+    // Value fields without a base are left alone.
+    expect(removed.values[0]).toBe(shown.values[0]);
+  });
+
+  it("reports what it reset", () => {
+    const shown = layoutReducer(start, {
+      type: "setShowAs",
+      measure: rides.uniqueName,
+      showAs: "percentOf",
+      baseField: calendar.uniqueName,
+      baseItem: "next",
+    });
+    const orphan = { ...shown, columns: [] };
+    const { layout, reset } = resetOrphanedShowAs(orphan);
+    expect(reset.map((v) => v.measure)).toEqual([rides.uniqueName]);
+    expect(layout.values[0]).toEqual({ measure: rides.uniqueName, caption: "Rides" });
+    expect(resetOrphanedShowAs(shown).layout).toBe(shown);
   });
 });

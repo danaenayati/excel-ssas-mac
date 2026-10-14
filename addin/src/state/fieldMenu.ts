@@ -188,12 +188,63 @@ export function describeValueFilter(filter: ValueFilter, measureCaption: (name: 
 // The value field menu.
 // ---------------------------------------------------------------------------
 
-export const SHOW_AS_CHOICES: { showAs: ShowValuesAs; label: string }[] = [
-  { showAs: "normal", label: "No Calculation" },
-  { showAs: "percentOfGrandTotal", label: "% of Grand Total" },
-  { showAs: "percentOfColumnTotal", label: "% of Column Total" },
-  { showAs: "percentOfRowTotal", label: "% of Row Total" },
+export interface ShowAsChoice {
+  showAs: ShowValuesAs;
+  /** Excel's wording; "…" when it asks for a base field (and item). */
+  label: string;
+  /** What the choice asks for before it can be applied. */
+  needs: "nothing" | "field" | "fieldAndItem";
+}
+
+/** Excel's Show Values As list, in Excel's order and words. */
+export const SHOW_AS_CHOICES: ShowAsChoice[] = [
+  { showAs: "normal", label: "No Calculation", needs: "nothing" },
+  { showAs: "percentOfGrandTotal", label: "% of Grand Total", needs: "nothing" },
+  { showAs: "percentOfColumnTotal", label: "% of Column Total", needs: "nothing" },
+  { showAs: "percentOfRowTotal", label: "% of Row Total", needs: "nothing" },
+  { showAs: "percentOf", label: "% Of…", needs: "fieldAndItem" },
+  { showAs: "percentOfParentRowTotal", label: "% of Parent Row Total", needs: "nothing" },
+  { showAs: "percentOfParentColumnTotal", label: "% of Parent Column Total", needs: "nothing" },
+  { showAs: "percentOfParentTotal", label: "% of Parent Total…", needs: "field" },
+  { showAs: "differenceFrom", label: "Difference From…", needs: "fieldAndItem" },
+  { showAs: "percentDifferenceFrom", label: "% Difference From…", needs: "fieldAndItem" },
+  { showAs: "runningTotalIn", label: "Running Total In…", needs: "field" },
+  { showAs: "percentRunningTotalIn", label: "% Running Total In…", needs: "field" },
+  { showAs: "rankAscending", label: "Rank Smallest to Largest…", needs: "field" },
+  { showAs: "rankDescending", label: "Rank Largest to Smallest…", needs: "field" },
+  { showAs: "index", label: "Index", needs: "nothing" },
 ];
+
+export function showAsChoice(showAs: ShowValuesAs | undefined): ShowAsChoice {
+  return SHOW_AS_CHOICES.find((c) => c.showAs === (showAs ?? "normal")) ?? SHOW_AS_CHOICES[0];
+}
+
+/** The base items every (B, I) kind offers before the field's own items. */
+export const RELATIVE_ITEMS: { item: string; label: string }[] = [
+  { item: "previous", label: "(previous)" },
+  { item: "next", label: "(next)" },
+];
+
+/**
+ * The Show Values As form's choice, or what is missing. `axisFields` are the hierarchy
+ * unique names now in Rows and Columns: a base field must be one of them.
+ */
+export function checkShowAs(input: {
+  showAs: ShowValuesAs;
+  baseField: string;
+  baseItem: string;
+  axisFields: string[];
+}): Checked<{ showAs: ShowValuesAs; baseField: string | null; baseItem: string | null }> {
+  const choice = showAsChoice(input.showAs);
+  if (choice.needs === "nothing") return { ok: true, value: { showAs: input.showAs, baseField: null, baseItem: null } };
+  if (input.baseField === "") return fail("Choose a base field.");
+  if (input.axisFields.indexOf(input.baseField) < 0) return fail("The base field must be in Rows or Columns.");
+  if (choice.needs === "field") {
+    return { ok: true, value: { showAs: input.showAs, baseField: input.baseField, baseItem: null } };
+  }
+  if (input.baseItem === "") return fail("Choose a base item.");
+  return { ok: true, value: { showAs: input.showAs, baseField: input.baseField, baseItem: input.baseItem } };
+}
 
 /** The number formats offered, in order. `format: null` is the cube's own. */
 export const NUMBER_FORMAT_CHOICES: { format: string | null; label: string }[] = [
@@ -209,4 +260,10 @@ export const NUMBER_FORMAT_CHOICES: { format: string | null; label: string }[] =
 export function isListedFormat(format: string | null | undefined): boolean {
   const value = format ?? null;
   return NUMBER_FORMAT_CHOICES.some((choice) => choice.format === value);
+}
+
+/** "For empty cells show": at most 20 characters; empty means leave such cells empty. */
+export function checkEmptyCellText(text: string): Checked<string> {
+  if (text.length > 20) return fail("Use at most 20 characters.");
+  return { ok: true, value: text };
 }
