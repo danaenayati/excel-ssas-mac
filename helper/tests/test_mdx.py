@@ -594,3 +594,13 @@ def test_base_field_and_item_are_validated():
     ):
         with pytest.raises(CubeError):
             Layout.from_json({"rows": [field(CITY)], "values": [dict(RIDES, **extra)]})
+
+
+def test_difference_and_running_total_keep_the_measures_own_format():
+    layout = Layout.from_json({"rows": [field(DATE)], "values": [dict(RIDES, showAs="runningTotalIn", baseField=DATE)]})
+    text = mdx.build_query("Sales", layout, {"[Measures].[Rides]": "#,##0"})
+    assert 'Sum({[Date].[Calendar].CurrentMember.Level.Members.Item(0) : [Date].[Calendar].CurrentMember}, [Measures].[Rides])), FORMAT_STRING = "#,##0"' in text
+    # without a known format nothing is added, and percent kinds stay percent
+    assert "FORMAT_STRING" not in mdx.build_query("Sales", layout).split(" SELECT ")[0]
+    pct = Layout.from_json({"rows": [field(DATE)], "values": [dict(RIDES, showAs="percentOfGrandTotal")]})
+    assert 'FORMAT_STRING = "Percent"' in mdx.build_query("Sales", pct, {"[Measures].[Rides]": "#,##0"})

@@ -55,13 +55,17 @@ _PERCENT_KINDS = frozenset(
     }
 )
 _FORMATS = {"index": "0.00", "rankAscending": "#,##0", "rankDescending": "#,##0"}
+# Same unit as the measure itself, so Excel shows them in the measure's own format.
+_MEASURE_FORMAT_KINDS = frozenset({"differenceFrom", "runningTotalIn"})
 
 _PART = re.compile(r"\[(?:[^\]]|\]\])*\]")
 
 
-def build_query(cube: str, layout: Layout) -> str:
+def build_query(cube: str, layout: Layout, measure_formats: dict[str, str] | None = None) -> str:
+    """`measure_formats` (measure unique name -> its FORMAT_STRING) lets a running total or
+    difference show in its measure's own format; without it they use General."""
     non_empty = "NON EMPTY " if layout.options.non_empty else ""
-    definitions, measure_names = _value_members(layout)
+    definitions, measure_names = _value_members(layout, measure_formats or {})
     measures = "{" + ", ".join(measure_names) + "}" if measure_names else "{" + DEFAULT_MEASURE + "}"
 
     options = layout.options
@@ -311,7 +315,7 @@ def _value_expression(items: str, vf: ValueFilter) -> str:
     return f"Filter({items}, {measure} < {first} OR {measure} > {second})"  # notBetween
 
 
-def _value_members(layout: Layout) -> tuple[list[str], list[str]]:
+def _value_members(layout: Layout, measure_formats: dict[str, str]) -> tuple[list[str], list[str]]:
     """WITH MEMBER definitions for "Show Values As", and the measures to put on columns."""
     definitions: list[str] = []
     names: list[str] = []
@@ -325,6 +329,8 @@ def _value_members(layout: Layout) -> tuple[list[str], list[str]]:
             definition += f", FORMAT_STRING = {quote_string('Percent')}"
         elif value.show_as in _FORMATS:
             definition += f", FORMAT_STRING = {quote_string(_FORMATS[value.show_as])}"
+        elif value.show_as in _MEASURE_FORMAT_KINDS and measure_formats.get(value.measure):
+            definition += f", FORMAT_STRING = {quote_string(measure_formats[value.measure])}"
         definitions.append(definition)
         names.append(name)
     return definitions, names

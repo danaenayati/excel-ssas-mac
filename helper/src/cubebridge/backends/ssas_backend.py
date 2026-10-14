@@ -60,6 +60,8 @@ class SsasBackend:
         self._cancel_epoch = 0  # bumped by every cancel that had a query to stop
         # (catalog, cube) -> {hierarchy unique name: All member or None}
         self._all_members: dict[tuple[str, str], dict[str, str | None]] = {}
+        # (catalog, cube) -> {measure unique name: its default FORMAT_STRING}
+        self._measure_formats: dict[tuple[str, str], dict[str, str]] = {}
 
     # -- connection --------------------------------------------------------------
     def _open_session(self) -> tuple[Session, bool]:
@@ -162,6 +164,11 @@ class SsasBackend:
         measure_rows, dimension_rows, hierarchy_rows = self._call(load)
 
         measures = []
+        self._measure_formats[(catalog, cube)] = {
+            r["MEASURE_UNIQUE_NAME"]: r.get("DEFAULT_FORMAT_STRING", "")
+            for r in measure_rows
+            if r.get("MEASURE_UNIQUE_NAME")
+        }
         for r in measure_rows:
             unique = _valid(r.get("MEASURE_UNIQUE_NAME"))
             if unique is None or not _is_true(r.get("MEASURE_IS_VISIBLE")):
@@ -257,7 +264,12 @@ class SsasBackend:
         return {"columns": plain_column_names(columns), "rows": rows[:max_rows], "truncated": len(rows) > max_rows}
 
     def query(self, catalog: str, cube: str, layout: Layout) -> tuple[CellSet, str]:
-        text = mdx.build_query(cube, layout)
+        formats = None
+        if any(v.show_as in ("differenceFrom", "runningTotalIn") for v in layout.values):
+            if (catalog, cube) not in self._measure_formats:
+                self.fields(catalog, cube)
+            formats = self._measure_formats.get((catalog, cube))
+        text = mdx.build_query(cube, layout, formats)
         with self._state:
             self._active_queries += 1
             epoch = self._cancel_epoch

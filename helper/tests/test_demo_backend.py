@@ -364,3 +364,8 @@ def test_percent_of_an_item_difference_and_index(demo):
     assert grid["values"][other][2] == pytest.approx(grid["values"][other][1] - 1)
     # index of the grand total cell is 1 by definition
     assert grid["values"][-1][-1] == pytest.approx(1.0)
+
+
+def test_running_total_uses_the_measures_format_in_the_sample_cube(demo):
+    grid = shown_grid(demo, [placed(demo, CITY)], shows=[{"showAs": "runningTotalIn", "baseField": CITY}])
+    assert grid["formatPalette"][grid["cellFormats"][0][1]] == "#,##0"

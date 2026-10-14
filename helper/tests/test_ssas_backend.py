@@ -28,6 +28,7 @@ RESPONSES = {
                 "MEASUREGROUP_NAME": "Trips",
                 "MEASURE_DISPLAY_FOLDER": "",
                 "MEASURE_IS_VISIBLE": "true",
+                "DEFAULT_FORMAT_STRING": "#,##0",
             },
             {
                 "MEASURE_NAME": "Internal",
@@ -353,3 +354,15 @@ def test_details_sends_a_drillthrough_and_names_columns_plainly(backend):
     sent = backend.server.requests[-1]
     assert "DRILLTHROUGH MAXROWS 3 SELECT FROM [Sales] WHERE ([Measures].[Rides], [Geo].[City].&amp;[1])" in sent
     assert "<Format>Tabular</Format>" in sent
+
+
+def test_query_passes_the_measures_format_to_running_totals(backend):
+    layout = Layout.from_json(
+        {
+            "rows": [{"hierarchy": CITY, "caption": "City", "allMember": "[Geo].[City].[All]"}],
+            "values": [{"measure": "[Measures].[Rides]", "caption": "Rides", "showAs": "runningTotalIn", "baseField": CITY}],
+        }
+    )
+    backend.server.responses["WITH MEMBER"] = RESPONSES["SELECT NON EMPTY"]
+    _, text = backend.query("Sales", "Sales", layout)
+    assert 'FORMAT_STRING = "#,##0"' in text  # learnt from MDSCHEMA_MEASURES, fetched on demand

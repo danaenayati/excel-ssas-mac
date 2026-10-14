@@ -168,7 +168,7 @@ class DemoBackend:
     # -- query -------------------------------------------------------------------
     def query(self, catalog: str, cube: str, layout: Layout) -> tuple[CellSet, str]:
         self._check(catalog, cube)
-        text = mdx.build_query(cube, layout)
+        text = mdx.build_query(cube, layout, {name: fmt for name, (_c, _g, fmt) in _MEASURES.items()})
         values = list(layout.values) or [ValueField(_DEFAULT_MEASURE, _MEASURES[_DEFAULT_MEASURE][0])]
         used = [v.measure for v in values] + [
             m
@@ -269,6 +269,8 @@ class DemoBackend:
                     else:
                         number = self._shown_as(value, layout, context, facts, cache)
                         fmt = _SHOWN_AS_FORMATS.get(value.show_as, "")
+                        if value.show_as in ("differenceFrom", "runningTotalIn"):
+                            fmt = _MEASURES[value.measure][2]
                     if number is not None:
                         ordinal = out_r * width + out_c * len(values) + m_index
                         cellset.cells[ordinal] = Cell(number, fmt, "")
