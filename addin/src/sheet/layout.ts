@@ -371,15 +371,20 @@ export function buildBlock(input: Grid, fields: BlockFields = { filters: 0, rows
     } else {
       for (let r = 0; r < R; r++) {
         setText(row, r, last ? grid.rowFieldCaptions[r] ?? "" : "");
-        if (last && r < fields.rows) setFilterCell(row, r, { area: "rows", index: r }, true);
+        // A set spanning several fields takes several columns; rowFieldOf says whose.
+        const field = grid.rowFieldOf ? grid.rowFieldOf[r] : r;
+        if (last && field !== undefined && field < fields.rows) {
+          setFilterCell(row, r, { area: "rows", index: field }, true);
+        }
       }
     }
     // A column field's own caption, in the corner cell next to its header cells. The
     // last header row is the measures' and its corner belongs to the row fields. Compact
     // form has "Column Labels" instead.
-    if (!last && h < K && RS > 0 && form !== "compact") {
-      setText(row, RS - 1, fields.columns[h]);
-      setFilterCell(row, RS - 1, { area: "columns", index: h }, true);
+    const columnField = grid.colFieldOf ? grid.colFieldOf[h] : h;
+    if (!last && columnField !== undefined && columnField < K && RS > 0 && form !== "compact") {
+      setText(row, RS - 1, fields.columns[columnField]);
+      setFilterCell(row, RS - 1, { area: "columns", index: columnField }, true);
     }
     for (let c = 0; c < C; c++) {
       const cell = cells[c];

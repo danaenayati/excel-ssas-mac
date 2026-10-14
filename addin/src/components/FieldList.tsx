@@ -5,9 +5,16 @@
 // hierarchies can also be dragged onto an area.
 
 import { useEffect, useMemo, useState } from "react";
-import { AREA_LABELS, KPI_PART_LABELS, calculatedMeasureName, findField, locate, valueIndex } from "../state/layout";
+import {
+  AREA_LABELS,
+  KPI_PART_LABELS,
+  calculatedMeasureName,
+  fieldUsing,
+  locate,
+  valueIndex,
+} from "../state/layout";
 import type { UiError } from "../state/runner";
-import type { CalculatedMeasure, Fields, Hierarchy, Kpi, KpiPart, Layout, Measure, NamedSet } from "../types";
+import type { CalculatedMeasure, Fields, Hierarchy, Kpi, KpiPart, Layout, Level, Measure, NamedSet } from "../types";
 import { cx } from "../util";
 import { ErrorNote, Icon, Spinner } from "./common";
 import { endDrag, startDrag } from "./drag";
@@ -181,28 +188,32 @@ function leafState(entry: Leaf, layout: Layout): { placed: string | null; checke
     case "kpi":
       return { placed: null, checked: valueIndex(layout.values, entry.id) >= 0, disabled: null };
     case "hierarchy": {
-      const field = findField(layout, entry.hierarchy.uniqueName);
+      const field = fieldUsing(layout, entry.hierarchy.uniqueName);
       if (field && field.set) {
         return { placed: null, checked: false, disabled: `The set \u201c${field.caption}\u201d is using this field.` };
       }
       const place = locate(layout, entry.hierarchy.uniqueName);
-      return { placed: place ? AREA_LABELS[place.area] : null, checked: place !== null, disabled: null };
+      // With one of its levels placed, the whole hierarchy is not: ticking it shows it all.
+      const whole = place !== null && !(field && field.level);
+      return { placed: whole && place ? AREA_LABELS[place.area] : null, checked: whole, disabled: null };
     }
     case "set": {
       if (!entry.set.hierarchy) {
         return {
           placed: null,
           checked: false,
-          disabled: "This set\u2019s items come from several fields. Cube Explorer can show sets of one field only.",
+          disabled: "This set\u2019s fields are not all in this cube\u2019s field list.",
         };
       }
-      const field = findField(layout, entry.set.hierarchy);
-      if (field && field.set === entry.set.uniqueName) {
+      const spans = entry.set.hierarchies && entry.set.hierarchies.length > 0 ? entry.set.hierarchies : [entry.set.hierarchy];
+      const mine = fieldUsing(layout, entry.set.hierarchy);
+      if (mine && mine.set === entry.set.uniqueName) {
         const place = locate(layout, entry.set.hierarchy);
         return { placed: place ? AREA_LABELS[place.area] : null, checked: true, disabled: null };
       }
-      if (field) {
-        return { placed: null, checked: false, disabled: `\u201c${field.caption}\u201d already uses this set\u2019s field.` };
+      const taken = spans.map((h) => fieldUsing(layout, h)).find((f) => f !== null);
+      if (taken) {
+        return { placed: null, checked: false, disabled: `\u201c${taken.caption}\u201d already uses one of this set\u2019s fields.` };
       }
       return { placed: null, checked: false, disabled: null };
     }
@@ -256,6 +267,8 @@ interface Props {
   onToggleKpi: (kpi: Kpi, part: KpiPart, on: boolean) => void;
   onToggleSet: (set: NamedSet, on: boolean) => void;
   onToggleCalculated: (measure: CalculatedMeasure, on: boolean) => void;
+  /** Place one level of a user hierarchy (Windows: tick "Month" under "Calendar"). */
+  onToggleLevel: (hierarchy: Hierarchy, level: Level, on: boolean) => void;
   /** Open the calculated measure dialog: a new one (null), or this one to edit. */
   onEditCalculated: (measure: CalculatedMeasure | null) => void;
 }
@@ -265,6 +278,8 @@ export function FieldList(props: Props) {
   const calculated = layout.calculatedMeasures;
   const tree = useMemo(() => (fields ? buildFieldTree(fields, calculated ?? []) : []), [fields, calculated]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  /** User hierarchies whose levels are listed under them; folded by default, as in Excel. */
+  const [openLevels, setOpenLevels] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
     const total = countLeaves(tree);
@@ -349,8 +364,37 @@ export function FieldList(props: Props) {
       };
       const icon =
         entry.type === "hierarchy" && entry.hierarchy.kind === "user" ? "hierarchy" : LEAF_ICONS[entry.type];
+      const levels = entry.type === "hierarchy" ? entry.hierarchy.levels ?? [] : [];
+      const levelsOpen = levels.length > 1 && openLevels.has(entry.id);
+      const levelRows =
+        entry.type === "hierarchy" && levelsOpen
+          ? levels.map((level) => {
+              const field = fieldUsing(layout, entry.hierarchy.uniqueName);
+              const on = Boolean(field && !field.set && field.level && field.level.uniqueName === level.uniqueName);
+              const place = on ? locate(layout, entry.hierarchy.uniqueName) : null;
+              return (
+                <li key={`lv:${level.uniqueName}`} role="treeitem" aria-selected={on}>
+                  <label
+                    className={cx("field-row leaf", on && "placed", field && field.set && "unavailable")}
+                    style={{ paddingLeft: 6 + (depth + 1) * 14 }}
+                    title={`${entry.hierarchy.caption}: ${level.caption} only`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      disabled={Boolean(field && field.set)}
+                      onChange={(event) => props.onToggleLevel(entry.hierarchy, level, event.target.checked)}
+                    />
+                    <Icon name="attribute" className="kind" />
+                    <span className="field-caption">{level.caption}</span>
+                    {place && <span className="field-area">{AREA_LABELS[place.area]}</span>}
+                  </label>
+                </li>
+              );
+            })
+          : [];
       return (
-        <li key={entry.id} role="treeitem" aria-selected={state.checked}>
+        <li key={entry.id} role="treeitem" aria-selected={state.checked} aria-expanded={levels.length > 1 ? levelsOpen : undefined}>
           <label
             className={cx("field-row leaf", state.checked && "placed", state.disabled !== null && "unavailable")}
             style={indent}
@@ -368,6 +412,25 @@ export function FieldList(props: Props) {
             {icon && <Icon name={icon} className="kind" />}
             <span className="field-caption">{entry.type === "kpi" ? KPI_PART_LABELS[entry.part] : caption}</span>
             {state.placed !== null && <span className="field-area">{state.placed}</span>}
+            {levels.length > 1 && (
+              <button
+                type="button"
+                className="icon-button tiny"
+                aria-label={levelsOpen ? `Hide the levels of ${caption}` : `Show the levels of ${caption}`}
+                title={levelsOpen ? "Hide levels" : "Show levels, to place one alone"}
+                onClick={(event) => {
+                  event.preventDefault();
+                  setOpenLevels((before) => {
+                    const next = new Set(before);
+                    if (next.has(entry.id)) next.delete(entry.id);
+                    else next.add(entry.id);
+                    return next;
+                  });
+                }}
+              >
+                <Icon name={levelsOpen ? "chevron-down" : "chevron-right"} />
+              </button>
+            )}
             {entry.type === "calculated" && (
               <button
                 type="button"
@@ -383,6 +446,7 @@ export function FieldList(props: Props) {
               </button>
             )}
           </label>
+          {levelRows.length > 0 && <ul role="group">{levelRows}</ul>}
         </li>
       );
     });

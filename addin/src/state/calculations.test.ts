@@ -147,3 +147,55 @@ describe("calculated measures", () => {
     expect(layoutReducer(layout, { type: "removeCalculatedMeasure", name: "Nope" })).toBe(layout);
   });
 });
+
+describe("one level of a user hierarchy", () => {
+  const calendar = { uniqueName: "[Date].[Calendar]", caption: "Calendar", allMember: "[Date].[Calendar].[All]" };
+  const month = { uniqueName: "[Date].[Calendar].[Month]", number: 3, caption: "Month" };
+  const year = { uniqueName: "[Date].[Calendar].[Year]", number: 1, caption: "Year" };
+
+  it("places a level alone, swaps it for another level, and back to the whole field", () => {
+    let layout = apply([{ type: "addHierarchy", hierarchy: { ...calendar, level: month } }]);
+    expect(layout.rows[0]).toMatchObject({ hierarchy: "[Date].[Calendar]", caption: "Month", level: month });
+    layout = apply(
+      [
+        { type: "expand", hierarchy: calendar.uniqueName, member: "[Date].[Calendar].[Month].&[1]" },
+        { type: "move", name: calendar.uniqueName, area: "columns" },
+        { type: "addHierarchy", hierarchy: { ...calendar, level: year } },
+      ],
+      layout,
+    );
+    expect(layout.columns[0]).toMatchObject({ caption: "Year", level: year, expanded: [] });
+    layout = layoutReducer(layout, { type: "addHierarchy", hierarchy: calendar });
+    expect(layout.columns[0].caption).toBe("Calendar");
+    expect("level" in layout.columns[0]).toBe(false);
+  });
+});
+
+describe("named sets spanning several fields", () => {
+  const pairs = {
+    uniqueName: "[Pairs]",
+    caption: "Pairs",
+    hierarchy: "[Geo].[City]",
+    allMember: "[Geo].[City].[All]",
+    hierarchies: ["[Geo].[City]", "[S].[T]"],
+    allMembers: ["[Geo].[City].[All]", "[S].[T].[All]"],
+  };
+
+  it("keeps every field of the set, and blocks those fields elsewhere", () => {
+    const layout = apply([{ type: "addSet", set: pairs }]);
+    expect(layout.rows[0]).toMatchObject({ set: "[Pairs]", setHierarchies: pairs.hierarchies, setAllMembers: pairs.allMembers });
+    const service = { uniqueName: "[S].[T]", caption: "Type", allMember: "[S].[T].[All]" };
+    expect(layoutReducer(layout, { type: "addHierarchy", hierarchy: service })).toBe(layout);
+    const typeFirst = apply([{ type: "addHierarchy", hierarchy: service }]);
+    expect(layoutReducer(typeFirst, { type: "addSet", set: pairs })).toBe(typeFirst);
+  });
+
+  it("reads them back from a saved report", async () => {
+    const { parseReportDef } = await import("./report");
+    const def = parseReportDef(
+      JSON.stringify({ id: "abc", layout: { rows: [{ hierarchy: "[Geo].[City]", set: "[Pairs]", setHierarchies: pairs.hierarchies, setAllMembers: pairs.allMembers, level: null }], options: { includeFilteredItems: true } } }),
+    )!;
+    expect(def.layout.rows[0]).toMatchObject({ setHierarchies: pairs.hierarchies, setAllMembers: pairs.allMembers });
+    expect(def.layout.options.includeFilteredItems).toBe(true);
+  });
+});

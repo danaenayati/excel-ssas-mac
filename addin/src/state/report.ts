@@ -407,9 +407,24 @@ function placedFields(value: unknown): PlacedField[] {
     if (customItems.length > 0) field.customItems = customItems;
     if (typeof item.set === "string" && item.set !== "") {
       // A set's items are its own: nothing else about the field applies.
-      out.push({ hierarchy: field.hierarchy, caption: field.caption, allMember: field.allMember,
-        expanded: [], members: [], memberCaptions: [], set: item.set });
+      const set: PlacedField = { hierarchy: field.hierarchy, caption: field.caption, allMember: field.allMember,
+        expanded: [], members: [], memberCaptions: [], set: item.set };
+      const spans = strings(item.setHierarchies);
+      if (spans.length > 1 && spans[0] === field.hierarchy) {
+        set.setHierarchies = spans;
+        const alls = Array.isArray(item.setAllMembers) ? item.setAllMembers : [];
+        set.setAllMembers = spans.map((_, i) => (typeof alls[i] === "string" ? (alls[i] as string) : null));
+      }
+      out.push(set);
       continue;
+    }
+    if (isRecord(item.level) && typeof item.level.uniqueName === "string" && item.level.uniqueName !== ""
+      && typeof item.level.number === "number" && Number.isInteger(item.level.number) && item.level.number >= 0) {
+      field.level = {
+        uniqueName: item.level.uniqueName,
+        number: item.level.number,
+        caption: typeof item.level.caption === "string" ? item.level.caption : item.level.uniqueName,
+      };
     }
     out.push(field);
   }
@@ -496,6 +511,7 @@ function parsedOptions(
   if (isOneOf(REPORT_FORMS, options.form)) out.form = options.form;
   if (options.subtotalsAt === "top" || options.subtotalsAt === "bottom") out.subtotalsAt = options.subtotalsAt;
   if (options.repeatLabels === true) out.repeatLabels = true;
+  if (options.includeFilteredItems === true) out.includeFilteredItems = true;
   if (typeof options.emptyCellText === "string" && options.emptyCellText !== "") {
     out.emptyCellText = options.emptyCellText.slice(0, MAX_EMPTY_CELL_TEXT);
   }

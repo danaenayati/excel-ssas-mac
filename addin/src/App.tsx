@@ -117,6 +117,8 @@ function useLatest<T>(value: T) {
 const OPTION_LABELS: [BooleanOption, string][] = [
   ["nonEmpty", "Hide empty"],
   ["repeatLabels", "Repeat All Item Labels"],
+  // Windows: PivotTable Options > Totals & Filters, for cube PivotTables.
+  ["includeFilteredItems", "Include filtered items in totals"],
 ];
 
 /** Excel's Subtotals choices (Design tab), in Excel's words. */
@@ -1037,8 +1039,18 @@ export function App({ api, host, mock }: Props) {
       folder: "",
     })),
   ];
-  const isDateField = (hierarchy: string): boolean =>
-    Boolean(fields.data && fields.data.dimensions.some((d) => d.hierarchies.some((h) => h.uniqueName === hierarchy && h.isDate)));
+  const isDateField = (hierarchy: string): boolean => {
+    const placed = def ? findField(def.layout, hierarchy) : null;
+    const found = fields.data
+      ? fields.data.dimensions.flatMap((d) => d.hierarchies).find((h) => h.uniqueName === hierarchy)
+      : undefined;
+    if (!found) return false;
+    // A field placed as one level is a date field when that level holds dates.
+    if (placed && placed.level) {
+      return Boolean((found.levels ?? []).find((l) => l.uniqueName === placed.level?.uniqueName)?.isDate);
+    }
+    return Boolean(found.isDate);
+  };
   const pickerPlace = def && picker ? locate(def.layout, picker) : null;
   const pickerArea = pickerPlace ? pickerPlace.area : null;
 
@@ -1287,10 +1299,35 @@ export function App({ api, host, mock }: Props) {
             if (!set.hierarchy) return;
             act(
               on
-                ? { type: "addSet", set: { uniqueName: set.uniqueName, caption: set.caption, hierarchy: set.hierarchy, allMember: set.allMember } }
+                ? {
+                    type: "addSet",
+                    set: {
+                      uniqueName: set.uniqueName,
+                      caption: set.caption,
+                      hierarchy: set.hierarchy,
+                      allMember: set.allMember,
+                      hierarchies: set.hierarchies,
+                      allMembers: set.allMembers,
+                    },
+                  }
                 : { type: "remove", name: set.hierarchy },
             );
           }}
+          onToggleLevel={(hierarchy, level, on) =>
+            act(
+              on
+                ? {
+                    type: "addHierarchy",
+                    hierarchy: {
+                      uniqueName: hierarchy.uniqueName,
+                      caption: hierarchy.caption,
+                      allMember: hierarchy.allMember,
+                      level: { uniqueName: level.uniqueName, number: level.number, caption: level.caption },
+                    },
+                  }
+                : { type: "remove", name: hierarchy.uniqueName },
+            )
+          }
           onToggleCalculated={(measure, on) => {
             const name = calculatedMeasureName(measure.name);
             act(on ? { type: "addMeasure", measure: { uniqueName: name, caption: measure.name } } : { type: "removeMeasure", measure: name });

@@ -40,6 +40,8 @@ export interface HierarchyInput {
   uniqueName: string;
   caption: string;
   allMember: string | null;
+  /** Place only this level of a user hierarchy (the field is then captioned with the level's name). */
+  level?: { uniqueName: string; number: number; caption: string } | null;
 }
 
 export interface KpiInput {
@@ -55,6 +57,9 @@ export interface SetInput {
   caption: string;
   hierarchy: string;
   allMember: string | null;
+  /** All hierarchies of its tuples, when it spans several (the first is `hierarchy`). */
+  hierarchies?: string[];
+  allMembers?: (string | null)[];
 }
 
 /** Excel's words for a KPI's parts, as its field list shows them. */
@@ -126,7 +131,14 @@ export type LayoutAction =
   | { type: "replace"; layout: Layout };
 
 /** The on/off options that `setOption` toggles. */
-export type BooleanOption = "grandTotals" | "grandTotalRow" | "grandTotalColumn" | "subtotals" | "nonEmpty" | "repeatLabels";
+export type BooleanOption =
+  | "grandTotals"
+  | "grandTotalRow"
+  | "grandTotalColumn"
+  | "subtotals"
+  | "nonEmpty"
+  | "repeatLabels"
+  | "includeFilteredItems";
 
 /** Longest "For empty cells show" text. */
 export const MAX_EMPTY_CELL_TEXT = 20;
@@ -288,6 +300,20 @@ export function locate(layout: Layout, name: string): Placement | null {
   return index >= 0 ? { area: "values", index } : null;
 }
 
+/** The hierarchies a placed field shows: one, or each of a multi-field set's. */
+export function fieldHierarchies(field: PlacedField): string[] {
+  return field.setHierarchies && field.setHierarchies.length > 0 ? field.setHierarchies : [field.hierarchy];
+}
+
+/** The field that shows `hierarchy`, also as the second or later field of a named set. */
+export function fieldUsing(layout: Layout, hierarchy: string): PlacedField | null {
+  for (const area of FIELD_AREAS) {
+    const found = layout[area].find((f) => fieldHierarchies(f).indexOf(hierarchy) >= 0);
+    if (found) return found;
+  }
+  return null;
+}
+
 export function findField(layout: Layout, hierarchy: string): PlacedField | null {
   for (const area of FIELD_AREAS) {
     const found = layout[area].find((f) => f.hierarchy === hierarchy);
@@ -438,7 +464,8 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
     }
 
     case "addSet": {
-      if (locate(layout, action.set.hierarchy)) return layout;
+      const spans = action.set.hierarchies && action.set.hierarchies.length > 1 ? action.set.hierarchies : null;
+      if ((spans ?? [action.set.hierarchy]).some((h) => fieldUsing(layout, h))) return layout;
       const area = action.area ?? "rows";
       const field: PlacedField = {
         hierarchy: action.set.hierarchy,
@@ -449,6 +476,10 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
         memberCaptions: [],
         set: action.set.uniqueName,
       };
+      if (spans) {
+        field.setHierarchies = spans;
+        field.setAllMembers = spans.map((_, i) => (action.set.allMembers ?? [])[i] ?? null);
+      }
       return { ...layout, [area]: insertAt(layout[area], field, action.index) };
     }
 
@@ -474,18 +505,34 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
 
     case "addHierarchy": {
       const name = action.hierarchy.uniqueName;
+      const level = action.hierarchy.level ?? null;
+      const placed = findField(layout, name);
+      if (placed && !placed.set && (placed.level?.uniqueName ?? null) !== (level?.uniqueName ?? null)) {
+        // Another level of a field already in the report: show that level instead, in
+        // the same place. What was drilled or picked belonged to the other level.
+        return updateField(layout, name, (field) => {
+          const next = withOptional(
+            { ...field, caption: level ? level.caption : action.hierarchy.caption, expanded: [], members: [], memberCaptions: [] },
+            "level",
+            level,
+          );
+          return next;
+        });
+      }
       if (locate(layout, name)) {
         return action.area ? moveTo(layout, name, action.area, action.index) : layout;
       }
+      if (fieldUsing(layout, name)) return layout; // a named set already shows it
       const area: FieldArea = action.area ?? "rows";
       const field: PlacedField = {
         hierarchy: name,
-        caption: action.hierarchy.caption,
+        caption: level ? level.caption : action.hierarchy.caption,
         allMember: action.hierarchy.allMember,
         expanded: [],
         members: [],
         memberCaptions: [],
       };
+      if (level) field.level = level;
       return { ...layout, [area]: insertAt(layout[area], field, action.index) };
     }
 

@@ -94,7 +94,8 @@ export function MemberPicker({ api, connectionId, catalog, cube, field, onApply,
       setLoading((before) => new Set(before).add(key));
       setError(null);
       try {
-        const base = { catalog, cube, hierarchy };
+        // A field placed as one level starts from that level's items.
+        const base = { catalog, cube, hierarchy, ...(field.level ? { level: field.level.uniqueName } : {}) };
         const response = await api.members(connectionId, key === ROOT ? base : { ...base, parent: key });
         if (!alive.current) return;
         setState((before) => setChildren(before, key, response.members, response.truncated));

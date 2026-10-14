@@ -178,6 +178,8 @@ export interface MembersRequest {
   search?: string;
   /** Default 500, maximum 5000. */
   limit?: number;
+  /** A field placed as one level: its top items are this level's members. */
+  level?: string;
 }
 
 export interface MembersResponse {
