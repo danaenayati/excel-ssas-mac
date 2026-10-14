@@ -4,6 +4,7 @@
 // startup from the result of `Office.onReady()`.
 
 import type { CellValue, Layout } from "../types";
+import type { ChartKind, ChartTable, ReportChart } from "./charts";
 import { cellA1 } from "./geometry";
 import type { Block } from "./layout";
 
@@ -14,6 +15,16 @@ export interface ReportDef {
   catalog: string;
   cube: string;
   layout: Layout;
+  /** Charts that follow the report (sheet/charts.ts). Absent when it has none. */
+  charts?: ReportChart[];
+}
+
+/** What `SheetHost.updateCharts` did. */
+export interface ChartsUpdate {
+  /** The charts still in the workbook; one the user deleted is left out. */
+  charts: ReportChart[];
+  /** Why a chart could not be updated; that chart is kept as it was. */
+  error?: unknown;
 }
 
 /** One cell. `row` and `col` are zero-based. */
@@ -136,6 +147,25 @@ export interface SheetHost {
 
   /** Recalculate every formula in the open workbooks, as Cmd+Option+F9 does; cube formulas ask the cube again. */
   recalculate(): Promise<void>;
+
+  /**
+   * Insert Chart: write `table` as a new data block on the hidden chart data sheet and
+   * add a chart of `type` over it beside the report's block, with a title and a legend.
+   * `index` is how many charts the report already has (each new one steps aside a
+   * little). Rejects with a SheetError when the report is not on a sheet.
+   */
+  addChart(reportId: string, chartId: string, type: ChartKind, table: ChartTable, index: number): Promise<ReportChart>;
+
+  /**
+   * After a write of the report: write each chart's data block again from `table` and
+   * point the chart at it. Type, size, place and formatting stay as the user left them;
+   * the title follows the report unless the user has changed it. A chart the user
+   * deleted is dropped and its data block no longer kept up to date.
+   */
+  updateCharts(charts: ReportChart[], table: ChartTable): Promise<ChartsUpdate>;
+
+  /** Delete Chart: the chart and its data block. Does nothing for what is already gone. */
+  deleteChart(chart: ReportChart): Promise<void>;
 }
 
 /** Workbook setting: refresh every report when the workbook is opened. */

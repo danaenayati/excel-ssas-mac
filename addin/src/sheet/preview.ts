@@ -9,6 +9,7 @@
 // report definitions behind with no cells; a click is reported after the selection it
 // causes; moving with the keyboard selects without clicking; Show Details adds a sheet.
 
+import { chartAnchor, type ChartKind, type ChartTable, type ReportChart } from "./charts";
 import { containsCell, intersect, subtract, type Rect } from "./geometry";
 import {
   SETTING_PREFIX,
@@ -16,6 +17,7 @@ import {
   detailsSheetName,
   settingKey,
   type CellAddress,
+  type ChartsUpdate,
   type Extent,
   type ReportDef,
   type SheetClick,
@@ -42,6 +44,21 @@ export interface PreviewCell {
   formula?: string;
 }
 
+/**
+ * A chart, as the preview keeps it: no picture, only what it would show. In Excel the
+ * table is a block of cells on a hidden sheet; here it is kept as is.
+ */
+export interface PreviewChart {
+  id: string;
+  reportId: string;
+  sheetId: string;
+  type: ChartKind;
+  title: string;
+  table: ChartTable;
+  /** Where its top-left corner was put. */
+  at: { row: number; col: number };
+}
+
 export interface PreviewSnapshot {
   /** Goes up on every change, including a change of selection. */
   version: number;
@@ -59,6 +76,8 @@ export interface PreviewSnapshot {
   /** Bottom-right corner of everything on the active sheet (exclusive). */
   usedRows: number;
   usedCols: number;
+  /** Charts on the active sheet. */
+  charts: readonly PreviewChart[];
 }
 
 interface SheetData {
@@ -96,6 +115,7 @@ interface Stored {
   settings: [string, string][];
   activeId: string;
   counter: number;
+  charts?: PreviewChart[];
 }
 
 function newSheet(n: number): SheetData {
@@ -111,6 +131,7 @@ export class PreviewHost implements SheetHost {
   private counter = 2;
   private names = new Map<string, NamedBlock>();
   private settings = new Map<string, string>();
+  private charts = new Map<string, PreviewChart>();
   private version = 0;
   private contentVersion = 0;
   private snapshotCache: PreviewSnapshot | null = null;
@@ -326,6 +347,46 @@ export class PreviewHost implements SheetHost {
     // Nothing to do: the preview shows the values cube formulas had when written.
   }
 
+  async addChart(reportId: string, chartId: string, type: ChartKind, table: ChartTable, index: number): Promise<ReportChart> {
+    const named = this.names.get(reportId);
+    const sheet = named ? this.sheetById(named.sheetId) : null;
+    if (!named || !sheet) throw new SheetError("This report is no longer on a sheet.");
+    this.charts.set(chartId, {
+      id: chartId,
+      reportId,
+      sheetId: sheet.id,
+      type,
+      title: table.title,
+      table,
+      at: chartAnchor(named.rect, index),
+    });
+    this.changed();
+    return { id: chartId, type, sheetId: sheet.id, title: table.title };
+  }
+
+  async updateCharts(charts: ReportChart[], table: ChartTable): Promise<ChartsUpdate> {
+    const kept: ReportChart[] = [];
+    for (const chart of charts) {
+      const shown = this.charts.get(chart.id);
+      if (!shown || !this.sheetById(shown.sheetId)) {
+        this.charts.delete(chart.id);
+        continue;
+      }
+      // The title follows the report while it still reads what was last written.
+      const follow = chart.title === undefined || shown.title === chart.title;
+      this.charts.set(chart.id, { ...shown, table, title: follow ? table.title : shown.title });
+      const record: ReportChart = { ...chart, sheetId: shown.sheetId };
+      if (follow) record.title = table.title;
+      kept.push(record);
+    }
+    this.changed();
+    return { charts: kept };
+  }
+
+  async deleteChart(chart: ReportChart): Promise<void> {
+    if (this.charts.delete(chart.id)) this.changed();
+  }
+
   // -- Preview only ---------------------------------------------------------
 
   /** Simulate moving the selection to a cell without clicking it (arrow keys). */
@@ -382,6 +443,24 @@ export class PreviewHost implements SheetHost {
     this.changed();
   }
 
+  /** Simulate the user deleting a chart in Excel (select it, press Delete). */
+  removeChart(chartId: string): void {
+    if (this.charts.delete(chartId)) this.changed();
+  }
+
+  /** Simulate the user typing another title into a chart. */
+  retitleChart(chartId: string, title: string): void {
+    const chart = this.charts.get(chartId);
+    if (!chart) return;
+    this.charts.set(chartId, { ...chart, title });
+    this.changed();
+  }
+
+  /** Every chart in the workbook, on any sheet. */
+  allCharts(): PreviewChart[] {
+    return Array.from(this.charts.values());
+  }
+
   /** Simulate clicking a sheet tab. */
   activate(sheetId: string): void {
     if (sheetId === this.activeId || !this.sheetById(sheetId)) return;
@@ -402,6 +481,10 @@ export class PreviewHost implements SheetHost {
     for (const [id, named] of Array.from(this.names)) {
       if (named.sheetId === gone) this.names.delete(id);
     }
+    // Its charts go with it.
+    for (const [id, chart] of Array.from(this.charts)) {
+      if (chart.sheetId === gone) this.charts.delete(id);
+    }
     if (this.sheets.length === 0) {
       const fresh = newSheet(this.counter++);
       fresh.selection = { row: 0, col: 0 };
@@ -419,6 +502,7 @@ export class PreviewHost implements SheetHost {
     this.counter = 2;
     this.names.clear();
     this.settings.clear();
+    this.charts.clear();
     this.changed();
     this.announceSelection();
   }
@@ -454,6 +538,7 @@ export class PreviewHost implements SheetHost {
       selection: sheet.selection,
       usedRows,
       usedCols,
+      charts: Array.from(this.charts.values()).filter((chart) => chart.sheetId === sheet.id),
     };
     return this.snapshotCache;
   }
@@ -532,6 +617,7 @@ export class PreviewHost implements SheetHost {
         settings: Array.from(this.settings.entries()),
         activeId: this.activeId,
         counter: this.counter,
+        charts: Array.from(this.charts.values()),
       };
       let text = JSON.stringify(full);
       if (text.length > STORAGE_LIMIT) {
@@ -541,6 +627,7 @@ export class PreviewHost implements SheetHost {
           ...full,
           sheets: [{ ...full.sheets[0], cells: [] }],
           names: [],
+          charts: [],
           activeId: full.sheets[0].id,
         });
       }
@@ -567,6 +654,7 @@ export class PreviewHost implements SheetHost {
       }));
       this.names = new Map(stored.names ?? []);
       this.settings = new Map(stored.settings ?? []);
+      this.charts = new Map((stored.charts ?? []).map((chart) => [chart.id, chart]));
       this.activeId = stored.activeId && this.sheetById(stored.activeId) ? stored.activeId : this.sheets[0].id;
       if (typeof stored.counter === "number") this.counter = stored.counter;
     } catch {

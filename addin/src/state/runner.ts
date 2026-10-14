@@ -10,13 +10,33 @@
 // sheet, and remembers, for each report, which member and which field each cell of the
 // last result stands for.
 //
+// A report's charts (sheet/charts.ts) follow it as a PivotChart follows its PivotTable:
+// every write of the report writes their data again. Insert Chart and Delete Chart go
+// through the same queue as the writes, and the runner's list of a report's charts is
+// the one saved, so that a run that started before a chart was added cannot drop it.
+//
 // No React in here, so the whole loop can be tested against the mock API and the
 // preview host.
 
 import type { Api } from "../api";
 import { ApiFailure, HelperDown, isCancelled } from "../apiErrors";
+import {
+  chartRefusal,
+  chartTable,
+  withCharts,
+  type ChartKind,
+  type ChartTable,
+  type ReportChart,
+} from "../sheet/charts";
 import { fitsSheet } from "../sheet/geometry";
-import { SheetError, type CellAddress, type Extent, type ReportDef, type SheetHost } from "../sheet/host";
+import {
+  SheetError,
+  type CellAddress,
+  type ChartsUpdate,
+  type Extent,
+  type ReportDef,
+  type SheetHost,
+} from "../sheet/host";
 import {
   blockFields,
   buildBlock,
@@ -37,6 +57,7 @@ import {
 } from "../sheet/layout";
 import type { ErrorCategory, Grid, Layout, MemberRef, PlacedField } from "../types";
 import { isEmptyLayout } from "./layout";
+import { newReportId } from "./report";
 
 /** An error ready to show: a plain sentence, optional technical detail. */
 export interface UiError {
@@ -63,6 +84,12 @@ export function toUiError(error: unknown): UiError {
     message: "Something went wrong in the pane.",
     detail: error instanceof Error ? error.stack || error.message : String(error),
   };
+}
+
+/** A chart that could not follow its report: said as such, with Excel's reason. */
+function chartUpdateError(error: unknown): UiError {
+  const ui = toUiError(error);
+  return { ...ui, message: `The report was updated, but its chart could not be. ${ui.message}` };
 }
 
 /** What the pane remembers about a report's last result. Lost when the pane closes. */
@@ -92,10 +119,20 @@ export interface ReportRuntime {
   columnMembers: string[][];
   /** What the block wrote into its cells, for Convert to Formulas (sheet/convert.ts). */
   sheet?: Pick<Block, "values" | "numberFormats">;
+  /** What a chart of the report shows, from this result (Insert Chart). */
+  chart?: ChartTable;
 }
 
 export type RunOutcome =
-  | { kind: "written"; extent: Extent; runtime: ReportRuntime }
+  | {
+      kind: "written";
+      extent: Extent;
+      runtime: ReportRuntime;
+      /** The definition as saved: the one run, with the charts still in the workbook. */
+      def: ReportDef;
+      /** The report was written but a chart of it could not be updated. */
+      chartError?: UiError;
+    }
   /**
    * The layout has no field in Rows, Columns or Values. `extent` is where the
    * placeholder was written, or null when the report has no place on a sheet yet.
@@ -141,6 +178,8 @@ interface Flight {
 
 export class ReportRunner {
   readonly runtimes = new Map<string, ReportRuntime>();
+  /** Each report's charts as last saved by this runner; the definitions the pane holds may lag. */
+  private readonly charts = new Map<string, ReportChart[]>();
   private seq = 0;
   private flight: Flight | null = null;
   private cancelledSeqs = new Set<number>();
@@ -266,8 +305,88 @@ export class ReportRunner {
     return runtime ? expandableMembers(runtime.headers, hierarchy) : null;
   }
 
+  /** Also stops following the report's charts: deleted or converted, it leaves them as they are. */
   forget(reportId: string): void {
     this.runtimes.delete(reportId);
+    this.charts.delete(reportId);
+  }
+
+  /** The report's charts: as this runner last saved them, else as its definition says. */
+  chartsOf(def: ReportDef): ReportChart[] {
+    return this.charts.get(def.id) ?? def.charts ?? [];
+  }
+
+  /**
+   * Insert Chart: a chart of `type` beside the report, showing its last result. The
+   * report must have been written in this session. Resolves with the definition as
+   * saved, or with why there is no chart.
+   */
+  async insertChart(def: ReportDef, type: ChartKind): Promise<{ def: ReportDef; chart: ReportChart } | { error: UiError }> {
+    const unwritten = { error: { message: "Refresh the report first, then insert the chart." } };
+    if (!this.chartSource(def.id)) return unwritten;
+    try {
+      return await this.inSheetQueue(async () => {
+        // A write queued before this one may have brought a newer result, or none.
+        const table = this.chartSource(def.id);
+        if (!table) return unwritten;
+        const refused = chartRefusal(table);
+        if (refused) return { error: { message: refused } };
+        const before = this.chartsOf(def);
+        const chart = await this.deps.host.addChart(def.id, newReportId(), type, table, before.length);
+        const charts = [...before, chart];
+        this.charts.set(def.id, charts);
+        const saved = withCharts(def, charts);
+        await this.deps.host.saveReport(saved);
+        return { def: saved, chart };
+      });
+    } catch (error) {
+      return { error: toUiError(error) };
+    }
+  }
+
+  /** Delete Chart: the chart and its data. Resolves with the definition as saved. */
+  async deleteChart(def: ReportDef, chartId: string): Promise<{ def: ReportDef } | { error: UiError }> {
+    try {
+      return await this.inSheetQueue(async () => {
+        const before = this.chartsOf(def);
+        const chart = before.find((c) => c.id === chartId);
+        if (chart) await this.deps.host.deleteChart(chart);
+        const charts = before.filter((c) => c.id !== chartId);
+        this.charts.set(def.id, charts);
+        const saved = withCharts(def, charts);
+        await this.deps.host.saveReport(saved);
+        return { def: saved };
+      });
+    } catch (error) {
+      return { error: toUiError(error) };
+    }
+  }
+
+  private chartSource(reportId: string): ChartTable | null {
+    const runtime = this.runtimes.get(reportId);
+    return runtime && runtime.chart ? runtime.chart : null;
+  }
+
+  /**
+   * After a write: the report's charts show the new result. A chart deleted in Excel is
+   * dropped from the definition without a word. Never fails the write: a chart that
+   * cannot be updated keeps its last picture and is tried again next time.
+   */
+  private async followCharts(def: ReportDef, table: ChartTable): Promise<{ def: ReportDef; error?: UiError }> {
+    const charts = this.chartsOf(def);
+    this.charts.set(def.id, charts);
+    if (charts.length === 0) return { def: withCharts(def, charts) };
+    const refused = chartRefusal(table);
+    if (refused) return { def: withCharts(def, charts), error: { message: `The chart was not updated. ${refused}` } };
+    let update: ChartsUpdate;
+    try {
+      update = await this.deps.host.updateCharts(charts, table);
+    } catch (error) {
+      return { def: withCharts(def, charts), error: chartUpdateError(error) };
+    }
+    this.charts.set(def.id, update.charts);
+    const saved = withCharts(def, update.charts);
+    return update.error === undefined ? { def: saved } : { def: saved, error: chartUpdateError(update.error) };
   }
 
   async run(def: ReportDef, options: RunOptions): Promise<RunOutcome> {
@@ -358,6 +477,7 @@ export class ReportRunner {
     if ("kind" in placed) return placed;
     // The block's grid has the columns in sheet order.
     const shown = block.grid;
+    const table = chartTable(shown, def.layout);
     const runtime: ReportRuntime = {
       rows: block.rows,
       cols: block.cols,
@@ -372,10 +492,14 @@ export class ReportRunner {
       lines: block.lines,
       columnMembers: block.columnMembers,
       sheet: { values: block.values, numberFormats: block.numberFormats },
+      chart: table,
     };
     this.runtimes.set(def.id, runtime);
-    await this.deps.host.saveReport(def);
-    return { kind: "written", extent: placed, runtime };
+    const followed = await this.followCharts(def, table);
+    await this.deps.host.saveReport(followed.def);
+    const outcome: RunOutcome = { kind: "written", extent: placed, runtime, def: followed.def };
+    if (followed.error) outcome.chartError = followed.error;
+    return outcome;
   }
 
   /**
@@ -391,12 +515,14 @@ export class ReportRunner {
   ): Promise<RunOutcome> {
     const placed = await this.place(def, placeholderBlock(), { ...options, useSelection: false }, flight, stale);
     if (!("kind" in placed)) {
-      this.forget(def.id);
-      await this.deps.host.saveReport(def);
+      // Charts keep their last picture until the report has fields again.
+      const charts = this.chartsOf(def);
+      this.runtimes.delete(def.id);
+      await this.deps.host.saveReport(withCharts(def, charts));
       return { kind: "empty", extent: placed };
     }
     if (placed.kind === "needs-anchor") {
-      this.forget(def.id);
+      this.runtimes.delete(def.id);
       return { kind: "empty", extent: null };
     }
     return placed;

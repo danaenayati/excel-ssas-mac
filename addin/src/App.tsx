@@ -18,6 +18,7 @@ import { CalculatedItemDialog, CalculatedMeasureDialog, GroupDialog } from "./co
 import { NumberFormatDialog } from "./components/NumberFormatDialog";
 import { ShowAsDialog } from "./components/ShowAsDialog";
 import { refreshEveryMenu, refreshEveryNote } from "./components/refreshEvery";
+import { chartMenuItems, type ChartActions } from "./components/chartMenu";
 import { conversionBlocker, convertReport, formulaConnection } from "./sheet/convert";
 import { rectA1 } from "./sheet/geometry";
 import {
@@ -104,6 +105,8 @@ const CERT_WARNING_DAYS = 30;
 const LOCATION_REFRESH_MS = 3000;
 /** Rows asked for by Show Details, as Excel's own default for cube drill-through. */
 const DETAILS_MAX_ROWS = 1000;
+/** Said when a report with charts goes: as Windows does with a PivotChart, they stay as pictures. */
+const CHARTS_STAY = " Its charts stay as they are but no longer update.";
 
 function upsert(list: ReportDef[], def: ReportDef): ReportDef[] {
   const index = list.findIndex((d) => d.id === def.id);
@@ -287,8 +290,10 @@ export function App({ api, host, mock }: Props) {
         const cur = currentRef.current;
         return cur !== null && cur.def.id === def.id;
       };
-      const onSheet = (extent: Extent) => {
-        setReports((list) => upsert(list, def));
+      const onSheet = (extent: Extent, saved: ReportDef = def) => {
+        setReports((list) => upsert(list, saved));
+        // A chart deleted in Excel has just dropped out of the saved definition.
+        dispatch({ type: "charts", id: def.id, charts: saved.charts ?? [] });
         setLocations((map) => ({ ...map, [def.id]: extent }));
         // Addressed by id rather than checked here: the reducer sees the report being
         // edited as it is now, even if this runs before the pane has re-rendered.
@@ -297,7 +302,8 @@ export function App({ api, host, mock }: Props) {
       };
       switch (outcome.kind) {
         case "written":
-          onSheet(outcome.extent);
+          onSheet(outcome.extent, outcome.def);
+          if (single && isCurrent() && outcome.chartError) setError(outcome.chartError);
           break;
         case "empty":
           // The placeholder is on the sheet and the definition saved, or (a new report
@@ -941,6 +947,7 @@ export function App({ api, host, mock }: Props) {
       setError(toUiError(failure));
       return;
     }
+    const charted = runner.chartsOf(target).length > 0; // they stay, as a PivotChart's last picture does
     runner.forget(target.id);
     const rest = reportsRef.current.filter((d) => d.id !== target.id);
     setReports(rest);
@@ -956,9 +963,9 @@ export function App({ api, host, mock }: Props) {
       else startDraft(target.connectionId, target.catalog, target.cube);
     }
     setNote(
-      clearCells || isEmptyLayout(target.layout)
+      (clearCells || isEmptyLayout(target.layout)
         ? "Report deleted and its cells cleared."
-        : "Report deleted. Its numbers stay as plain cells.",
+        : "Report deleted. Its numbers stay as plain cells.") + (charted ? CHARTS_STAY : ""),
     );
   };
 
@@ -1025,6 +1032,7 @@ export function App({ api, host, mock }: Props) {
     } finally {
       setBusy(runner.busy ? "Asking the cube…" : null);
     }
+    const charted = runner.chartsOf(target).length > 0;
     runner.forget(target.id);
     const rest = reportsRef.current.filter((d) => d.id !== target.id);
     setReports(rest);
@@ -1041,7 +1049,8 @@ export function App({ api, host, mock }: Props) {
     }
     setNote(
       "Converted to cube formulas. They read the cube again whenever Excel recalculates (Cmd+Option+F9, or Refresh All here)." +
-        (result.filtered ? " Totals now count every item, including those the report's filters hid." : ""),
+        (result.filtered ? " Totals now count every item, including those the report's filters hid." : "") +
+        (charted ? CHARTS_STAY : ""),
     );
   };
 
@@ -1151,6 +1160,23 @@ export function App({ api, host, mock }: Props) {
       : "New report · at the selected cell"
     : "";
 
+  // Insert Chart and Delete Chart (components/chartMenu.ts).
+  const chartActions: ChartActions = {
+    runner,
+    refresh: (target) => {
+      const cur = currentRef.current;
+      if (!cur || cur.def.id !== target.id) return Promise.resolve(null);
+      return execute(cur.def, cur.revision, { anchor: null, useSelection: false });
+    },
+    setBusy: (text) => setBusy(text ?? (runner.busy ? "Asking the cube…" : null)),
+    setError,
+    setNote,
+    saved: (saved) => {
+      setReports((list) => upsert(list, saved));
+      dispatch({ type: "charts", id: saved.id, charts: saved.charts ?? [] });
+    },
+  };
+
   const reportMenuItems = (): MenuEntry[] => {
     const items: MenuEntry[] = [];
     if (current && current.persisted) {
@@ -1199,6 +1225,8 @@ export function App({ api, host, mock }: Props) {
     );
     if (current && current.persisted) {
       const target = current.def;
+      const chartState = { busy: busy !== null || dirty, canInsert: location !== null && !isEmptyLayout(target.layout) };
+      items.push("separator", ...chartMenuItems(chartActions, target, chartState));
       items.push("separator", {
         label: "Convert to Formulas…",
         disabled: !location || busy !== null || isEmptyLayout(target.layout),

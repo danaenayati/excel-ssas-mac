@@ -2,6 +2,7 @@
 // workbook yet, and where an unwritten one will go. Pure reducer, wrapping the layout
 // reducer.
 
+import { parseCharts, sameCharts, serializeCharts, withCharts, type ReportChart } from "../sheet/charts";
 import type { CellAddress, Extent, ReportDef, SheetSelection } from "../sheet/host";
 import type {
   CalculatedMeasure,
@@ -63,7 +64,9 @@ export type CurrentAction =
    *  edited: the result of a run may arrive after the pane has moved to another one. */
   | { type: "saved"; id?: string }
   /** Ask for a re-query without changing anything (Refresh). */
-  | { type: "touch" };
+  | { type: "touch" }
+  /** The report's charts as now saved (Insert Chart, Delete Chart, a chart deleted in Excel). Not a change to query. */
+  | { type: "charts"; id: string; charts: ReportChart[] };
 
 export function newReportId(random: () => number = Math.random): string {
   // Used inside a workbook name (CubeReport_<id>), so letters and digits only.
@@ -137,6 +140,10 @@ export function currentReducer(state: Current | null, action: CurrentAction): Cu
       return state.persisted ? state : { ...state, persisted: true };
     case "touch":
       return { ...state, revision: state.revision + 1, urgent: true };
+    case "charts": {
+      if (action.id !== state.def.id || sameCharts(state.def.charts, action.charts)) return state;
+      return { ...state, def: withCharts(state.def, action.charts) };
+    }
   }
 }
 
@@ -534,13 +541,16 @@ export function parseReportDef(json: unknown, expectedId?: string): ReportDef | 
   const id = typeof value.id === "string" ? value.id : expectedId;
   if (typeof id !== "string" || !ID_PATTERN.test(id)) return null;
   if (expectedId !== undefined && id !== expectedId) return null;
-  return {
+  const def: ReportDef = {
     id,
     connectionId: typeof value.connectionId === "string" ? value.connectionId : "",
     catalog: typeof value.catalog === "string" ? value.catalog : "",
     cube: typeof value.cube === "string" ? value.cube : "",
     layout: parseLayout(value.layout),
   };
+  const charts = parseCharts(value.charts);
+  if (charts.length > 0) def.charts = charts;
+  return def;
 }
 
 export function serializeReportDef(def: ReportDef): string {
@@ -550,5 +560,6 @@ export function serializeReportDef(def: ReportDef): string {
     catalog: def.catalog,
     cube: def.cube,
     layout: def.layout,
+    charts: def.charts && def.charts.length > 0 ? serializeCharts(def.charts) : undefined,
   });
 }

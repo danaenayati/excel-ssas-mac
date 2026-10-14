@@ -10,6 +10,7 @@ import { cellA1, columnLetters, containsCell } from "../sheet/geometry";
 import { isFilterFormat } from "../sheet/layout";
 import { formatForPreview, type PreviewCell, type PreviewHost, type PreviewSnapshot } from "../sheet/preview";
 import { cx } from "../util";
+import { PreviewCharts } from "./PreviewCharts";
 
 const MIN_ROWS = 40;
 const MIN_COLS = 12;
@@ -204,6 +205,7 @@ export function PreviewSheet({ host }: { host: PreviewHost }) {
           </p>
         )}
       </div>
+      <PreviewCharts charts={snapshot.charts} onDelete={(id) => host.removeChart(id)} />
       <div className="pv-tabs" role="tablist" aria-label="Sheets">
         {snapshot.sheets.map((sheet) => (
           <button

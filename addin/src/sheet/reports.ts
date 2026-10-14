@@ -9,6 +9,8 @@
 // "Filter <field>…" action for the selected cell.
 
 import { parseReportDef, serializeReportDef } from "../state/report";
+import type { ChartKind, ChartTable, ReportChart } from "./charts";
+import { addChart, deleteChart, updateChartsInExcel } from "./excelCharts";
 import { cellA1, chunkRect, containsCell, offsetRect, parseA1, rectA1, type Rect } from "./geometry";
 import {
   NAME_PREFIX,
@@ -17,6 +19,7 @@ import {
   reportName,
   settingKey,
   type CellAddress,
+  type ChartsUpdate,
   type Extent,
   type ReportDef,
   type SheetClick,
@@ -524,5 +527,18 @@ export class ExcelHost implements SheetHost {
       context.application.calculate(Excel.CalculationType.full);
       await context.sync();
     });
+  }
+
+  // Charts: excelCharts.ts.
+  addChart(reportId: string, chartId: string, type: ChartKind, table: ChartTable, index: number): Promise<ReportChart> {
+    return runExcel((context) => addChart(context, reportId, chartId, type, table, index));
+  }
+
+  updateCharts(charts: ReportChart[], table: ChartTable): Promise<ChartsUpdate> {
+    return updateChartsInExcel(charts, table);
+  }
+
+  deleteChart(chart: ReportChart): Promise<void> {
+    return runExcel((context) => deleteChart(context, chart));
   }
 }
