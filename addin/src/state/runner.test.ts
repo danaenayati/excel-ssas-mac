@@ -658,3 +658,204 @@ describe("filter cells of a written report", () => {
     expect(host.snapshot().cells.get("0,0")?.format).toBe("@");
   });
 });
+
+describe("sorting, filtering, show-as and number formats through the sample cube", () => {
+  const city = () => hierarchy("City").uniqueName;
+  const rides = () => measure("Rides").uniqueName;
+  function cityRows(extra: LayoutAction[] = []): Layout {
+    return layoutOf([
+      { type: "addMeasure", measure: measure("Rides") },
+      { type: "addHierarchy", hierarchy: hierarchy("City") },
+      ...extra,
+    ]);
+  }
+  /** Row captions of the written block, from row 1 down, without the Grand Total line. */
+  function captions(): string[] {
+    const out: string[] = [];
+    for (let row = 1; ; row++) {
+      const text = cellText(row, 0);
+      if (text === undefined || text === "Grand Total") return out;
+      out.push(String(text));
+    }
+  }
+  function column(col: number, rows: number): number[] {
+    return Array.from({ length: rows }, (_, i) => Number(cellText(1 + i, col)));
+  }
+
+  it("sorts items by caption and by a measure, and back to the cube's order", async () => {
+    host.select(0, 0);
+    const def = report(cityRows());
+    expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    const cubeOrder = captions();
+    expect(cubeOrder.slice(0, 3)).toEqual(["Tehran", "Rey", "Shiraz"]);
+
+    const az = report(cityRows([{ type: "setSort", hierarchy: city(), sort: { by: "caption", order: "asc" } }]), def.id);
+    expectWritten(await runner.run(az, { anchor: null, useSelection: false }));
+    expect(captions()).toEqual(cubeOrder.slice().sort());
+
+    const byRides = report(
+      cityRows([{ type: "setSort", hierarchy: city(), sort: { by: "measure", measure: rides(), order: "desc" } }]),
+      def.id,
+    );
+    expectWritten(await runner.run(byRides, { anchor: null, useSelection: false }));
+    const values = column(1, cubeOrder.length);
+    expect(values).toEqual(values.slice().sort((a, b) => b - a));
+  });
+
+  it("applies label filters, and totals count only what is left", async () => {
+    host.select(0, 0);
+    const def = report(
+      cityRows([{ type: "setLabelFilter", hierarchy: city(), filter: { operator: "beginsWith", value: "ma" } }]),
+    );
+    const written = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    expect(captions()).toEqual(["Marvdasht", "Mashhad"]);
+    const total = Number(cellText(written.extent.rows - 1, 1));
+    expect(total).toBe(column(1, 2).reduce((a, b) => a + b, 0));
+
+    const contains = report(
+      cityRows([{ type: "setLabelFilter", hierarchy: city(), filter: { operator: "contains", value: "SH" } }]),
+      def.id,
+    );
+    expectWritten(await runner.run(contains, { anchor: null, useSelection: false }));
+    expect(captions()).toEqual(["Shiraz", "Marvdasht", "Kashan", "Mashhad", "Neyshabur"]);
+  });
+
+  it("keeps the top N items by a measure, and their total", async () => {
+    host.select(0, 0);
+    const all = report(cityRows([{ type: "setSort", hierarchy: city(), sort: { by: "measure", measure: rides(), order: "desc" } }]));
+    expectWritten(await runner.run(all, { anchor: null, useSelection: true }));
+    const top3 = captions().slice(0, 3);
+
+    const def = report(
+      cityRows([{ type: "setValueFilter", hierarchy: city(), filter: { operator: "top", measure: rides(), value: 3, topBy: "items" } }]),
+      all.id,
+    );
+    const written = expectWritten(await runner.run(def, { anchor: null, useSelection: false }));
+    expect(captions().slice().sort()).toEqual(top3.slice().sort());
+    expect(Number(cellText(written.extent.rows - 1, 1))).toBe(column(1, 3).reduce((a, b) => a + b, 0));
+  });
+
+  it("writes nothing for a filter nothing passes, rather than pretending", async () => {
+    host.select(0, 0);
+    const def = report(
+      cityRows([{ type: "setLabelFilter", hierarchy: city(), filter: { operator: "equals", value: "Atlantis" } }]),
+    );
+    const written = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    expect(written.runtime.dataRows).toBe(0);
+  });
+
+  it("shows values as a percent of the grand total that add up to 100%", async () => {
+    host.select(0, 0);
+    const def = report(
+      cityRows([{ type: "setShowAs", measure: rides(), showAs: "percentOfGrandTotal" }]),
+    );
+    const written = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    expect(cellText(0, 1)).toBe("Rides (% of Grand Total)");
+    const shares = column(1, written.runtime.dataRows - 1);
+    expect(shares.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 9);
+    expect(Number(cellText(written.extent.rows - 1, 1))).toBeCloseTo(1, 9);
+    expect(host.snapshot().cells.get("1,1")?.format).toBe("0.00%");
+  });
+
+  it("applies the user's number format to that value field's cells only", async () => {
+    host.select(0, 0);
+    const def = report(
+      cityRows([
+        { type: "addMeasure", measure: measure("Fare") },
+        { type: "setNumberFormat", measure: measure("Fare").uniqueName, format: "$#,##0.00" },
+      ]),
+    );
+    expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    expect(host.snapshot().cells.get("1,1")?.format).toBe("#,##0");
+    expect(host.snapshot().cells.get("1,2")?.format).toBe("$#,##0.00");
+  });
+});
+
+describe("Show Details", () => {
+  function layout(): Layout {
+    return layoutOf([
+      { type: "addMeasure", measure: measure("Rides") },
+      { type: "addMeasure", measure: measure("Fare") },
+      { type: "addHierarchy", hierarchy: hierarchy("City") },
+      { type: "addHierarchy", hierarchy: hierarchy("Year"), area: "columns" },
+    ]);
+  }
+  // Row 0: Year header. Row 1: measures + corner. Rows 2+: cities. Columns: 2025 x (Rides, Fare), 2026 x …, Grand Total x …
+
+  it("finds the members and the measure behind a value cell", async () => {
+    host.select(0, 0);
+    const def = report(layout());
+    const written = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    const at = (row: number, col: number) => ({ row, col, rows: written.extent.rows, cols: written.extent.cols });
+    expect(runner.detailsFor(def.id, at(2, 1))).toEqual({
+      members: ["[Geography].[City].&[1]", "[Date].[Year].&[2025]"],
+      measure: measure("Rides").uniqueName,
+      layout: def.layout,
+    });
+    expect(runner.detailsFor(def.id, at(2, 2))?.measure).toBe(measure("Fare").uniqueName);
+    // Grand Total column: the year adds nothing.
+    expect(runner.detailsFor(def.id, at(2, 5))?.members).toEqual(["[Geography].[City].&[1]"]);
+    // Grand Total line and column: nothing at all.
+    expect(runner.detailsFor(def.id, at(written.extent.rows - 1, 5))?.members).toEqual([]);
+  });
+
+  it("is nothing for headers, and unknown without a result", async () => {
+    host.select(0, 0);
+    const def = report(layout());
+    expect(runner.detailsFor(def.id, { row: 2, col: 1, rows: 12, cols: 7 })).toBeUndefined();
+    const written = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    const at = (row: number, col: number) => ({ row, col, rows: written.extent.rows, cols: written.extent.cols });
+    expect(runner.detailsFor(def.id, at(0, 1))).toBeNull();
+    expect(runner.detailsFor(def.id, at(1, 1))).toBeNull();
+    expect(runner.detailsFor(def.id, at(2, 0))).toBeNull();
+  });
+
+  it("is nothing without value fields: the cell's measure is unknown", async () => {
+    host.select(0, 0);
+    const def = report(layoutOf([{ type: "addHierarchy", hierarchy: hierarchy("City") }]));
+    const written = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    expect(runner.detailsFor(def.id, { row: 1, col: 1, rows: written.extent.rows, cols: written.extent.cols })).toBeNull();
+  });
+
+  it("returns the fact rows behind a cell from the sample cube", async () => {
+    host.select(0, 0);
+    const def = report(layout());
+    const written = expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    const target = runner.detailsFor(def.id, { row: 2, col: 1, rows: written.extent.rows, cols: written.extent.cols })!;
+    const response = await api.details("demo", { catalog: CATALOG, cube: CUBE, ...target });
+    expect(response.columns[response.columns.length - 1]).toBe("Rides");
+    expect(response.rows.length).toBeGreaterThan(0);
+    expect(response.truncated).toBe(false);
+    expect(response.rows.every((row) => row[2] === "Tehran" && String(row[0]).endsWith("2025"))).toBe(true);
+    const sum = response.rows.reduce((total, row) => total + Number(row[row.length - 1]), 0);
+    expect(sum).toBe(Number(cellText(2, 1)));
+
+    const few = await api.details("demo", { catalog: CATALOG, cube: CUBE, ...target, maxRows: 3 });
+    expect(few.rows).toHaveLength(3);
+    expect(few.truncated).toBe(true);
+  });
+
+  it("refuses when a field filtered to several items is not pinned by the cell", async () => {
+    const filtered = layoutOf(
+      [
+        { type: "addHierarchy", hierarchy: hierarchy("Service Type"), area: "filters" },
+        {
+          type: "setMembers",
+          hierarchy: hierarchy("Service Type").uniqueName,
+          members: ["[Service].[Service Type].&[1]", "[Service].[Service Type].&[2]"],
+          captions: ["Ride", "Bike"],
+        },
+      ],
+      layout(),
+    );
+    await expect(
+      api.details("demo", {
+        catalog: CATALOG,
+        cube: CUBE,
+        layout: filtered,
+        members: ["[Geography].[City].&[1]"],
+        measure: measure("Rides").uniqueName,
+      }),
+    ).rejects.toMatchObject({ error: { category: "bad-request", message: expect.stringContaining("filtered to several items") } });
+  });
+});

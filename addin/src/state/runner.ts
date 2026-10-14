@@ -21,9 +21,11 @@ import {
   blockFields,
   buildBlock,
   columnHeaderAt,
+  detailsMembers,
   expandedDescendants,
   memberKey,
   placeholderBlock,
+  valueFieldIndex,
   type Axis,
   type Block,
   type BlockShape,
@@ -76,6 +78,8 @@ export interface ReportRuntime {
   fieldCells: Map<string, FieldCell>;
   /** The layout that produced the block: the fields those cells point into. */
   layout: Layout;
+  /** `Grid.colValueIndex` of the result: the value field behind each value column. */
+  colValueIndex: number[];
 }
 
 export type RunOutcome =
@@ -200,6 +204,30 @@ export class ReportRunner {
     return header === null ? null : runtime.layout.columns[header] ?? null;
   }
 
+  /**
+   * What Show Details needs for a cell: the members behind it, the measure of its value
+   * field, and the layout that produced the result. Null when the cell is not a value
+   * cell, or its value field cannot be told; undefined when there is no result to tell by.
+   */
+  detailsFor(
+    reportId: string,
+    at: { row: number; col: number; rows: number; cols: number },
+  ): { members: string[]; measure: string; layout: Layout } | null | undefined {
+    const runtime = this.current(reportId, at);
+    if (!runtime) return undefined;
+    const shape = runtime.shape;
+    const line = at.row - shape.dataTop;
+    const column = at.col - shape.headerCols;
+    if (line < 0 || line >= shape.dataRows || column < 0 || column >= shape.dataCols) return null;
+    const index = valueFieldIndex(runtime.colValueIndex, column, runtime.layout.values.length);
+    if (index === null) return null;
+    return {
+      members: detailsMembers(runtime.headers, line, column),
+      measure: runtime.layout.values[index].measure,
+      layout: runtime.layout,
+    };
+  }
+
   forget(reportId: string): void {
     this.runtimes.delete(reportId);
   }
@@ -300,6 +328,7 @@ export class ReportRunner {
       shape: block.shape,
       fieldCells: block.fieldCells,
       layout: def.layout,
+      colValueIndex: grid.colValueIndex ?? [],
     };
     this.runtimes.set(def.id, runtime);
     await this.deps.host.saveReport(def);

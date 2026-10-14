@@ -3,7 +3,17 @@
 // reducer.
 
 import type { CellAddress, Extent, ReportDef, SheetSelection } from "../sheet/host";
-import type { Layout, PlacedField, ValueField } from "../types";
+import type {
+  FieldSort,
+  LabelFilter,
+  LabelOperator,
+  Layout,
+  PlacedField,
+  ShowValuesAs,
+  ValueField,
+  ValueFilter,
+  ValueOperator,
+} from "../types";
 import { DEFAULT_OPTIONS, emptyLayout, layoutReducer, type LayoutAction } from "./layout";
 
 export interface Current {
@@ -162,6 +172,83 @@ function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
 
+const LABEL_OPERATORS: readonly LabelOperator[] = [
+  "equals",
+  "notEquals",
+  "beginsWith",
+  "notBeginsWith",
+  "endsWith",
+  "notEndsWith",
+  "contains",
+  "notContains",
+  "greaterThan",
+  "greaterOrEqual",
+  "lessThan",
+  "lessOrEqual",
+  "between",
+  "notBetween",
+];
+const VALUE_OPERATORS: readonly ValueOperator[] = [
+  "equals",
+  "notEquals",
+  "greaterThan",
+  "greaterOrEqual",
+  "lessThan",
+  "lessOrEqual",
+  "between",
+  "notBetween",
+  "top",
+  "bottom",
+];
+const SHOW_AS: readonly ShowValuesAs[] = [
+  "normal",
+  "percentOfGrandTotal",
+  "percentOfColumnTotal",
+  "percentOfRowTotal",
+];
+const TWO_BOUNDS = ["between", "notBetween"];
+
+function isOneOf<T extends string>(list: readonly T[], value: unknown): value is T {
+  return typeof value === "string" && (list as readonly string[]).indexOf(value) >= 0;
+}
+
+function finite(value: unknown): value is number {
+  return typeof value === "number" && isFinite(value);
+}
+
+function parseSort(value: unknown): FieldSort | null {
+  if (!isRecord(value) || (value.order !== "asc" && value.order !== "desc")) return null;
+  if (value.by === "caption") return { by: "caption", order: value.order };
+  if (value.by === "measure" && typeof value.measure === "string" && value.measure !== "") {
+    return { by: "measure", measure: value.measure, order: value.order };
+  }
+  return null;
+}
+
+function parseLabelFilter(value: unknown): LabelFilter | null {
+  if (!isRecord(value) || !isOneOf(LABEL_OPERATORS, value.operator)) return null;
+  if (typeof value.value !== "string") return null;
+  if (TWO_BOUNDS.indexOf(value.operator) >= 0) {
+    if (typeof value.value2 !== "string") return null;
+    return { operator: value.operator, value: value.value, value2: value.value2 };
+  }
+  return { operator: value.operator, value: value.value };
+}
+
+function parseValueFilter(value: unknown): ValueFilter | null {
+  if (!isRecord(value) || !isOneOf(VALUE_OPERATORS, value.operator)) return null;
+  if (typeof value.measure !== "string" || value.measure === "" || !finite(value.value)) return null;
+  const out: ValueFilter = { operator: value.operator, measure: value.measure, value: value.value };
+  if (TWO_BOUNDS.indexOf(value.operator) >= 0) {
+    if (!finite(value.value2)) return null;
+    out.value2 = value.value2;
+  }
+  if (value.operator === "top" || value.operator === "bottom") {
+    out.topBy = value.topBy === "percent" || value.topBy === "sum" ? value.topBy : "items";
+  }
+  return out;
+}
+
 function placedFields(value: unknown): PlacedField[] {
   if (!Array.isArray(value)) return [];
   const out: PlacedField[] = [];
@@ -169,14 +256,22 @@ function placedFields(value: unknown): PlacedField[] {
     if (!isRecord(item) || typeof item.hierarchy !== "string" || item.hierarchy === "") continue;
     const members = strings(item.members);
     const captions = strings(item.memberCaptions);
-    out.push({
+    const field: PlacedField = {
       hierarchy: item.hierarchy,
       caption: typeof item.caption === "string" ? item.caption : item.hierarchy,
       allMember: typeof item.allMember === "string" ? item.allMember : null,
       expanded: strings(item.expanded),
       members,
       memberCaptions: members.map((m, i) => captions[i] ?? m),
-    });
+    };
+    // Optional settings that cannot be read are dropped, never guessed.
+    const sort = parseSort(item.sort);
+    if (sort) field.sort = sort;
+    const labelFilter = parseLabelFilter(item.labelFilter);
+    if (labelFilter) field.labelFilter = labelFilter;
+    const valueFilter = parseValueFilter(item.valueFilter);
+    if (valueFilter) field.valueFilter = valueFilter;
+    out.push(field);
   }
   return out;
 }
@@ -186,10 +281,15 @@ function valueFields(value: unknown): ValueField[] {
   const out: ValueField[] = [];
   for (const item of value) {
     if (!isRecord(item) || typeof item.measure !== "string" || item.measure === "") continue;
-    out.push({
+    const field: ValueField = {
       measure: item.measure,
       caption: typeof item.caption === "string" ? item.caption : item.measure,
-    });
+    };
+    if (isOneOf(SHOW_AS, item.showAs) && item.showAs !== "normal") field.showAs = item.showAs;
+    if (typeof item.numberFormat === "string" && item.numberFormat.trim() !== "" && item.numberFormat.length <= 100) {
+      field.numberFormat = item.numberFormat;
+    }
+    out.push(field);
   }
   return out;
 }
@@ -208,10 +308,12 @@ export function parseLayout(value: unknown): Layout {
   const columns = unique(placedFields(value.columns));
   const filters = unique(placedFields(value.filters));
 
-  const measures = new Set<string>();
-  const values = valueFields(value.values).filter((v) =>
-    measures.has(v.measure) ? false : (measures.add(v.measure), true),
-  );
+  // The same measure may be in Values twice, shown two ways (plain and as a percent).
+  const shown = new Set<string>();
+  const values = valueFields(value.values).filter((v) => {
+    const key = v.measure + "\u0001" + (v.showAs ?? "normal");
+    return shown.has(key) ? false : (shown.add(key), true);
+  });
 
   return {
     rows,

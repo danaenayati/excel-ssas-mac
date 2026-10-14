@@ -20,12 +20,15 @@ import {
   subtract,
   type Rect,
 } from "./geometry";
-import { SheetError, reportName, type CellAddress, type Extent } from "./host";
+import { SheetError, detailsSheetName, reportName, type CellAddress, type Extent } from "./host";
+import type { CellValue } from "../types";
 import {
   GENERAL_FORMAT,
   MAX_CHUNK_CELLS,
   TEXT_FORMAT,
   chunkBlock,
+  detailsCells,
+  excelText,
   excelValues,
   isTextFormat,
   sliceMatrix,
@@ -278,4 +281,52 @@ export async function hasContentOutside(
     }
   }
   return false;
+}
+
+/** Rows of a details sheet that column widths are fitted to; enough to judge them. */
+const AUTOFIT_ROWS = 1000;
+
+/**
+ * Show Details: add a sheet with a bold header row and the rows, written in chunks,
+ * columns fitted, top row frozen (ExcelApi 1.7, guarded), and make it the active
+ * sheet. Resolves with the sheet's name.
+ */
+export async function writeDetailsSheet(
+  context: Excel.RequestContext,
+  columns: string[],
+  rows: CellValue[][],
+): Promise<string> {
+  const sheets = context.workbook.worksheets;
+  sheets.load("items/name");
+  await context.sync();
+  const name = detailsSheetName(sheets.items.map((sheet) => sheet.name));
+  const sheet = sheets.add(name);
+
+  const { values, numberFormats, cols } = detailsCells(columns, rows);
+  const guarded = values.map((line, r) =>
+    line.map((value, c) => (typeof value === "string" && numberFormats[r][c] === TEXT_FORMAT ? excelText(value) : value)),
+  );
+  for (const chunk of chunkRect({ row: 0, col: 0, rows: values.length, cols }, MAX_CHUNK_CELLS)) {
+    const range = sheet.getRange(rectA1(chunk));
+    range.numberFormat = sliceMatrix(numberFormats, chunk);
+    range.values = sliceMatrix(guarded, chunk);
+    await context.sync();
+  }
+
+  sheet.getRange(rectA1({ row: 0, col: 0, rows: 1, cols })).format.font.bold = true;
+  sheet
+    .getRange(rectA1({ row: 0, col: 0, rows: Math.min(values.length, AUTOFIT_ROWS), cols }))
+    .format.autofitColumns();
+  sheet.activate();
+  await context.sync();
+
+  if (supportsExcelApi("1.7")) {
+    try {
+      sheet.freezePanes.freezeRows(1);
+      await context.sync();
+    } catch {
+      // The rows are there; only the header does not stay in view when scrolling.
+    }
+  }
+  return name;
 }

@@ -7,7 +7,7 @@
 
 import { memo, useState, useSyncExternalStore, type KeyboardEvent } from "react";
 import { cellA1, columnLetters, containsCell } from "../sheet/geometry";
-import { FILTER_FORMAT } from "../sheet/layout";
+import { isFilterFormat } from "../sheet/layout";
 import { formatForPreview, type PreviewCell, type PreviewHost, type PreviewSnapshot } from "../sheet/preview";
 import { cx } from "../util";
 
@@ -25,10 +25,12 @@ interface RowProps {
   /** Selected column in this row, or -1. */
   selected: number;
   onSelect: (row: number, col: number) => void;
+  /** Rows frozen at the top of this sheet. */
+  frozen: number;
 }
 
 const Row = memo(
-  function Row({ row, cols, snapshot, selected, onSelect }: RowProps) {
+  function Row({ row, cols, snapshot, selected, onSelect, frozen }: RowProps) {
     const cells: JSX.Element[] = [];
     for (let col = 0; col < cols; col++) {
       const cell: PreviewCell | undefined = snapshot.cells.get(row + "," + col);
@@ -45,7 +47,8 @@ const Row = memo(
             cell && cell.bold && "bold",
             cell && cell.fill && "fill",
             cell && cell.muted && "muted",
-            cell && cell.format === FILTER_FORMAT && "filter",
+            cell && isFilterFormat(cell.format) && "filter",
+            row < frozen && "frozen",
             numeric && "num",
             inReport && "in-report",
             selected === col && "selected",
@@ -64,7 +67,12 @@ const Row = memo(
       </tr>
     );
   },
-  (a, b) => a.version === b.version && a.selected === b.selected && a.cols === b.cols && a.row === b.row,
+  (a, b) =>
+    a.version === b.version &&
+    a.selected === b.selected &&
+    a.cols === b.cols &&
+    a.row === b.row &&
+    a.frozen === b.frozen,
 );
 
 export function PreviewSheet({ host }: { host: PreviewHost }) {
@@ -79,6 +87,7 @@ export function PreviewSheet({ host }: { host: PreviewHost }) {
   const clipped = snapshot.usedRows > MAX_ROWS || snapshot.usedCols > MAX_COLS;
   const { row, col } = snapshot.selection;
   const click = (r: number, c: number) => host.click(r, c);
+  const frozen = host.frozenRows();
   const keys: Record<string, [number, number]> = {
     ArrowUp: [-1, 0],
     ArrowDown: [1, 0],
@@ -111,6 +120,7 @@ export function PreviewSheet({ host }: { host: PreviewHost }) {
         snapshot={snapshot}
         selected={r === row ? col : -1}
         onSelect={click}
+        frozen={frozen}
       />,
     );
   }
@@ -185,6 +195,20 @@ export function PreviewSheet({ host }: { host: PreviewHost }) {
             complete.
           </p>
         )}
+      </div>
+      <div className="pv-tabs" role="tablist" aria-label="Sheets">
+        {snapshot.sheets.map((sheet) => (
+          <button
+            key={sheet.id}
+            type="button"
+            role="tab"
+            aria-selected={sheet.id === snapshot.activeId}
+            className={cx("pv-tab", sheet.id === snapshot.activeId && "active")}
+            onClick={() => host.activate(sheet.id)}
+          >
+            {sheet.name}
+          </button>
+        ))}
       </div>
     </div>
   );

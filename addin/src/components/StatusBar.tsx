@@ -27,6 +27,9 @@ interface Props {
   /** The field the selected cell stands for, when it is one that can be filtered. */
   filter: { caption: string; summary: string } | null;
   onFilter: () => void;
+  /** The selected cell is a value of the report: offer the rows behind it. */
+  details: boolean;
+  onDetails: () => void;
   onExpand: (hit: MemberHit) => void;
   onCollapse: (hit: MemberHit) => void;
   onShowQuery: () => void;
@@ -52,6 +55,14 @@ export function StatusBar(props: Props) {
 
   return (
     <footer className="status">
+      {props.details && (
+        <div className="drill">
+          <span className="drill-caption muted">The rows behind this number</span>
+          <button type="button" className="button small" onClick={props.onDetails} disabled={working}>
+            Show Details
+          </button>
+        </div>
+      )}
       {drill.state === "stale" && !filter && (
         <p className="drill muted">Refresh this report to enable drill.</p>
       )}

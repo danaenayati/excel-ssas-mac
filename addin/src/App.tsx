@@ -4,7 +4,7 @@
 // show.
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { Api } from "./api";
+import { isCancelled, type Api } from "./api";
 import { Areas } from "./components/Areas";
 import { Connections } from "./components/Connections";
 import { CubePicker } from "./components/CubePicker";
@@ -14,6 +14,7 @@ import { Menu, type MenuEntry } from "./components/Menu";
 import { PreviewSheet } from "./components/PreviewSheet";
 import { StatusBar, type Drill } from "./components/StatusBar";
 import { CopyButton, Dialog, ErrorNote, Icon, Spinner } from "./components/common";
+import { NumberFormatDialog } from "./components/NumberFormatDialog";
 import { rectA1 } from "./sheet/geometry";
 import {
   describeCell,
@@ -24,9 +25,10 @@ import {
   type SheetHost,
   type SheetSelection,
 } from "./sheet/host";
+import { REFRESH_ON_OPEN } from "./sheet/host";
 import { guessFieldCell, type MemberHit } from "./sheet/layout";
 import { PreviewHost } from "./sheet/preview";
-import { findField, isEmptyLayout, selectionSummary, type LayoutAction } from "./state/layout";
+import { findField, isEmptyLayout, locate, selectionSummary, type LayoutAction } from "./state/layout";
 import { currentReducer, decidePlace, newReportDef, placeLabel } from "./state/report";
 import {
   ReportRunner,
@@ -52,7 +54,8 @@ type Question =
   | { kind: "overwrite"; target: Extent; answer: (ok: boolean) => void }
   | { kind: "deleteReport"; def: ReportDef; onSheet: boolean }
   | { kind: "reset"; what: "database" | "cube"; apply: () => void }
-  | { kind: "query"; mdx: string };
+  | { kind: "query"; mdx: string }
+  | { kind: "numberFormat"; measure: string; caption: string; current: string };
 
 /** Pause between a layout change and its query, so that ticking three fields is one query. */
 const DEBOUNCE_MS = 400;
@@ -60,6 +63,8 @@ const DEBOUNCE_MS = 400;
 const CERT_WARNING_DAYS = 30;
 /** While the user clicks around one sheet, re-read where the reports are this often at most. */
 const LOCATION_REFRESH_MS = 3000;
+/** Rows asked for by Show Details, as Excel's own default for cube drill-through. */
+const DETAILS_MAX_ROWS = 1000;
 
 function upsert(list: ReportDef[], def: ReportDef): ReportDef[] {
   const index = list.findIndex((d) => d.id === def.id);
@@ -100,6 +105,9 @@ export function App({ api, host, mock }: Props) {
   const [search, setSearch] = useState("");
   const [reportMenu, setReportMenu] = useState<HTMLElement | null>(null);
   const [generation, setGeneration] = useState(0);
+  const [refreshOnOpen, setRefreshOnOpen] = useState(false);
+  /** Set at start-up when the workbook asks for a refresh on open; cleared once done. */
+  const [openingRefresh, setOpeningRefresh] = useState(false);
   const [, setTick] = useState(0);
 
   const currentRef = useLatest(current);
@@ -111,6 +119,8 @@ export function App({ api, host, mock }: Props) {
   const lastSheet = useRef<string | null>(null);
   const lastLocationRead = useRef(0);
   const locationSeq = useRef(0);
+  /** The Show Details request in flight, so that Cancel can stop it. */
+  const detailsFlight = useRef<{ abort: AbortController; connectionId: string } | null>(null);
 
   // -- runner ---------------------------------------------------------------
 
@@ -301,14 +311,18 @@ export function App({ api, host, mock }: Props) {
     let defs: ReportDef[] = [];
     const where: Record<string, Extent | null> = {};
     let active: SheetSelection | null = null;
+    let refresh = false;
     try {
       defs = await host.loadReports();
       for (const def of defs) where[def.id] = await host.getReportExtent(def.id);
       active = await host.getSelection();
+      refresh = await host.getFlag(REFRESH_ON_OPEN);
     } catch {
       // The sheet cannot be read right now (a cell is being edited, say). The pane
       // still opens; reports show up at the next start.
     }
+    setRefreshOnOpen(refresh);
+    setOpeningRefresh(refresh && defs.length > 0);
     setReports(defs);
     setLocations(where);
     setSelection(active);
@@ -324,6 +338,14 @@ export function App({ api, host, mock }: Props) {
   useEffect(() => {
     void boot();
   }, [boot]);
+
+  // "Refresh when the workbook opens": once, after start-up, like Refresh All.
+  const refreshAllRef = useRef<() => Promise<void>>(async () => undefined);
+  useEffect(() => {
+    if (phase !== "ready" || !openingRefresh) return;
+    setOpeningRefresh(false);
+    void refreshAllRef.current();
+  }, [phase, openingRefresh]);
 
   // Selecting a cell inside a report makes that report the one being edited. Arriving
   // on another sheet (or a sheet being deleted) is when report locations go stale.
@@ -544,6 +566,52 @@ export function App({ api, host, mock }: Props) {
     }
   };
 
+  /**
+   * Show Details for the selected value cell: ask the helper for the rows behind it and
+   * put them on a new sheet, as double-clicking a number in a PivotTable does.
+   */
+  const showDetails = async () => {
+    const cur = currentRef.current;
+    const at = selection && selection.report;
+    if (!cur || !at || at.id !== cur.def.id) return;
+    const target = runner.detailsFor(cur.def.id, at);
+    const conn = connectionsRef.current.find((c) => c.id === cur.def.connectionId);
+    if (!target || !conn) return;
+    setError(null);
+    setNote(null);
+    setBusy("Getting the details…");
+    const flight = { abort: new AbortController(), connectionId: conn.id };
+    detailsFlight.current = flight;
+    try {
+      const response = await api.details(
+        conn.id,
+        {
+          catalog: cur.def.catalog,
+          cube: cur.def.cube,
+          layout: target.layout,
+          members: target.members,
+          measure: target.measure,
+          maxRows: DETAILS_MAX_ROWS,
+        },
+        flight.abort.signal,
+      );
+      setBusy("Writing the details…");
+      const sheetName = await host.addDetailsSheet(response.columns, response.rows);
+      const count = response.rows.length.toLocaleString("en-US");
+      setNote(
+        response.truncated
+          ? `Showing the first ${count} rows, on sheet ${sheetName}.`
+          : `${plural(response.rows.length, "row", "rows")} on sheet ${sheetName}.`,
+      );
+    } catch (failure) {
+      if (isCancelled(failure)) setNote("Cancelled.");
+      else setError(toUiError(failure));
+    } finally {
+      if (detailsFlight.current === flight) detailsFlight.current = null;
+      setBusy(runner.busy ? "Asking the cube…" : null);
+    }
+  };
+
   const refreshAll = async () => {
     const cur = currentRef.current;
     const list = reportsRef.current.map((d) => (cur && cur.def.id === d.id ? cur.def : d));
@@ -598,6 +666,8 @@ export function App({ api, host, mock }: Props) {
     if (firstError) setError(firstError);
   };
 
+  refreshAllRef.current = refreshAll;
+
   const askDeleteReport = async (target: ReportDef) => {
     let extent: Extent | null = null;
     try {
@@ -646,8 +716,10 @@ export function App({ api, host, mock }: Props) {
   // What the selected cell offers: drill for a member, "Filter <field>…" for a field.
   let drill: Drill = { state: "none" };
   let filterField: PlacedField | null = null;
+  let detailsTarget: ReturnType<ReportRunner["detailsFor"]> = null;
   if (def && selection && selection.report && selection.report.id === def.id) {
     const at = selection.report;
+    detailsTarget = runner.detailsFor(def.id, at);
     let onSheet = runner.fieldAt(def.id, at);
     if (onSheet === undefined) {
       drill = isEmptyLayout(def.layout) ? { state: "none" } : { state: "stale" };
@@ -683,6 +755,8 @@ export function App({ api, host, mock }: Props) {
     current.revision > 0 &&
     !(ran !== null && ran.id === current.def.id && ran.revision === current.revision);
   const pickerField = def && picker ? findField(def.layout, picker) : null;
+  const pickerPlace = def && picker ? locate(def.layout, picker) : null;
+  const pickerArea = pickerPlace ? pickerPlace.area : null;
 
   const reportLabel = (d: ReportDef): string => {
     const where = locations[d.id];
@@ -709,6 +783,24 @@ export function App({ api, host, mock }: Props) {
       run: () => {
         cache.clear();
         setGeneration((n) => n + 1);
+      },
+    });
+    items.push({
+      label: "Refresh when the workbook opens",
+      checked: refreshOnOpen,
+      run: () => {
+        const on = !refreshOnOpen;
+        host.setFlag(REFRESH_ON_OPEN, on).then(
+          () => {
+            setRefreshOnOpen(on);
+            setNote(
+              on
+                ? "Every report in this workbook will refresh when the workbook opens."
+                : "Reports will no longer refresh when the workbook opens.",
+            );
+          },
+          (failure) => setError(toUiError(failure)),
+        );
       },
     });
     if (current && current.persisted) {
@@ -900,7 +992,22 @@ export function App({ api, host, mock }: Props) {
           }
         />
 
-        <Areas layout={def.layout} dispatch={act} onFilter={setPicker} />
+        <Areas
+          layout={def.layout}
+          dispatch={act}
+          onFilter={setPicker}
+          onCustomFormat={(measure) => {
+            const value = def.layout.values.find((v) => v.measure === measure);
+            if (value) {
+              setQuestion({
+                kind: "numberFormat",
+                measure,
+                caption: value.caption,
+                current: value.numberFormat ?? "",
+              });
+            }
+          }}
+        />
 
         <div className="options">
           {OPTION_LABELS.map(([option, label]) => (
@@ -931,7 +1038,15 @@ export function App({ api, host, mock }: Props) {
 
         <StatusBar
           busy={busy}
-          onCancel={() => runner.cancel()}
+          onCancel={() => {
+            const flight = detailsFlight.current;
+            if (flight) {
+              flight.abort.abort();
+              api.cancel(flight.connectionId).catch(() => undefined);
+            } else {
+              runner.cancel();
+            }
+          }}
           error={error}
           onDismissError={() => setError(null)}
           onRetry={error && error.helperDown ? () => dispatch({ type: "touch" }) : undefined}
@@ -944,6 +1059,8 @@ export function App({ api, host, mock }: Props) {
               : null
           }
           onFilter={() => filterField && setPicker(filterField.hierarchy)}
+          details={Boolean(detailsTarget) && connection !== null}
+          onDetails={() => void showDetails()}
           onExpand={expand}
           onCollapse={collapse}
           onShowQuery={() => runtime && setQuestion({ kind: "query", mdx: runtime.stats.mdx })}
@@ -978,6 +1095,35 @@ export function App({ api, host, mock }: Props) {
             onApply={(members, captions) => {
               setPicker(null);
               act({ type: "setMembers", hierarchy: pickerField.hierarchy, members, captions });
+            }}
+            menu={
+              pickerArea === "rows" || pickerArea === "columns"
+                ? {
+                    measures: fields.data ? fields.data.measures : [],
+                    defaultMeasure:
+                      def.layout.values.length > 0
+                        ? def.layout.values[0].measure
+                        : fields.data && fields.data.measures.length > 0
+                          ? fields.data.measures[0].uniqueName
+                          : "",
+                    onAction: (action) => {
+                      setPicker(null);
+                      act(action);
+                    },
+                  }
+                : undefined
+            }
+          />
+        )}
+
+        {question && question.kind === "numberFormat" && (
+          <NumberFormatDialog
+            caption={question.caption}
+            initial={question.current}
+            onCancel={() => setQuestion(null)}
+            onApply={(format) => {
+              setQuestion(null);
+              act({ type: "setNumberFormat", measure: question.measure, format });
             }}
           />
         )}

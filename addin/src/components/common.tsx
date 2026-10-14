@@ -19,6 +19,7 @@ type IconName =
   | "close"
   | "search"
   | "more"
+  | "sort"
   | "trash";
 
 const PATHS: Record<IconName, ReactNode> = {
@@ -63,6 +64,7 @@ const PATHS: Record<IconName, ReactNode> = {
     </>
   ),
   trash: <path d="M3 4.5h10M6.5 4.5v-2h3v2M4.5 4.5l.5 9h6l.5-9M6.75 7v4M9.25 7v4" />,
+  sort: <path d="M5 3v10M2.5 10.5 5 13l2.5-2.5M11 13V3M8.5 5.5 11 3l2.5 2.5" />,
 };
 
 export function Icon({ name, className }: { name: IconName; className?: string }) {

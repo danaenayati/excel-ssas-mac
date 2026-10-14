@@ -162,7 +162,7 @@ def test_sample_cube_end_to_end(app):
     assert status == 200
     assert set(grid) == {
         "filterRows", "rowFieldCaptions", "colHeaderRows", "rowHeaders", "values",
-        "formatPalette", "cellFormats", "rowKinds", "colKinds", "stats",
+        "formatPalette", "cellFormats", "rowKinds", "colKinds", "colValueIndex", "stats",
     }
     assert grid["rowHeaders"][-1][0]["text"] == "Grand Total"
     assert grid["stats"]["mdx"].startswith("SELECT") and grid["stats"]["elapsedMs"] >= 0

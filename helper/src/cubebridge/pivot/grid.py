@@ -12,7 +12,9 @@ import re
 
 from ..errors import CubeError
 from .formats import GENERAL, to_excel
+from .mdx import show_as_caption
 from .model import AxisMember, CellSet, Layout, PlacedField
+from .names import quote_identifier
 
 DEFAULT_CELL_LIMIT = 300_000
 MAX_SAFE_INT = 2**53
@@ -46,6 +48,16 @@ def build_grid(
     col_header_rows.append(
         [_header(_measure_caption(tup, layout), 0, "measure") for tup in col_tuples]
     )
+
+    # The value field each column shows. Read from the column's own measure member, not
+    # from its position: NON EMPTY can drop single tuple × measure columns.
+    by_name: dict[str, int] = {}
+    for index, value in enumerate(layout.values):
+        name = value.measure if value.show_as == "normal" else "[Measures]." + quote_identifier(show_as_caption(value))
+        by_name.setdefault(name.lower(), index)
+    col_value_index = [
+        by_name.get(tup[-1].unique_name.lower(), -1) if len(tup) > len(layout.columns) else -1 for tup in col_tuples
+    ]
 
     if has_row_axis and layout.rows:
         row_headers, row_kinds = _axis_lines(row_tuples, layout.rows)
@@ -87,6 +99,7 @@ def build_grid(
         "cellFormats": cell_formats,
         "rowKinds": row_kinds,
         "colKinds": col_kinds,
+        "colValueIndex": col_value_index,
         "stats": {"rows": n_rows, "columns": n_cols, "elapsedMs": int(elapsed_ms), "mdx": mdx},
     }
 

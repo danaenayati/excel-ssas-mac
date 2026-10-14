@@ -303,6 +303,13 @@ export interface Grid {
   cellFormats: number[][];
   rowKinds: LineKind[];
   colKinds: LineKind[];
+  /**
+   * C entries: for each column, the index in `layout.values` of the value field it
+   * shows, or -1 when it shows none of them (the cube's default measure). Read this
+   * instead of computing it from the column's position: NON EMPTY can drop single
+   * column-member × measure columns.
+   */
+  colValueIndex: number[];
   stats: {
     rows: number;
     columns: number;

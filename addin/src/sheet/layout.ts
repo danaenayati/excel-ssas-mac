@@ -9,6 +9,7 @@
 //   N rows   R row-header cells | C values
 // All positions in a Block are relative to its top-left cell.
 
+import { isFiltered } from "../state/layout";
 import type { CellValue, Grid, HeaderCell, Layout, MemberRef } from "../types";
 import { chunkRect, runs, type Rect } from "./geometry";
 
@@ -25,6 +26,12 @@ export const INDENT_SPACES = 3;
  * shows it, so the hosts force these cells to text (see `excelValues`).
  */
 export const FILTER_FORMAT = '@" ▾"';
+/**
+ * The same for a row or column field that is filtered (items, label or value filter):
+ * a solid arrow, so a narrowed field stands out as Excel's funnel button does. Page
+ * filters keep the plain arrow; their value cell already says what is chosen.
+ */
+export const FILTERED_FORMAT = '@" ▼"';
 /** What a report with no fields shows at its place on the sheet. */
 export const PLACEHOLDER_TEXT = "Cube report: tick fields in the Cube Explorer panel to build it";
 
@@ -76,14 +83,42 @@ export interface BlockFields {
   rows: number;
   /** Captions of the hierarchies in Columns; header row i belongs to column field i. */
   columns: string[];
+  /** Which row fields are filtered (their caption cell gets the solid arrow). */
+  rowsFiltered?: boolean[];
+  /** Which column fields are filtered. */
+  columnsFiltered?: boolean[];
+  /**
+   * The user's number format for each value field, in Values order; null keeps the
+   * cube's. Applied to every value cell of that field.
+   */
+  valueFormats?: (string | null)[];
 }
 
-export function blockFields(layout: Pick<Layout, "filters" | "rows" | "columns">): BlockFields {
+export function blockFields(
+  layout: Pick<Layout, "filters" | "rows" | "columns"> & { values?: Layout["values"] },
+): BlockFields {
   return {
     filters: layout.filters.length,
     rows: layout.rows.length,
     columns: layout.columns.map((field) => field.caption),
+    rowsFiltered: layout.rows.map(isFiltered),
+    columnsFiltered: layout.columns.map(isFiltered),
+    valueFormats: (layout.values ?? []).map((value) => value.numberFormat || null),
   };
+}
+
+/**
+ * Which value field a value column belongs to, as the helper reported it in
+ * `Grid.colValueIndex`. Null for the cube's default measure, an index out of range, or
+ * a grid without the list.
+ */
+export function valueFieldIndex(
+  colValueIndex: readonly number[] | undefined,
+  col: number,
+  valueFields: number,
+): number | null {
+  const index = colValueIndex ? colValueIndex[col] : undefined;
+  return index !== undefined && index >= 0 && index < valueFields ? index : null;
 }
 
 export interface Block {
@@ -125,8 +160,13 @@ function indentOf(cell: HeaderCell | undefined): number {
   return n > 0 ? n : 0;
 }
 
+/** A filter cell's format, with either arrow. */
+export function isFilterFormat(format: string): boolean {
+  return format === FILTER_FORMAT || format === FILTERED_FORMAT;
+}
+
 export function isTextFormat(format: string): boolean {
-  return format === TEXT_FORMAT || format === FILTER_FORMAT;
+  return format === TEXT_FORMAT || isFilterFormat(format);
 }
 
 export function fieldCellAt(
@@ -185,7 +225,14 @@ export function buildBlock(grid: Grid, fields: BlockFields = { filters: 0, rows:
   const fieldCells = new Map<string, FieldCell>();
   const setFilterCell = (row: number, col: number, cell: FieldCell, arrow: boolean) => {
     fieldCells.set(memberKey(row, col), cell);
-    if (arrow) numberFormats[row][col] = FILTER_FORMAT;
+    if (!arrow) return;
+    const filtered =
+      cell.area === "rows"
+        ? Boolean(fields.rowsFiltered && fields.rowsFiltered[cell.index])
+        : cell.area === "columns"
+          ? Boolean(fields.columnsFiltered && fields.columnsFiltered[cell.index])
+          : false;
+    numberFormats[row][col] = filtered ? FILTERED_FORMAT : FILTER_FORMAT;
   };
 
   // Page filters. The helper answers one row per filter, in order; if it ever did not,
@@ -242,6 +289,11 @@ export function buildBlock(grid: Grid, fields: BlockFields = { filters: 0, rows:
 
   // Data rows: R row-header cells, then C values.
   const palette = grid.formatPalette;
+  const valueFormats = fields.valueFormats ?? [];
+  const override = (c: number): string | null => {
+    const index = valueFieldIndex(grid.colValueIndex, c, valueFormats.length);
+    return index === null ? null : valueFormats[index] ?? null;
+  };
   for (let n = 0; n < N; n++) {
     const row = dataTop + n;
     const headers = grid.rowHeaders[n] ?? [];
@@ -260,7 +312,7 @@ export function buildBlock(grid: Grid, fields: BlockFields = { filters: 0, rows:
       numberFormats[row][R + c] =
         typeof value === "string" && value !== ""
           ? TEXT_FORMAT
-          : palette[formats[c]] ?? GENERAL_FORMAT;
+          : override(c) ?? palette[formats[c]] ?? GENERAL_FORMAT;
     }
   }
   for (let r = 0; r < R; r++) {
@@ -421,7 +473,7 @@ export function excelValues(block: Block, indentWithSpaces: boolean): SheetValue
       const format = block.numberFormats[r][c];
       // A filter cell has a custom format, under which Excel would read "2025" as a
       // number and drop the arrow. The apostrophe makes it text whatever it looks like.
-      if (format === FILTER_FORMAT) return "'" + value;
+      if (isFilterFormat(format)) return "'" + value;
       return format === TEXT_FORMAT ? excelText(value) : value;
     }),
   );
@@ -477,4 +529,54 @@ export function expandedDescendants(headers: GridHeaders, axis: Axis, member: Me
     }
   }
   return Array.from(found);
+}
+
+/**
+ * The members behind a value cell, for Show Details: the member of each row header
+ * cell of its line and of each column header cell above it. Totals have no member and
+ * add nothing; a blanked repeat still stands for its member. `row` and `col` count
+ * data lines and value columns from 0.
+ */
+export function detailsMembers(headers: GridHeaders, row: number, col: number): string[] {
+  const out: string[] = [];
+  const add = (cell: HeaderCell | undefined) => {
+    if (cell && cell.member && out.indexOf(cell.member.uniqueName) < 0) out.push(cell.member.uniqueName);
+  };
+  for (const cell of headers.rowHeaders[row] ?? []) add(cell);
+  for (const line of headers.colHeaderRows) add(line[col]);
+  return out;
+}
+
+/**
+ * The cells of a Show Details sheet: a header row of column names, then the rows. Text
+ * is written as text (so "01" or "Jan 2025" stay as they are), numbers as General.
+ * Rows shorter than the header are padded; longer ones are cut to the header's width.
+ */
+export function detailsCells(
+  columns: string[],
+  rows: CellValue[][],
+): { values: SheetValue[][]; numberFormats: string[][]; cols: number } {
+  const cols = Math.max(1, columns.length);
+  const values: SheetValue[][] = [];
+  const numberFormats: string[][] = [];
+  const header: SheetValue[] = [];
+  const headerFormats: string[] = [];
+  for (let c = 0; c < cols; c++) {
+    header.push(columns[c] ?? "");
+    headerFormats.push(TEXT_FORMAT);
+  }
+  values.push(header);
+  numberFormats.push(headerFormats);
+  for (const row of rows) {
+    const line: SheetValue[] = [];
+    const formats: string[] = [];
+    for (let c = 0; c < cols; c++) {
+      const value = toSheetValue(row[c]);
+      line.push(value);
+      formats.push(typeof value === "string" && value !== "" ? TEXT_FORMAT : GENERAL_FORMAT);
+    }
+    values.push(line);
+    numberFormats.push(formats);
+  }
+  return { values, numberFormats, cols };
 }

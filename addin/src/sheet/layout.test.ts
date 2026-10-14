@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Grid, HeaderCell, HeaderKind, LineKind, MemberRef } from "../types";
 import {
+  FILTERED_FORMAT,
   FILTER_FORMAT,
   GENERAL_FORMAT,
   MAX_CHUNK_CELLS,
@@ -10,6 +11,8 @@ import {
   buildBlock,
   chunkBlock,
   columnHeaderAt,
+  detailsCells,
+  detailsMembers,
   excelText,
   excelValues,
   expandedDescendants,
@@ -19,6 +22,7 @@ import {
   memberAt,
   placeholderBlock,
   sliceMatrix,
+  valueFieldIndex,
   type BlockFields,
 } from "./layout";
 
@@ -104,6 +108,7 @@ function sampleGrid(): Grid {
     cellFormats,
     rowKinds,
     colKinds,
+    colValueIndex: colKinds.map((_, c) => c % 2),
     stats: { rows: rowHeaders.length, columns: colKinds.length, elapsedMs: 12, mdx: "SELECT ..." },
   };
 }
@@ -124,6 +129,7 @@ function plainGrid(R: number, C: number, N: number, H = 1): Grid {
     cellFormats: Array.from({ length: N }, () => new Array<number>(C).fill(0)),
     rowKinds: new Array<LineKind>(N).fill("data"),
     colKinds: new Array<LineKind>(C).fill("data"),
+    colValueIndex: new Array<number>(C).fill(0),
     stats: { rows: N, columns: C, elapsedMs: 1, mdx: "" },
   };
 }
@@ -737,8 +743,15 @@ describe("blockFields", () => {
     });
     expect(
       blockFields({ filters: [field("Years")], rows: [field("A"), field("B")], columns: [field("City")] }),
-    ).toEqual({ filters: 1, rows: 2, columns: ["City"] });
-    expect(blockFields({ filters: [], rows: [], columns: [] })).toEqual({ filters: 0, rows: 0, columns: [] });
+    ).toEqual({
+      filters: 1,
+      rows: 2,
+      columns: ["City"],
+      rowsFiltered: [false, false],
+      columnsFiltered: [false],
+      valueFormats: [],
+    });
+    expect(blockFields({ filters: [], rows: [], columns: [] })).toMatchObject({ filters: 0, rows: 0, columns: [] });
   });
 });
 
@@ -836,5 +849,158 @@ describe("guessing the filter cells from the layout alone", () => {
     expect(guessFieldCell(layout, 1, 0)).toBeNull(); // blank row
     expect(guessFieldCell(layout, 3, 0)).toBeNull(); // first data row
     expect(guessFieldCell(layout, -1, 0)).toBeNull();
+  });
+});
+
+describe("a filtered field's caption cell", () => {
+  it("gets the solid arrow when the row or column field is filtered", () => {
+    const fields: BlockFields = {
+      filters: 2,
+      rows: 1,
+      columns: ["City"],
+      rowsFiltered: [true],
+      columnsFiltered: [false],
+    };
+    const block = buildBlock(sampleGrid(), fields);
+    expect(block.numberFormats[4][0]).toBe(FILTERED_FORMAT); // row field caption
+    expect(block.numberFormats[3][0]).toBe(FILTER_FORMAT); // column field caption
+    const both = buildBlock(sampleGrid(), { ...fields, columnsFiltered: [true] });
+    expect(both.numberFormats[3][0]).toBe(FILTERED_FORMAT);
+  });
+
+  it("keeps the plain arrow on page filters, whose value cell says what is chosen", () => {
+    const block = buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"], rowsFiltered: [true] });
+    expect(block.numberFormats[0][1]).toBe(FILTER_FORMAT);
+  });
+
+  it("is still a filter cell, forced to text, and plain text in the format fallback", () => {
+    const block = buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"], rowsFiltered: [true] });
+    expect(fieldCellAt(block, 4, 0)).toEqual({ area: "rows", index: 0 });
+    expect(excelValues(block, false)[4][0]).toBe("'Calendar");
+    expect(isTextFormat(FILTERED_FORMAT)).toBe(true);
+    expect(FILTERED_FORMAT).not.toBe(FILTER_FORMAT);
+    expect(FILTERED_FORMAT.startsWith("@")).toBe(true);
+  });
+});
+
+describe("which value field a column belongs to", () => {
+  it("is what the helper reported, even after NON EMPTY dropped a column", () => {
+    // (2025, Rides) (2025, Rides %) (2026, Rides %) (Total, Rides) (Total, Rides %)
+    const reported = [0, 1, 1, 0, 1];
+    expect([0, 1, 2, 3, 4].map((c) => valueFieldIndex(reported, c, 2))).toEqual([0, 1, 1, 0, 1]);
+  });
+
+  it("is unknown for the default measure, out of range, or without the list", () => {
+    expect(valueFieldIndex([-1], 0, 0)).toBeNull();
+    expect(valueFieldIndex([0, 1], 2, 2)).toBeNull();
+    expect(valueFieldIndex([0, 1], -1, 2)).toBeNull();
+    expect(valueFieldIndex([3], 0, 2)).toBeNull();
+    expect(valueFieldIndex(undefined, 0, 2)).toBeNull();
+  });
+});
+
+describe("a value field's own number format", () => {
+  // sampleGrid: 6 value columns = 3 column tuples x (Rides, Fare).
+  it("replaces the cube's format in every value cell of that field", () => {
+    const block = buildBlock(sampleGrid(), {
+      filters: 2,
+      rows: 1,
+      columns: ["City"],
+      valueFormats: ["0.0", null],
+    });
+    for (let r = block.shape.dataTop; r < block.rows; r++) {
+      expect(block.numberFormats[r].slice(1)).toEqual(["0.0", "#,##0.00", "0.0", "#,##0.00", "0.0", "#,##0.00"]);
+    }
+  });
+
+  it("applies to the second field too, and to empty cells", () => {
+    const block = buildBlock(sampleGrid(), {
+      filters: 2,
+      rows: 1,
+      columns: ["City"],
+      valueFormats: [null, "$#,##0.00"],
+    });
+    expect(block.numberFormats[5].slice(1)).toEqual(["#,##0", "$#,##0.00", "#,##0", "$#,##0.00", "#,##0", "$#,##0.00"]);
+    expect(block.values[5][4]).toBe(""); // the null value keeps the field's format
+  });
+
+  it("leaves header cells, text values, and grids it cannot map alone", () => {
+    const grid = sampleGrid();
+    grid.values[0][0] = "n/a";
+    const block = buildBlock(grid, { filters: 2, rows: 1, columns: ["City"], valueFormats: ["0.0", "0.0"] });
+    expect(block.numberFormats[5][1]).toBe(TEXT_FORMAT);
+    expect(block.numberFormats[3].every((f) => f === TEXT_FORMAT || f === FILTER_FORMAT)).toBe(true);
+    // Columns the helper could not tie to a value field (the cube's default measure).
+    const grid2 = sampleGrid();
+    grid2.colValueIndex = grid2.colValueIndex.map(() => -1);
+    const unmapped = buildBlock(grid2, { filters: 2, rows: 1, columns: ["City"], valueFormats: ["0", "0"] });
+    expect(unmapped.numberFormats[5][1]).toBe("#,##0");
+  });
+});
+
+describe("the members behind a value cell, for Show Details", () => {
+  const year = ref(CAL, "2025", 1, { hasChildren: true });
+  const q1 = ref(CAL, "Q1", 2);
+  const headers = {
+    rowHeaders: [
+      [member(tehran), member(year)],
+      [blank(tehran), member(q1, 1)],
+      [label("Tehran Total", "subtotal"), label("", "subtotal")],
+      [label("Grand Total", "grandTotal"), label("", "grandTotal")],
+    ],
+    colHeaderRows: [
+      [member(shiraz), blank(shiraz), label("Grand Total", "grandTotal")],
+      [label("Rides", "measure"), label("Fare", "measure"), label("Rides", "measure")],
+    ],
+  };
+
+  it("takes every row member of the line and every column member above", () => {
+    expect(detailsMembers(headers, 0, 0)).toEqual([tehran.uniqueName, year.uniqueName, shiraz.uniqueName]);
+  });
+
+  it("counts a blanked repeat as its member", () => {
+    expect(detailsMembers(headers, 1, 1)).toEqual([tehran.uniqueName, q1.uniqueName, shiraz.uniqueName]);
+  });
+
+  it("skips totals and measure captions", () => {
+    expect(detailsMembers(headers, 2, 0)).toEqual([shiraz.uniqueName]); // subtotal line: no member cells
+    expect(detailsMembers(headers, 0, 2)).toEqual([tehran.uniqueName, year.uniqueName]); // Grand Total column
+    expect(detailsMembers(headers, 3, 2)).toEqual([]); // grand total of everything
+  });
+
+  it("does not repeat a member and copes with positions past the end", () => {
+    const twice = { rowHeaders: [[member(tehran), blank(tehran)]], colHeaderRows: [] };
+    expect(detailsMembers(twice, 0, 0)).toEqual([tehran.uniqueName]);
+    expect(detailsMembers(headers, 9, 9)).toEqual([]);
+  });
+});
+
+describe("the cells of a details sheet", () => {
+  it("is a text header row and the rows, text as text and numbers as General", () => {
+    const out = detailsCells(["Month", "City", "Rides"], [["Jan 2025", "Tehran", 12], ["01", null, 3.5]]);
+    expect(out.cols).toBe(3);
+    expect(out.values).toEqual([
+      ["Month", "City", "Rides"],
+      ["Jan 2025", "Tehran", 12],
+      ["01", "", 3.5],
+    ]);
+    expect(out.numberFormats).toEqual([
+      [TEXT_FORMAT, TEXT_FORMAT, TEXT_FORMAT],
+      [TEXT_FORMAT, TEXT_FORMAT, GENERAL_FORMAT],
+      [TEXT_FORMAT, GENERAL_FORMAT, GENERAL_FORMAT],
+    ]);
+  });
+
+  it("pads short rows and cuts long ones to the header", () => {
+    const out = detailsCells(["A", "B"], [[1], [1, 2, 3]]);
+    expect(out.values.slice(1)).toEqual([
+      [1, ""],
+      [1, 2],
+    ]);
+  });
+
+  it("still has a header row with no rows, and one column with no columns", () => {
+    expect(detailsCells(["A"], []).values).toEqual([["A"]]);
+    expect(detailsCells([], []).cols).toBe(1);
   });
 });

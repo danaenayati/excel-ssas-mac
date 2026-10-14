@@ -3,19 +3,24 @@
 // the same shapes as the real helper, so the pane can be exercised with no helper and
 // no server. The numbers are made up but consistent: totals are real sums, ratios are
 // real ratios, and row/column headers follow the requested layout, including
-// expand/collapse flags, totals, filters and empty-row suppression.
+// expand/collapse flags, totals, filters and empty-row suppression. Sorting, every
+// label and value filter, Show Values As and Show Details are computed for real on the
+// sample facts: a filter the mock cannot apply would be an error, never a no-op.
 
 import type { Api } from "../api";
 import { ApiFailure } from "../apiErrors";
 import type {
   CellValue,
   Connection,
+  DetailsRequest,
+  DetailsResponse,
   Dimension,
   ErrorCategory,
   Fields,
   Grid,
   HeaderCell,
   Hierarchy,
+  LabelFilter,
   Layout,
   LayoutOptions,
   LineKind,
@@ -27,6 +32,8 @@ import type {
   NewConnection,
   PlacedField,
   QueryRequest,
+  ShowValuesAs,
+  ValueFilter,
 } from "../types";
 
 export interface MockOptions {
@@ -418,29 +425,113 @@ class SampleCube {
     return out;
   }
 
-  /** The detail set of one axis field: top level, drilled down where expanded. */
-  private detail(h: Hier, field: PlacedField): Node[] {
+  private measureDef(name: string): MeasureDef {
+    const def = MEASURES.find((m) => m.info.uniqueName === name);
+    if (!def) throw fail("not-found", 404, "This cube has no such measure. It may have been renamed.", name);
+    return def;
+  }
+
+  private findNode(name: string): Node {
+    for (const h of this.hiers.values()) {
+      const node = h.nodes.get(name);
+      if (node) return node;
+    }
+    throw fail("not-found", 404, "That item is no longer in the cube.", name);
+  }
+
+  /** A field's top-level items that its item selection leaves visible. */
+  private topItems(h: Hier, field: PlacedField): Node[] {
     const selected = this.selected(h, field);
+    const top = h.all ? h.all.children : h.top;
+    return top.filter(
+      (n) => selected.length === 0 || selected.some((s) => s === n || isAncestor(n, s) || isAncestor(s, n)),
+    );
+  }
+
+  /**
+   * The top-level items a row or column field keeps after its label and value filters,
+   * or null when it has neither. Values are measured over `facts`.
+   */
+  private kept(h: Hier, field: PlacedField, facts: Fact[]): Set<Node> | null {
+    const label = field.labelFilter;
+    const value = field.valueFilter;
+    if (!label && !value) return null;
+    let items = this.topItems(h, field);
+    if (label) items = items.filter((n) => labelMatches(label, n.caption));
+    if (value) {
+      const def = this.measureDef(value.measure);
+      items = valueFiltered(value, items, (n) => valueOf(def, facts.filter(n.test)));
+    }
+    return new Set(items);
+  }
+
+  /**
+   * The facts a layout looks at: every field's item selection, then the label and value
+   * filters of the row and column fields (so totals count only the items left).
+   */
+  private restricted(layout: Layout): { base: Fact[]; keptRows: (Set<Node> | null)[]; keptCols: (Set<Node> | null)[] } {
+    const restrictions: Node[][] = [];
+    for (const field of [...layout.rows, ...layout.columns, ...layout.filters]) {
+      const selected = this.selected(this.hier(field.hierarchy), field);
+      if (selected.length > 0) restrictions.push(selected);
+    }
+    const selectedFacts = this.facts.filter((f) => restrictions.every((set) => set.some((n) => n.test(f))));
+    const keptRows = layout.rows.map((f) => this.kept(this.hier(f.hierarchy), f, selectedFacts));
+    const keptCols = layout.columns.map((f) => this.kept(this.hier(f.hierarchy), f, selectedFacts));
+    const narrowing = [...keptRows, ...keptCols]
+      .filter((set): set is Set<Node> => set !== null)
+      .map((set) => Array.from(set));
+    const base = selectedFacts.filter((f) => narrowing.every((list) => list.some((n) => n.test(f))));
+    return { base, keptRows, keptCols };
+  }
+
+  /** The detail set of one axis field: top level, drilled down where expanded, in its sort order. */
+  private detail(h: Hier, field: PlacedField, kept: Set<Node> | null, facts: Fact[]): Node[] {
+    const selected = this.selected(h, field);
+    const top = new Set(h.all ? h.all.children : h.top);
     const visible = (n: Node) =>
-      selected.length === 0 || selected.some((s) => s === n || isAncestor(n, s) || isAncestor(s, n));
+      (selected.length === 0 || selected.some((s) => s === n || isAncestor(n, s) || isAncestor(s, n))) &&
+      (kept === null || !top.has(n) || kept.has(n));
+    const sort = field.sort;
+    const order = (nodes: Node[]): Node[] => {
+      if (!sort) return nodes;
+      const sign = sort.order === "asc" ? 1 : -1;
+      if (sort.by === "caption") {
+        return nodes
+          .slice()
+          .sort((a, b) => sign * a.caption.localeCompare(b.caption, "en", { numeric: true, sensitivity: "base" }));
+      }
+      const def = this.measureDef(sort.measure ?? "");
+      const scored = nodes.map((n) => ({ n, v: valueOf(def, facts.filter(n.test)) }));
+      scored.sort((a, b) => {
+        if (a.v === null || b.v === null) return a.v === null ? (b.v === null ? 0 : 1) : -1;
+        return sign * (a.v - b.v);
+      });
+      return scored.map((s) => s.n);
+    };
     const expanded = new Set(field.expanded);
     const out: Node[] = [];
     const walk = (nodes: Node[]) => {
-      for (const n of nodes) {
+      for (const n of order(nodes)) {
         if (!visible(n)) continue;
         out.push(n);
         if (expanded.has(n.uniqueName)) walk(n.children);
       }
     };
-    walk(h.all ? h.all.children : h.top);
+    walk(Array.from(top));
     return out;
   }
 
-  private axis(fields: PlacedField[], options: LayoutOptions): Tuple[] {
+  private axis(
+    fields: PlacedField[],
+    options: LayoutOptions,
+    kept: (Set<Node> | null)[],
+    facts: Fact[],
+  ): Tuple[] {
     const n = fields.length;
     if (n === 0) return [{ nodes: [], totalFrom: 0, kind: "data" }];
     const hiers = fields.map((f) => this.hier(f.hierarchy));
-    const details = fields.map((f, i) => this.detail(hiers[i], f));
+    const details = fields.map((f, i) => this.detail(hiers[i], f, kept[i] ?? null, facts));
 
     const build = (k: number): { nodes: Node[]; totalFrom: number }[] => {
       const out: { nodes: Node[]; totalFrom: number }[] = [];
@@ -514,24 +605,16 @@ class SampleCube {
     const measures =
       layout.values.length > 0
         ? layout.values.map((v) => {
-            const def = MEASURES.find((m) => m.info.uniqueName === v.measure);
-            if (!def) {
-              throw fail("not-found", 404, "This cube has no such measure. It may have been renamed.", v.measure);
-            }
-            return { def, caption: v.caption };
+            const showAs = v.showAs ?? "normal";
+            const label = SHOW_AS_CAPTIONS[showAs];
+            return { def: this.measureDef(v.measure), caption: label ? `${v.caption} (${label})` : v.caption, showAs };
           })
-        : [{ def: MEASURES[0], caption: MEASURES[0].info.caption }];
+        : [{ def: MEASURES[0], caption: MEASURES[0].info.caption, showAs: "normal" as ShowValuesAs }];
 
-    // Every field with selected members restricts the facts, whatever area it is in.
-    const restrictions: Node[][] = [];
-    for (const field of [...layout.rows, ...layout.columns, ...layout.filters]) {
-      const selected = this.selected(this.hier(field.hierarchy), field);
-      if (selected.length > 0) restrictions.push(selected);
-    }
-    const base = this.facts.filter((f) => restrictions.every((set) => set.some((n) => n.test(f))));
+    const { base, keptRows, keptCols } = this.restricted(layout);
 
-    let rowTuples = this.axis(layout.rows, layout.options);
-    let colTuples = this.axis(layout.columns, layout.options);
+    let rowTuples = this.axis(layout.rows, layout.options, keptRows, base);
+    let colTuples = this.axis(layout.columns, layout.options, keptCols, base);
     const cellCount = rowTuples.length * colTuples.length * measures.length;
     if (cellCount > CELL_LIMIT) {
       throw fail(
@@ -560,10 +643,28 @@ class SampleCube {
         .map((line) => line.filter((_, c) => keepCol[c]));
     }
 
+    // "Show Values As": each value over the grand total, its column's total or its row's.
+    const denominators = measures.map((measure) => {
+      if (measure.showAs === "percentOfGrandTotal") {
+        const all = valueOf(measure.def, base);
+        return { at: () => all };
+      }
+      if (measure.showAs === "percentOfColumnTotal") {
+        const byCol = colTuples.map((tuple) => valueOf(measure.def, matches(tuple, base)));
+        return { at: (_r: number, c: number) => byCol[c] };
+      }
+      if (measure.showAs === "percentOfRowTotal") {
+        const byRow = rowTuples.map((tuple) => valueOf(measure.def, matches(tuple, base)));
+        return { at: (r: number) => byRow[r] };
+      }
+      return null;
+    });
+
     const formatPalette = ["General"];
     const formatIndex = measures.map((m) => {
-      let index = formatPalette.indexOf(m.def.format);
-      if (index < 0) index = formatPalette.push(m.def.format) - 1;
+      const format = m.showAs === "normal" ? m.def.format : "0.00%";
+      let index = formatPalette.indexOf(format);
+      if (index < 0) index = formatPalette.push(format) - 1;
       return index;
     });
 
@@ -571,8 +672,10 @@ class SampleCube {
     const colHeaderRows: HeaderCell[][] = layout.columns.map(() => []);
     const measureRow: HeaderCell[] = [];
     const colKinds: LineKind[] = [];
+    const colValueIndex: number[] = [];
     colTuples.forEach((tuple, c) => {
       measures.forEach((measure, m) => {
+        colValueIndex.push(layout.values.length > 0 ? m : -1);
         const previous = m > 0 ? tuple : c > 0 ? colTuples[c - 1] : null;
         layout.columns.forEach((_, r) => {
           colHeaderRows[r].push(this.headerCell(tuple, r, previous, layout.columns, colHiers));
@@ -596,12 +699,19 @@ class SampleCube {
 
     const values: CellValue[][] = [];
     const cellFormats: number[][] = [];
-    totals.forEach((line) => {
+    totals.forEach((line, r) => {
       const out: CellValue[] = [];
       const formats: number[] = [];
-      line.forEach((t) => {
+      line.forEach((t, c) => {
         measures.forEach((measure, m) => {
-          out.push(t.count > 0 ? measure.def.compute(t) : null);
+          const raw = t.count > 0 ? measure.def.compute(t) : null;
+          const share = denominators[m];
+          if (share && raw !== null) {
+            const total = share.at(r, c);
+            out.push(total ? raw / total : null);
+          } else {
+            out.push(raw);
+          }
           formats.push(formatIndex[m]);
         });
       });
@@ -631,6 +741,7 @@ class SampleCube {
       cellFormats,
       rowKinds,
       colKinds,
+      colValueIndex,
       stats: {
         rows: rowHeaders.length,
         columns: colKinds.length,
@@ -638,6 +749,137 @@ class SampleCube {
         mdx: sampleMdx(layout),
       },
     };
+  }
+
+  /** The fact rows behind one value cell, as Show Details on a PivotTable returns them. */
+  details(request: DetailsRequest): DetailsResponse {
+    const layout = request.layout;
+    const def = this.measureDef(request.measure);
+    const nodes = request.members.map((name) => this.findNode(name));
+    // As the helper does: a field filtered to several items must be pinned to one of
+    // them by the cell itself, or there is no single slice of facts to show.
+    for (const field of [...layout.rows, ...layout.columns, ...layout.filters]) {
+      if (field.members.length < 2) continue;
+      const h = this.hier(field.hierarchy);
+      if (nodes.some((n) => h.nodes.get(n.uniqueName) === n)) continue;
+      throw fail(
+        "bad-request",
+        400,
+        `Show Details is not available here because '${field.caption}' is filtered to several items. ` +
+          "Filter it to one item, or select a cell that belongs to one of them.",
+      );
+    }
+    const { base } = this.restricted(layout);
+    const rows = base.filter((f) => nodes.every((n) => n.test(f)));
+    const max = Math.min(100000, Math.max(1, Math.floor(request.maxRows ?? 1000)));
+    return {
+      columns: ["Month", "Province", "City", "Service Type", "Segment", "Driver", def.info.caption],
+      rows: rows.slice(0, max).map((f) => [
+        `${MONTH_NAMES[f.month % 12]} ${YEARS[Math.floor(f.month / 12)]}`,
+        PROVINCES[CITIES[f.city].province].name,
+        CITIES[f.city].name,
+        SERVICES[f.service],
+        SEGMENTS[f.segment],
+        "Driver " + String(f.driver + 1).padStart(4, "0"),
+        def.compute(totalsOf([f])),
+      ]),
+      truncated: rows.length > max,
+    };
+  }
+}
+
+const SHOW_AS_CAPTIONS: Record<ShowValuesAs, string | null> = {
+  normal: null,
+  percentOfGrandTotal: "% of Grand Total",
+  percentOfColumnTotal: "% of Column Total",
+  percentOfRowTotal: "% of Row Total",
+};
+
+function valueOf(def: MeasureDef, facts: Fact[]): number | null {
+  const t = totalsOf(facts);
+  return t.count > 0 ? def.compute(t) : null;
+}
+
+/** Labels compare without regard to case, as the contract says. */
+export function labelMatches(filter: LabelFilter, caption: string): boolean {
+  const c = caption.toLowerCase();
+  const v = filter.value.toLowerCase();
+  const v2 = (filter.value2 ?? "").toLowerCase();
+  switch (filter.operator) {
+    case "equals":
+      return c === v;
+    case "notEquals":
+      return c !== v;
+    case "beginsWith":
+      return c.indexOf(v) === 0;
+    case "notBeginsWith":
+      return c.indexOf(v) !== 0;
+    case "endsWith":
+      return c.length >= v.length && c.slice(c.length - v.length) === v;
+    case "notEndsWith":
+      return !(c.length >= v.length && c.slice(c.length - v.length) === v);
+    case "contains":
+      return c.indexOf(v) >= 0;
+    case "notContains":
+      return c.indexOf(v) < 0;
+    case "greaterThan":
+      return c > v;
+    case "greaterOrEqual":
+      return c >= v;
+    case "lessThan":
+      return c < v;
+    case "lessOrEqual":
+      return c <= v;
+    case "between":
+      return c >= v && c <= v2;
+    case "notBetween":
+      return !(c >= v && c <= v2);
+  }
+}
+
+/** The items a value filter keeps. Items with no value are never kept. */
+export function valueFiltered<T>(filter: ValueFilter, items: T[], value: (item: T) => number | null): T[] {
+  const scored = items
+    .map((item) => ({ item, v: value(item) }))
+    .filter((s): s is { item: T; v: number } => s.v !== null);
+  const same = (a: number, b: number) => Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(b));
+  const x = filter.value;
+  const y = filter.value2 ?? filter.value;
+  switch (filter.operator) {
+    case "equals":
+      return scored.filter((s) => same(s.v, x)).map((s) => s.item);
+    case "notEquals":
+      return scored.filter((s) => !same(s.v, x)).map((s) => s.item);
+    case "greaterThan":
+      return scored.filter((s) => s.v > x).map((s) => s.item);
+    case "greaterOrEqual":
+      return scored.filter((s) => s.v >= x).map((s) => s.item);
+    case "lessThan":
+      return scored.filter((s) => s.v < x).map((s) => s.item);
+    case "lessOrEqual":
+      return scored.filter((s) => s.v <= x).map((s) => s.item);
+    case "between":
+      return scored.filter((s) => s.v >= x && s.v <= y).map((s) => s.item);
+    case "notBetween":
+      return scored.filter((s) => s.v < x || s.v > y).map((s) => s.item);
+    case "top":
+    case "bottom": {
+      const ranked = scored.slice().sort((a, b) => (filter.operator === "top" ? b.v - a.v : a.v - b.v));
+      const by = filter.topBy ?? "items";
+      if (by === "items") return ranked.slice(0, Math.max(0, Math.floor(x))).map((s) => s.item);
+      // Percent: the fewest items whose values make up that share of the total.
+      // Sum: the fewest items whose values add up to it.
+      const total = ranked.reduce((sum, s) => sum + s.v, 0);
+      const target = by === "percent" ? (total * x) / 100 : x;
+      const out: T[] = [];
+      let running = 0;
+      for (const s of ranked) {
+        if (out.length > 0 && running >= target) break;
+        out.push(s.item);
+        running += s.v;
+      }
+      return out;
+    }
   }
 }
 
@@ -845,6 +1087,13 @@ export function createMockApi(options: MockOptions = {}): Api {
           delay(options.slow ? 4000 : 220),
         );
       });
+    },
+
+    async details(connectionId, request) {
+      await wait(300);
+      need(connectionId);
+      needCube(request.catalog, request.cube);
+      return cube.details(request);
     },
 
     async cancel(connectionId) {

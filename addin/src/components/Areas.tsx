@@ -1,8 +1,10 @@
 // The four areas (Filters, Columns, Rows, Values) and the chips in them.
 //
 // A chip in Rows, Columns or Values is a button that opens a menu: move to another
-// area, move up or down, filter members, remove. A small funnel marks a field whose
-// members are restricted.
+// area, move up or down, sort and filter, remove; for a value field also Show Values
+// As and Number Format. A small funnel marks a field that is filtered in any way
+// (items, label filter, value filter), arrows a field with its own sort order, and "%"
+// a value shown as a percentage.
 //
 // A chip in Filters says what it is filtering by ("Years: 2025") and opens the member
 // picker when clicked, because choosing members is what a filter is for; its menu is
@@ -12,16 +14,18 @@
 // depends on it.
 
 import { useState, type DragEvent } from "react";
+import { NUMBER_FORMAT_CHOICES, SHOW_AS_CHOICES, isListedFormat } from "../state/fieldMenu";
 import {
   AREA_LABELS,
   FIELD_AREAS,
+  isFiltered,
   locate,
   selectionSummary,
   type Area,
   type FieldArea,
   type LayoutAction,
 } from "../state/layout";
-import type { Layout, PlacedField } from "../types";
+import type { Layout, PlacedField, ValueField } from "../types";
 import { cx } from "../util";
 import { Icon } from "./common";
 import { dragged, endDrag, startDrag } from "./drag";
@@ -30,26 +34,29 @@ import { Menu, type MenuEntry } from "./Menu";
 interface Props {
   layout: Layout;
   dispatch: (action: LayoutAction) => void;
-  /** Open the member picker for a placed hierarchy. */
+  /** Open the sort and filter panel (or, for a page filter, the member picker). */
   onFilter: (hierarchy: string) => void;
+  /** Ask for a custom number format for a value field. */
+  onCustomFormat: (measure: string) => void;
 }
 
 interface ChipInfo {
   name: string;
   caption: string;
   field: PlacedField | null;
+  value: ValueField | null;
 }
 
 const ORDER: Area[] = ["filters", "columns", "rows", "values"];
 
 function chipsOf(layout: Layout, area: Area): ChipInfo[] {
   if (area === "values") {
-    return layout.values.map((v) => ({ name: v.measure, caption: v.caption, field: null }));
+    return layout.values.map((v) => ({ name: v.measure, caption: v.caption, field: null, value: v }));
   }
-  return layout[area].map((f) => ({ name: f.hierarchy, caption: f.caption, field: f }));
+  return layout[area].map((f) => ({ name: f.hierarchy, caption: f.caption, field: f, value: null }));
 }
 
-export function Areas({ layout, dispatch, onFilter }: Props) {
+export function Areas({ layout, dispatch, onFilter, onCustomFormat }: Props) {
   const [menu, setMenu] = useState<{ area: Area; name: string; anchor: HTMLElement } | null>(null);
   const [hover, setHover] = useState<{ area: Area; index: number | null } | null>(null);
 
@@ -118,13 +125,44 @@ export function Areas({ layout, dispatch, onFilter }: Props) {
           run: () => dispatch({ type: "move", name, area: target }),
         });
       }
-      items.push("separator", { label: "Filter members…", run: () => onFilter(name) });
-      if (chip.field && chip.field.members.length > 0) {
-        items.push({
-          label: "Clear filter",
-          run: () => dispatch({ type: "setMembers", hierarchy: name, members: [], captions: [] }),
-        });
+      items.push("separator", {
+        label: area === "filters" ? "Filter members…" : "Sort and Filter…",
+        run: () => onFilter(name),
+      });
+      if (chip.field && isFiltered(chip.field)) {
+        items.push({ label: "Clear Filter", run: () => dispatch({ type: "clearFilters", hierarchy: name }) });
       }
+    } else if (chip.value) {
+      const value = chip.value;
+      const showAs = value.showAs ?? "normal";
+      const format = value.numberFormat ?? null;
+      items.push(
+        "separator",
+        {
+          label: "Show Values As",
+          submenu: SHOW_AS_CHOICES.map((choice) => ({
+            label: choice.label,
+            checked: choice.showAs === showAs,
+            run: () => dispatch({ type: "setShowAs", measure: name, showAs: choice.showAs }),
+          })),
+        },
+        {
+          label: "Number Format",
+          submenu: [
+            ...NUMBER_FORMAT_CHOICES.map((choice) => ({
+              label: choice.label,
+              checked: choice.format === format,
+              run: () => dispatch({ type: "setNumberFormat", measure: name, format: choice.format }),
+            })),
+            "separator" as const,
+            {
+              label: isListedFormat(format) ? "Custom…" : `Custom: ${format}`,
+              checked: !isListedFormat(format),
+              run: () => onCustomFormat(name),
+            },
+          ],
+        },
+      );
     }
     items.push("separator", {
       label: "Remove",
@@ -155,8 +193,18 @@ export function Areas({ layout, dispatch, onFilter }: Props) {
             <ul className="chips" aria-labelledby={`area-${area}`}>
               {chips.map((chip, index) => {
                 const field = chip.field;
-                const restricted = field !== null && field.members.length > 0;
-                const detail = restricted ? `${chip.caption}: ${field.memberCaptions.join(", ")}` : chip.caption;
+                const restricted = field !== null && isFiltered(field);
+                const sorted = field !== null && Boolean(field.sort);
+                const percent = chip.value !== null && (chip.value.showAs ?? "normal") !== "normal";
+                const marks = [
+                  field && field.members.length > 0 ? `items: ${field.memberCaptions.join(", ")}` : "",
+                  field && field.labelFilter ? "label filter" : "",
+                  field && field.valueFilter ? "value filter" : "",
+                  sorted ? "sorted" : "",
+                  percent ? SHOW_AS_CHOICES.find((c) => c.showAs === chip.value?.showAs)?.label ?? "" : "",
+                  chip.value && chip.value.numberFormat ? `format ${chip.value.numberFormat}` : "",
+                ].filter((text) => text !== "");
+                const detail = marks.length > 0 ? `${chip.caption} (${marks.join("; ")})` : chip.caption;
                 const open = menu !== null && menu.area === area && menu.name === chip.name;
                 const pageFilter = area === "filters" && field !== null;
                 return (
@@ -219,13 +267,20 @@ export function Areas({ layout, dispatch, onFilter }: Props) {
                         className={cx("chip-button", open && "open")}
                         aria-haspopup="menu"
                         aria-expanded={open}
-                        aria-label={restricted ? `${chip.caption}, filtered` : chip.caption}
+                        aria-label={
+                          chip.caption +
+                          (restricted ? ", filtered" : "") +
+                          (sorted ? ", sorted" : "") +
+                          (percent ? ", shown as a percentage" : "")
+                        }
                         title={detail}
                         onClick={(event) =>
                           setMenu(open ? null : { area, name: chip.name, anchor: event.currentTarget })
                         }
                       >
                         <span className="chip-caption">{chip.caption}</span>
+                        {percent && <span className="chip-mark">%</span>}
+                        {sorted && <Icon name="sort" className="chip-funnel" />}
                         {restricted && <Icon name="funnel" className="chip-funnel" />}
                         <Icon name="chevron-down" className="chip-caret" />
                       </button>

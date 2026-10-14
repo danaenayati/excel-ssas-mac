@@ -2,7 +2,16 @@
 // object when it changes nothing, so callers can tell "no change" by identity and
 // skip a re-query.
 
-import type { Layout, LayoutOptions, PlacedField, ValueField } from "../types";
+import type {
+  FieldSort,
+  LabelFilter,
+  Layout,
+  LayoutOptions,
+  PlacedField,
+  ShowValuesAs,
+  ValueField,
+  ValueFilter,
+} from "../types";
 
 /** Areas that hold hierarchies. */
 export type FieldArea = "rows" | "columns" | "filters";
@@ -46,6 +55,15 @@ export type LayoutAction =
   | { type: "expand"; hierarchy: string; member: string }
   | { type: "collapse"; hierarchy: string; member: string; descendants?: string[] }
   | { type: "setOption"; option: keyof LayoutOptions; value: boolean }
+  /** Order of a field's items; null for the cube's own order. */
+  | { type: "setSort"; hierarchy: string; sort: FieldSort | null }
+  | { type: "setLabelFilter"; hierarchy: string; filter: LabelFilter | null }
+  | { type: "setValueFilter"; hierarchy: string; filter: ValueFilter | null }
+  /** "Clear Filter From <field>": items, label filter and value filter. Not the sort. */
+  | { type: "clearFilters"; hierarchy: string }
+  | { type: "setShowAs"; measure: string; showAs: ShowValuesAs }
+  /** A value field's number format; null for the cube's own. */
+  | { type: "setNumberFormat"; measure: string; format: string | null }
   | { type: "replace"; layout: Layout };
 
 export const DEFAULT_OPTIONS: LayoutOptions = {
@@ -73,6 +91,11 @@ export function filterValueText(field: PlacedField): string {
   if (field.members.length === 0) return noRestrictionLabel(field);
   if (field.members.length === 1) return field.memberCaptions[0] ?? field.members[0];
   return "(Multiple Items)";
+}
+
+/** Any of the three ways to narrow a field is in use: items, label filter, value filter. */
+export function isFiltered(field: PlacedField): boolean {
+  return field.members.length > 0 || Boolean(field.labelFilter) || Boolean(field.valueFilter);
 }
 
 /** The same selection for a chip: "All", "2025", "3 selected". */
@@ -131,6 +154,33 @@ function updateField(
   const next = list.slice();
   next[place.index] = after;
   return { ...layout, [place.area]: next };
+}
+
+function sameJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+}
+
+/**
+ * A copy of `item` with `key` set to `value`, or without `key` when `value` means
+ * "the default" (null). Optional settings are left out rather than stored as null, so
+ * a layout stays as small as before for fields that do not use them.
+ */
+function withOptional<T extends object, K extends keyof T>(item: T, key: K, value: T[K] | null): T {
+  const next = { ...item };
+  if (value === null || value === undefined) delete next[key];
+  else next[key] = value;
+  return next;
+}
+
+function updateValue(layout: Layout, measure: string, change: (field: ValueField) => ValueField): Layout {
+  const index = layout.values.findIndex((v) => v.measure === measure);
+  if (index < 0) return layout;
+  const before = layout.values[index];
+  const after = change(before);
+  if (after === before) return layout;
+  const values = layout.values.slice();
+  values[index] = after;
+  return { ...layout, values };
 }
 
 function moveTo(layout: Layout, name: string, area: Area, index: number | undefined): Layout {
@@ -237,6 +287,46 @@ export function layoutReducer(layout: Layout, action: LayoutAction): Layout {
     case "setOption":
       if (layout.options[action.option] === action.value) return layout;
       return { ...layout, options: { ...layout.options, [action.option]: action.value } };
+
+    case "setSort":
+      return updateField(layout, action.hierarchy, (field) =>
+        sameJson(field.sort, action.sort) ? field : withOptional(field, "sort", action.sort),
+      );
+
+    case "setLabelFilter":
+      return updateField(layout, action.hierarchy, (field) =>
+        sameJson(field.labelFilter, action.filter)
+          ? field
+          : withOptional(field, "labelFilter", action.filter),
+      );
+
+    case "setValueFilter":
+      return updateField(layout, action.hierarchy, (field) =>
+        sameJson(field.valueFilter, action.filter)
+          ? field
+          : withOptional(field, "valueFilter", action.filter),
+      );
+
+    case "clearFilters":
+      return updateField(layout, action.hierarchy, (field) => {
+        if (!isFiltered(field)) return field;
+        const cleared = withOptional(withOptional(field, "labelFilter", null), "valueFilter", null);
+        return { ...cleared, members: [], memberCaptions: [] };
+      });
+
+    case "setShowAs":
+      return updateValue(layout, action.measure, (field) => {
+        const current = field.showAs ?? "normal";
+        if (current === action.showAs) return field;
+        return withOptional(field, "showAs", action.showAs === "normal" ? null : action.showAs);
+      });
+
+    case "setNumberFormat":
+      return updateValue(layout, action.measure, (field) => {
+        const format = action.format === "" ? null : action.format;
+        if ((field.numberFormat ?? null) === format) return field;
+        return withOptional(field, "numberFormat", format);
+      });
 
     case "replace":
       return action.layout;

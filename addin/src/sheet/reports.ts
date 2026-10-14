@@ -30,7 +30,9 @@ import {
   runExcel,
   supportsExcelApi,
   writeBlock,
+  writeDetailsSheet,
 } from "./writer";
+import type { CellValue } from "../types";
 
 /** Document setting that makes Excel reopen the pane together with the workbook. */
 const AUTO_SHOW = "Office.AutoShowTaskpaneWithDocument";
@@ -415,6 +417,27 @@ export class ExcelHost implements SheetHost {
       // Calls on a null object are no-ops, so these delete only what exists.
       context.workbook.settings.getItemOrNullObject(settingKey(reportId)).delete();
       context.workbook.names.getItemOrNullObject(reportName(reportId)).delete();
+      await context.sync();
+    });
+  }
+
+  addDetailsSheet(columns: string[], rows: CellValue[][]): Promise<string> {
+    return runExcel((context) => writeDetailsSheet(context, columns, rows));
+  }
+
+  getFlag(name: string): Promise<boolean> {
+    return runExcel(async (context) => {
+      const setting = context.workbook.settings.getItemOrNullObject(name);
+      setting.load("value");
+      await context.sync();
+      return !setting.isNullObject && (setting.value === true || setting.value === "true");
+    });
+  }
+
+  setFlag(name: string, on: boolean): Promise<void> {
+    return runExcel(async (context) => {
+      if (on) context.workbook.settings.add(name, true);
+      else context.workbook.settings.getItemOrNullObject(name).delete();
       await context.sync();
     });
   }

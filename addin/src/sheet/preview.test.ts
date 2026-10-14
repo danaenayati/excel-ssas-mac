@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { SheetClick } from "./host";
+import { REFRESH_ON_OPEN, detailsSheetName, type SheetClick } from "./host";
 import { FILTER_FORMAT, buildBlock, placeholderBlock } from "./layout";
 import { PreviewHost, formatForPreview } from "./preview";
 import type { Grid } from "../types";
@@ -19,6 +19,7 @@ function grid(): Grid {
     cellFormats: [[0], [0]],
     rowKinds: ["data", "data"],
     colKinds: ["data"],
+    colValueIndex: [0],
     stats: { rows: 2, columns: 1, elapsedMs: 1, mdx: "" },
   };
 }
@@ -153,5 +154,64 @@ describe("deleting the sheet", () => {
     host.deleteSheet();
     await settle();
     expect(clicksSeen).toEqual([]);
+  });
+});
+
+describe("Show Details sheets", () => {
+  it("are named Details, Details 2, … whatever the case of existing names", () => {
+    expect(detailsSheetName(["Sheet1"])).toBe("Details");
+    expect(detailsSheetName(["Sheet1", "Details"])).toBe("Details 2");
+    expect(detailsSheetName(["details", "DETAILS 2", "Details 4"])).toBe("Details 3");
+  });
+
+  it("adds a sheet with a bold header and the rows, frozen at the top, and makes it active", async () => {
+    const seen: string[] = [];
+    host.onSelectionChanged((selection) => seen.push(selection.cell.sheetName));
+    const name = await host.addDetailsSheet(["City", "Rides"], [["Tehran", 12], ["01", null]]);
+    expect(name).toBe("Details");
+    const snap = host.snapshot();
+    expect(snap.sheetName).toBe("Details");
+    expect(snap.sheets.map((s) => s.name)).toEqual(["Sheet1", "Details"]);
+    expect(snap.cells.get("0,0")).toMatchObject({ value: "City", bold: true });
+    expect(snap.cells.get("1,1")).toMatchObject({ value: 12, format: "General" });
+    expect(snap.cells.get("2,0")).toMatchObject({ value: "01", format: "@" });
+    expect(snap.cells.has("2,1")).toBe(false);
+    expect(host.frozenRows()).toBe(1);
+    expect(seen).toEqual(["Details"]);
+    expect(await host.addDetailsSheet(["A"], [])).toBe("Details 2");
+  });
+
+  it("leaves the report sheet and its reports as they were, and switches back", async () => {
+    await host.writeReport("r1", { ...SHEET, row: 0, col: 0 }, buildBlock(grid(), fields));
+    await host.addDetailsSheet(["A"], [[1]]);
+    expect((await host.getSelection()).report).toBeNull();
+    expect(await host.getReportExtent("r1")).toMatchObject({ sheetName: "Sheet1", rows: 5 });
+    host.activate("preview-sheet-1");
+    expect(host.snapshot().sheetName).toBe("Sheet1");
+    expect(host.snapshot().cells.get("0,0")?.value).toBe("Year");
+    expect(host.frozenRows()).toBe(0);
+  });
+
+  it("deleting a details sheet leaves the report sheet alone", async () => {
+    await host.writeReport("r1", { ...SHEET, row: 0, col: 0 }, buildBlock(grid(), fields));
+    await host.addDetailsSheet(["A"], [[1]]);
+    host.deleteSheet();
+    expect(host.snapshot().sheets.map((s) => s.name)).toEqual(["Sheet1"]);
+    expect(await host.getReportExtent("r1")).not.toBeNull();
+  });
+});
+
+describe("workbook flags", () => {
+  it("are off until set, and can be turned off again", async () => {
+    expect(await host.getFlag(REFRESH_ON_OPEN)).toBe(false);
+    await host.setFlag(REFRESH_ON_OPEN, true);
+    expect(await host.getFlag(REFRESH_ON_OPEN)).toBe(true);
+    await host.setFlag(REFRESH_ON_OPEN, false);
+    expect(await host.getFlag(REFRESH_ON_OPEN)).toBe(false);
+  });
+
+  it("are not taken for report definitions", async () => {
+    await host.setFlag(REFRESH_ON_OPEN, true);
+    expect(await host.loadReports()).toEqual([]);
   });
 });

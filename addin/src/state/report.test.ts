@@ -229,3 +229,87 @@ describe("what the place button does", () => {
     expect(placeLabel(extent)).toBe("New report here");
   });
 });
+
+describe("reading sorts, filters, show-as and formats back", () => {
+  const base = {
+    hierarchy: "[A].[B]",
+    caption: "B",
+    allMember: "[A].[B].[All]",
+    expanded: [],
+    members: [],
+    memberCaptions: [],
+  };
+
+  it("round-trips every new setting", () => {
+    const def = newReportDef("demo", "Sample", "Rides");
+    def.layout.rows.push({
+      ...base,
+      sort: { by: "measure", measure: "[Measures].[X]", order: "desc" },
+      labelFilter: { operator: "between", value: "a", value2: "m" },
+      valueFilter: { operator: "top", measure: "[Measures].[X]", value: 10, topBy: "percent" },
+    });
+    def.layout.values.push({ measure: "[Measures].[X]", caption: "X", showAs: "percentOfColumnTotal", numberFormat: "0.0%" });
+    expect(parseReportDef(serializeReportDef(def), def.id)).toEqual(def);
+  });
+
+  it("drops settings it cannot read instead of guessing", () => {
+    const def = parseReportDef(
+      JSON.stringify({
+        id: "abc",
+        layout: {
+          rows: [
+            {
+              ...base,
+              sort: { by: "measure", order: "asc" }, // no measure
+              labelFilter: { operator: "between", value: "a" }, // no upper bound
+              valueFilter: { operator: "greaterThan", measure: "[M]", value: "5" }, // not a number
+            },
+            { ...base, hierarchy: "[A].[C]", sort: { by: "caption", order: "sideways" }, labelFilter: { operator: "like", value: "x" } },
+          ],
+          values: [
+            { measure: "[M]", showAs: "percentOfEverything", numberFormat: "" },
+            { measure: "[N]", numberFormat: "x".repeat(101) },
+          ],
+        },
+      }),
+    )!;
+    for (const field of def.layout.rows) {
+      expect("sort" in field).toBe(false);
+      expect("labelFilter" in field).toBe(false);
+      expect("valueFilter" in field).toBe(false);
+    }
+    expect(def.layout.values).toEqual([
+      { measure: "[M]", caption: "[M]" },
+      { measure: "[N]", caption: "[N]" },
+    ]);
+  });
+
+  it("gives a top filter its default unit and drops a stray upper bound", () => {
+    const def = parseReportDef(
+      JSON.stringify({
+        id: "abc",
+        layout: { rows: [{ ...base, valueFilter: { operator: "bottom", measure: "[M]", value: 3, value2: 9 } }] },
+      }),
+    )!;
+    expect(def.layout.rows[0].valueFilter).toEqual({ operator: "bottom", measure: "[M]", value: 3, topBy: "items" });
+  });
+
+  it("keeps the same measure twice when it is shown two ways, but not an exact repeat", () => {
+    const def = parseReportDef(
+      JSON.stringify({
+        id: "abc",
+        layout: {
+          values: [
+            { measure: "[M]", caption: "M" },
+            { measure: "[M]", caption: "M", showAs: "percentOfGrandTotal" },
+            { measure: "[M]", caption: "M" },
+          ],
+        },
+      }),
+    )!;
+    expect(def.layout.values).toEqual([
+      { measure: "[M]", caption: "M" },
+      { measure: "[M]", caption: "M", showAs: "percentOfGrandTotal" },
+    ]);
+  });
+});

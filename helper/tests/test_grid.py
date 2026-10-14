@@ -273,3 +273,34 @@ def test_unselected_filter_without_an_all_member_is_not_labelled_all():
         {"caption": "Scenario", "value": "(Default)"},
         {"caption": "Calendar", "value": "All"},
     ]
+
+
+# -- which value field each column shows ---------------------------------------------
+def test_col_value_index_names_the_value_field_of_every_column_even_when_some_drop():
+    y25, y26 = m(DATE, 2025, "2025"), m(DATE, 2026, "2026")
+    pct = AxisMember("[Measures].[Rides (% of Grand Total)]", "Rides (% of Grand Total)", "[Measures]", 0, 0)
+    cols = [
+        (y25, measure("Rides")),
+        (y25, pct),
+        # NON EMPTY dropped (2026, Rides): the remaining columns no longer alternate
+        (y26, pct),
+        (all_(DATE), measure("Rides")),
+        (all_(DATE), pct),
+    ]
+    cs = CellSet(axes=[cols, [(m(CITY, 1, "Tehran"),)]], cells={})
+    lay = Layout.from_json(
+        {
+            "rows": [field(CITY, "City")],
+            "columns": [field(DATE, "Calendar")],
+            "values": [
+                {"measure": "[Measures].[Rides]", "caption": "Rides"},
+                {"measure": "[Measures].[Rides]", "caption": "Rides", "showAs": "percentOfGrandTotal"},
+            ],
+        }
+    )
+    assert build_grid(cs, lay)["colValueIndex"] == [0, 1, 1, 0, 1]
+
+
+def test_col_value_index_is_minus_one_for_the_default_measure():
+    cs = CellSet(axes=[[(measure("Rides"),)]], cells=cells(1))
+    assert build_grid(cs, layout(values=()))["colValueIndex"] == [-1]

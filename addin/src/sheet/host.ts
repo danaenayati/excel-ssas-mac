@@ -3,7 +3,7 @@
 // used when the pane is opened in an ordinary browser. The host is chosen once at
 // startup from the result of `Office.onReady()`.
 
-import type { Layout } from "../types";
+import type { CellValue, Layout } from "../types";
 import { cellA1 } from "./geometry";
 import type { Block } from "./layout";
 
@@ -100,6 +100,29 @@ export interface SheetHost {
 
   /** Forgets the definition and the name. Cells are left as they are. */
   deleteReport(reportId: string): Promise<void>;
+
+  /**
+   * Show Details: add a sheet named "Details" (or "Details 2", "Details 3", …) holding a
+   * bold header row and the rows, with the top row frozen where Excel allows it, and
+   * make it the active sheet. Resolves with the new sheet's name.
+   */
+  addDetailsSheet(columns: string[], rows: CellValue[][]): Promise<string>;
+
+  /** A workbook setting that is on or off, such as `cube.refreshOnOpen`. Off when absent. */
+  getFlag(key: string): Promise<boolean>;
+  setFlag(key: string, on: boolean): Promise<void>;
+}
+
+/** Workbook setting: refresh every report when the workbook is opened. */
+export const REFRESH_ON_OPEN = "cube.refreshOnOpen";
+
+/** "Details", then "Details 2", "Details 3", … : the first name no sheet has (case aside). */
+export function detailsSheetName(existing: string[]): string {
+  const taken = new Set(existing.map((name) => name.toLowerCase()));
+  if (!taken.has("details")) return "Details";
+  let n = 2;
+  while (taken.has(`details ${n}`)) n++;
+  return `Details ${n}`;
 }
 
 /** A sheet operation failed. `message` is plain language; `detail` is the raw error. */

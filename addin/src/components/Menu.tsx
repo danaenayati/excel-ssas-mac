@@ -1,5 +1,7 @@
 // A small pop-up menu anchored to a button. Used for the chip menus and the report
-// menu: the click path that drag-and-drop is only a shortcut for.
+// menu: the click path that drag-and-drop is only a shortcut for. An entry with a
+// submenu ("Show Values As ▸") opens it in place of the menu, with a way back: in a
+// pane 320 px wide there is no room to fly out sideways.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -7,6 +9,7 @@ import { cx } from "../util";
 
 export type MenuEntry =
   | { label: string; run: () => void; disabled?: boolean; danger?: boolean; checked?: boolean }
+  | { label: string; submenu: MenuEntry[]; disabled?: boolean }
   | "separator";
 
 interface MenuProps {
@@ -19,9 +22,12 @@ interface MenuProps {
 
 const MARGIN = 6;
 
-export function Menu({ anchor, items, onClose, label }: MenuProps) {
+export function Menu({ anchor, items: topItems, onClose, label }: MenuProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+  /** The submenu shown instead of the top level, if any. */
+  const [open, setOpen] = useState<{ label: string; items: MenuEntry[] } | null>(null);
+  const items = open ? open.items : topItems;
 
   // Place it under the anchor, inside the pane; above when there is no room below.
   useLayoutEffect(() => {
@@ -44,7 +50,7 @@ export function Menu({ anchor, items, onClose, label }: MenuProps) {
   useEffect(() => {
     const first = ref.current?.querySelector<HTMLButtonElement>("button:not(:disabled)");
     if (first) first.focus();
-  }, [position === null]);
+  }, [position === null, open]);
 
   useEffect(() => {
     const outside = (event: Event) => {
@@ -84,7 +90,10 @@ export function Menu({ anchor, items, onClose, label }: MenuProps) {
       aria-label={label}
       style={position ? { left: position.left, top: position.top } : { left: 0, top: 0, visibility: "hidden" }}
       onKeyDown={(event) => {
-        if (event.key === "Escape" || event.key === "Tab") {
+        if ((event.key === "Escape" || event.key === "ArrowLeft") && open) {
+          event.preventDefault();
+          setOpen(null);
+        } else if (event.key === "Escape" || event.key === "Tab") {
           event.preventDefault();
           onClose();
           anchor.focus();
@@ -97,14 +106,51 @@ export function Menu({ anchor, items, onClose, label }: MenuProps) {
         }
       }}
     >
-      {items.map((item, index) =>
-        item === "separator" ? (
-          <div key={`s${index}`} className="menu-separator" role="separator" />
-        ) : (
+      {open && (
+        <>
+          <button type="button" role="menuitem" className="menu-item menu-back" onClick={() => setOpen(null)}>
+            <span className="menu-check" aria-hidden="true">
+              ‹
+            </span>
+            {open.label}
+          </button>
+          <div className="menu-separator" role="separator" />
+        </>
+      )}
+      {items.map((item, index) => {
+        if (item === "separator") return <div key={`s${index}`} className="menu-separator" role="separator" />;
+        if ("submenu" in item) {
+          return (
+            <button
+              key={item.label}
+              type="button"
+              role="menuitem"
+              aria-haspopup="menu"
+              className="menu-item"
+              disabled={item.disabled}
+              onClick={() => setOpen({ label: item.label, items: item.submenu })}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowRight") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setOpen({ label: item.label, items: item.submenu });
+                }
+              }}
+            >
+              <span className="menu-check" aria-hidden="true" />
+              <span className="menu-text">{item.label}</span>
+              <span className="menu-more" aria-hidden="true">
+                ▸
+              </span>
+            </button>
+          );
+        }
+        return (
           <button
             key={item.label}
             type="button"
-            role="menuitem"
+            role={item.checked === undefined ? "menuitem" : "menuitemradio"}
+            aria-checked={item.checked === undefined ? undefined : item.checked}
             className={cx("menu-item", item.danger && "danger")}
             disabled={item.disabled}
             onClick={() => {
@@ -117,8 +163,8 @@ export function Menu({ anchor, items, onClose, label }: MenuProps) {
             </span>
             {item.label}
           </button>
-        ),
-      )}
+        );
+      })}
     </div>,
     document.body,
   );

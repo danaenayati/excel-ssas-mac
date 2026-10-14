@@ -9,6 +9,8 @@ import type {
   Catalog,
   Connection,
   Cube,
+  DetailsRequest,
+  DetailsResponse,
   Fields,
   Grid,
   MembersRequest,
@@ -30,6 +32,8 @@ export interface Api {
   members(connectionId: string, request: MembersRequest): Promise<MembersResponse>;
   /** Aborting `signal` discards the response; it does not stop the query on the server. */
   query(connectionId: string, request: QueryRequest, signal?: AbortSignal): Promise<Grid>;
+  /** The fact rows behind one value cell ("Show Details"). */
+  details(connectionId: string, request: DetailsRequest, signal?: AbortSignal): Promise<DetailsResponse>;
   /** Stops the query running on this connection, if any. */
   cancel(connectionId: string): Promise<void>;
 }
@@ -165,6 +169,8 @@ export function createHttpApi(token: string, base = ""): Api {
       call<MembersResponse>("POST", `/connections/${id(connectionId)}/members`, request),
     query: (connectionId, request, signal) =>
       call<Grid>("POST", `/connections/${id(connectionId)}/query`, request, signal),
+    details: (connectionId, request, signal) =>
+      call<DetailsResponse>("POST", `/connections/${id(connectionId)}/details`, request, signal),
     cancel: async (connectionId) => {
       await call<{ ok: true }>("POST", `/connections/${id(connectionId)}/cancel`);
     },

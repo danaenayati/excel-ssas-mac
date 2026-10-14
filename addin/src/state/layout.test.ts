@@ -5,6 +5,7 @@ import {
   filterValueText,
   findField,
   isEmptyLayout,
+  isFiltered,
   layoutReducer,
   locate,
   noRestrictionLabel,
@@ -617,5 +618,156 @@ describe("how a field's selection reads", () => {
     ]);
     const moved = layoutReducer(start, { type: "move", name: city.uniqueName, area: "rows" });
     expect(selectionSummary(moved.rows[0])).toBe("Tehran");
+  });
+});
+
+describe("sort, label filter and value filter", () => {
+  const start = run([
+    { type: "addHierarchy", hierarchy: city },
+    { type: "addHierarchy", hierarchy: calendar, area: "columns" },
+    { type: "addMeasure", measure: rides },
+  ]);
+  const name = city.uniqueName;
+
+  it("sets and clears a sort, leaving no key behind", () => {
+    const sorted = layoutReducer(start, { type: "setSort", hierarchy: name, sort: { by: "caption", order: "desc" } });
+    expect(sorted.rows[0].sort).toEqual({ by: "caption", order: "desc" });
+    const byValue = layoutReducer(sorted, {
+      type: "setSort",
+      hierarchy: name,
+      sort: { by: "measure", measure: rides.uniqueName, order: "asc" },
+    });
+    expect(byValue.rows[0].sort).toEqual({ by: "measure", measure: rides.uniqueName, order: "asc" });
+    const back = layoutReducer(byValue, { type: "setSort", hierarchy: name, sort: null });
+    expect("sort" in back.rows[0]).toBe(false);
+    expect(back.rows[0]).toEqual(start.rows[0]);
+  });
+
+  it("sets and clears label and value filters independently", () => {
+    const labelled = layoutReducer(start, {
+      type: "setLabelFilter",
+      hierarchy: name,
+      filter: { operator: "beginsWith", value: "Te" },
+    });
+    const both = layoutReducer(labelled, {
+      type: "setValueFilter",
+      hierarchy: name,
+      filter: { operator: "top", measure: rides.uniqueName, value: 3, topBy: "items" },
+    });
+    expect(both.rows[0].labelFilter).toEqual({ operator: "beginsWith", value: "Te" });
+    expect(both.rows[0].valueFilter).toEqual({ operator: "top", measure: rides.uniqueName, value: 3, topBy: "items" });
+    const noLabel = layoutReducer(both, { type: "setLabelFilter", hierarchy: name, filter: null });
+    expect("labelFilter" in noLabel.rows[0]).toBe(false);
+    expect(noLabel.rows[0].valueFilter).toBeDefined();
+  });
+
+  it("works on a Columns field the same way", () => {
+    const layout = layoutReducer(start, {
+      type: "setLabelFilter",
+      hierarchy: calendar.uniqueName,
+      filter: { operator: "contains", value: "2025" },
+    });
+    expect(layout.columns[0].labelFilter).toEqual({ operator: "contains", value: "2025" });
+    expect(layout.rows).toBe(start.rows);
+  });
+
+  it("returns the same layout when nothing changes", () => {
+    const sorted = layoutReducer(start, { type: "setSort", hierarchy: name, sort: { by: "caption", order: "asc" } });
+    expect(layoutReducer(sorted, { type: "setSort", hierarchy: name, sort: { by: "caption", order: "asc" } })).toBe(sorted);
+    expect(layoutReducer(start, { type: "setSort", hierarchy: name, sort: null })).toBe(start);
+    expect(layoutReducer(start, { type: "setLabelFilter", hierarchy: name, filter: null })).toBe(start);
+    expect(layoutReducer(start, { type: "setValueFilter", hierarchy: "[No].[Such]", filter: null })).toBe(start);
+  });
+
+  it("clears items, label filter and value filter together, and keeps the sort", () => {
+    const busy = run(
+      [
+        { type: "setMembers", hierarchy: name, members: ["[Geography].[City].[Tehran]"], captions: ["Tehran"] },
+        { type: "setLabelFilter", hierarchy: name, filter: { operator: "contains", value: "a" } },
+        { type: "setValueFilter", hierarchy: name, filter: { operator: "greaterThan", measure: rides.uniqueName, value: 5 } },
+        { type: "setSort", hierarchy: name, sort: { by: "caption", order: "asc" } },
+      ],
+      start,
+    );
+    expect(isFiltered(busy.rows[0])).toBe(true);
+    const cleared = layoutReducer(busy, { type: "clearFilters", hierarchy: name });
+    expect(cleared.rows[0].members).toEqual([]);
+    expect(cleared.rows[0].memberCaptions).toEqual([]);
+    expect("labelFilter" in cleared.rows[0]).toBe(false);
+    expect("valueFilter" in cleared.rows[0]).toBe(false);
+    expect(cleared.rows[0].sort).toEqual({ by: "caption", order: "asc" });
+    expect(isFiltered(cleared.rows[0])).toBe(false);
+    expect(layoutReducer(cleared, { type: "clearFilters", hierarchy: name })).toBe(cleared);
+  });
+
+  it("counts any of the three as filtered", () => {
+    expect(isFiltered(start.rows[0])).toBe(false);
+    for (const action of [
+      { type: "setMembers", hierarchy: name, members: ["x"], captions: ["x"] },
+      { type: "setLabelFilter", hierarchy: name, filter: { operator: "equals", value: "x" } },
+      { type: "setValueFilter", hierarchy: name, filter: { operator: "equals", measure: rides.uniqueName, value: 1 } },
+    ] as LayoutAction[]) {
+      expect(isFiltered(layoutReducer(start, action).rows[0])).toBe(true);
+    }
+    const sortedOnly = layoutReducer(start, { type: "setSort", hierarchy: name, sort: { by: "caption", order: "asc" } });
+    expect(isFiltered(sortedOnly.rows[0])).toBe(false);
+  });
+
+  it("keeps sort and filters when the field moves, even through Filters", () => {
+    const busy = run(
+      [
+        { type: "setSort", hierarchy: name, sort: { by: "caption", order: "desc" } },
+        { type: "setLabelFilter", hierarchy: name, filter: { operator: "contains", value: "a" } },
+      ],
+      start,
+    );
+    const there = layoutReducer(busy, { type: "move", name, area: "filters" });
+    const back = layoutReducer(there, { type: "move", name, area: "columns" });
+    const field = findField(back, name)!;
+    expect(field.sort).toEqual({ by: "caption", order: "desc" });
+    expect(field.labelFilter).toEqual({ operator: "contains", value: "a" });
+  });
+});
+
+describe("Show Values As and number format", () => {
+  const start = run([
+    { type: "addMeasure", measure: rides },
+    { type: "addMeasure", measure: fare },
+  ]);
+
+  it("sets show-as on one value field, and No Calculation removes it", () => {
+    const shown = layoutReducer(start, { type: "setShowAs", measure: fare.uniqueName, showAs: "percentOfGrandTotal" });
+    expect(shown.values[1].showAs).toBe("percentOfGrandTotal");
+    expect(shown.values[0]).toBe(start.values[0]);
+    const plain = layoutReducer(shown, { type: "setShowAs", measure: fare.uniqueName, showAs: "normal" });
+    expect("showAs" in plain.values[1]).toBe(false);
+    expect(layoutReducer(start, { type: "setShowAs", measure: fare.uniqueName, showAs: "normal" })).toBe(start);
+  });
+
+  it("sets a number format, and null or empty goes back to the cube's", () => {
+    const formatted = layoutReducer(start, { type: "setNumberFormat", measure: rides.uniqueName, format: "0.0" });
+    expect(formatted.values[0].numberFormat).toBe("0.0");
+    expect(layoutReducer(formatted, { type: "setNumberFormat", measure: rides.uniqueName, format: "0.0" })).toBe(formatted);
+    const cube = layoutReducer(formatted, { type: "setNumberFormat", measure: rides.uniqueName, format: null });
+    expect("numberFormat" in cube.values[0]).toBe(false);
+    const empty = layoutReducer(formatted, { type: "setNumberFormat", measure: rides.uniqueName, format: "" });
+    expect("numberFormat" in empty.values[0]).toBe(false);
+  });
+
+  it("keeps show-as and format when the value field moves", () => {
+    const set = run(
+      [
+        { type: "setShowAs", measure: rides.uniqueName, showAs: "percentOfRowTotal" },
+        { type: "setNumberFormat", measure: rides.uniqueName, format: "0%" },
+        { type: "shift", name: rides.uniqueName, delta: 1 },
+      ],
+      start,
+    );
+    expect(set.values[1]).toEqual({ measure: rides.uniqueName, caption: "Rides", showAs: "percentOfRowTotal", numberFormat: "0%" });
+  });
+
+  it("does nothing for a measure that is not in Values", () => {
+    expect(layoutReducer(start, { type: "setShowAs", measure: "[Measures].[Nope]", showAs: "percentOfGrandTotal" })).toBe(start);
+    expect(layoutReducer(start, { type: "setNumberFormat", measure: "[Measures].[Nope]", format: "0" })).toBe(start);
   });
 });

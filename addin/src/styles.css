@@ -807,6 +807,13 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
+.chip-mark {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
 .chip-funnel,
 .chip-caret {
   width: 11px;
@@ -973,6 +980,20 @@ input[type="checkbox"] {
   text-align: center;
 }
 
+.menu-text {
+  flex: 1;
+}
+
+.menu-more {
+  flex: none;
+  margin-left: 12px;
+  color: var(--text-2);
+}
+
+.menu-back {
+  color: var(--text-2);
+}
+
 .menu-separator {
   height: 1px;
   margin: 4px 6px;
@@ -1067,9 +1088,27 @@ input[type="checkbox"] {
   padding: 6px 8px 4px;
 }
 
-.picker-list {
+/* Everything between the panel's title and its buttons scrolls together: the field
+   menu, the search and the item list. */
+.picker-body {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.picker-heading {
+  margin: 8px 8px 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.picker-list {
+  flex: 1 0 160px;
+  min-height: 160px;
   margin: 0 8px;
   overflow-x: hidden;
   overflow-y: auto;
@@ -1157,6 +1196,140 @@ input[type="checkbox"] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- field menu (sort and filter) --------------------------------------- */
+
+.fm {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  margin: 6px 8px 0;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+.fm-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--row);
+  padding: 2px 6px 2px 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  text-align: left;
+  cursor: default;
+}
+
+.fm-item:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.fm-item:disabled {
+  opacity: 0.4;
+}
+
+.fm-item.indent {
+  padding-left: 14px;
+}
+
+.fm-item.danger {
+  color: var(--danger);
+}
+
+.fm-check {
+  flex: none;
+  width: 18px;
+  text-align: center;
+}
+
+.fm-label {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.fm-state {
+  font-size: 11px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.fm-twist {
+  width: 11px;
+  height: 11px;
+  color: var(--text-2);
+}
+
+.fm-sep {
+  height: 1px;
+  margin: 3px 6px;
+  background: var(--border-soft);
+}
+
+.fm-sub {
+  display: flex;
+  flex-direction: column;
+}
+
+.fm-form {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 8px 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+.fm-form.plain {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.fm-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.fm-text {
+  color: var(--text-2);
+}
+
+.fm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fm-row {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.fm-count {
+  flex: 0 0 64px;
+  width: 64px;
+}
+
+.fm-error {
+  color: var(--danger);
+}
+
+.fm-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 /* ---- browser preview only --------------------------------------------- */
@@ -1299,4 +1472,40 @@ tbody .pv-head {
 
 .pv-scroll:focus-visible {
   outline-offset: -2px;
+}
+
+/* Sheet tabs, as at the bottom of an Excel window. */
+.pv-tabs {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 0 10px;
+  border-top: 1px solid #d4d4d4;
+  background: #f3f3f3;
+  overflow-x: auto;
+}
+
+.pv-tab {
+  padding: 4px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: #444444;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pv-tab.active {
+  border-bottom-color: #217346;
+  background: #ffffff;
+  color: #1d1d1f;
+  font-weight: 600;
+}
+
+.pv-cell.frozen {
+  position: sticky;
+  top: 21px;
+  z-index: 1;
+  background: #ffffff;
+  box-shadow: 0 1px 0 #b5b5b5;
 }

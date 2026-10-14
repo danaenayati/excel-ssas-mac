@@ -1,6 +1,8 @@
 // Member picker for one placed hierarchy: a tree loaded one level at a time, a search
 // across all levels, Select all / Select none, and a note when a list was cut off.
-// The selection rules live in state/picker.ts.
+// The selection rules live in state/picker.ts. For a Rows or Columns field the panel
+// starts with the field menu (sorting, label and value filters, see FieldMenu.tsx), as
+// Excel's Row Labels / Column Labels dropdown does; a page filter has the list only.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Api } from "../api";
@@ -19,7 +21,9 @@ import {
   type PickerState,
 } from "../state/picker";
 import { toUiError, type UiError } from "../state/runner";
-import type { Member, PlacedField } from "../types";
+import type { LayoutAction } from "../state/layout";
+import type { Measure, Member, PlacedField } from "../types";
+import { FieldMenu } from "./FieldMenu";
 import { ErrorNote, Icon, Spinner, TriCheckbox } from "./common";
 
 interface Props {
@@ -30,6 +34,13 @@ interface Props {
   field: PlacedField;
   onApply: (members: string[], captions: string[]) => void;
   onCancel: () => void;
+  /** Present for a Rows or Columns field: the sort and filter menu above the list. */
+  menu?: {
+    measures: Measure[];
+    defaultMeasure: string;
+    /** Apply a sort or filter change; the panel is closed by the caller. */
+    onAction: (action: LayoutAction) => void;
+  };
 }
 
 const SEARCH_DELAY_MS = 300;
@@ -42,7 +53,7 @@ interface SearchState {
   error: UiError | null;
 }
 
-export function MemberPicker({ api, connectionId, catalog, cube, field, onApply, onCancel }: Props) {
+export function MemberPicker({ api, connectionId, catalog, cube, field, onApply, onCancel, menu }: Props) {
   const [state, setState] = useState<PickerState>(() => initPicker(field));
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const [loading, setLoading] = useState<ReadonlySet<string>>(new Set([ROOT]));
@@ -123,8 +134,12 @@ export function MemberPicker({ api, connectionId, catalog, cube, field, onApply,
     };
   }, [query, api, connectionId, catalog, cube, hierarchy]);
 
+  // Keyboard focus starts where the panel starts: the field menu, or else the search.
   useEffect(() => {
-    box.current?.querySelector<HTMLInputElement>("input[type=search]")?.focus();
+    const first =
+      box.current?.querySelector<HTMLElement>(".fm-item:not(:disabled)") ??
+      box.current?.querySelector<HTMLInputElement>("input[type=search]");
+    first?.focus();
   }, []);
 
   const twist = (key: string) => {
@@ -210,11 +225,26 @@ export function MemberPicker({ api, connectionId, catalog, cube, field, onApply,
       }}
     >
       <header className="bar">
-        <h2 className="bar-title">Filter: {field.caption}</h2>
+        <h2 className="bar-title">
+          {menu ? "Sort and filter" : "Filter"}: {field.caption}
+        </h2>
         <button type="button" className="icon-button" onClick={onCancel} aria-label="Close">
           <Icon name="close" />
         </button>
       </header>
+
+      <div className="picker-body">
+      {menu && (
+        <>
+          <FieldMenu
+            field={field}
+            measures={menu.measures}
+            defaultMeasure={menu.defaultMeasure}
+            onAction={menu.onAction}
+          />
+          <h3 className="picker-heading">Select items</h3>
+        </>
+      )}
 
       <div className="search picker-search">
         <Icon name="search" className="search-icon" />
@@ -300,6 +330,7 @@ export function MemberPicker({ api, connectionId, catalog, cube, field, onApply,
       </div>
 
       {hint && <p className="picker-hint">{hint}</p>}
+      </div>
 
       <footer className="picker-foot">
         <span className="picker-summary" title={result ? result.captions.join(", ") : undefined}>

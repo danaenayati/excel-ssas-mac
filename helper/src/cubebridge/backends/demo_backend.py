@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from ..errors import CubeError
 from ..pivot import mdx
+from ..pivot.names import quote_identifier
 from ..pivot.model import AxisMember, Cell, CellSet, LabelFilter, Layout, PlacedField, ValueField, ValueFilter
 
 CATALOG = "Sample"
@@ -227,7 +228,7 @@ class DemoBackend:
                     measure = AxisMember(value.measure, _MEASURES[value.measure][0], "[Measures]", 0, 0)
                 else:
                     caption = mdx.show_as_caption(value)
-                    measure = AxisMember(f"[Measures].[{caption}]", caption, "[Measures]", 0, 0)
+                    measure = AxisMember("[Measures]." + quote_identifier(caption), caption, "[Measures]", 0, 0)
                 columns_axis.append(tuple(self._axis_member(k) for k in col_tuples[c]) + (measure,))
         cellset.axes.append(columns_axis)
         if layout.rows:
