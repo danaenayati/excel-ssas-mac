@@ -212,7 +212,8 @@ def _axis(element: ET.Element) -> list[tuple[AxisMember, ...]]:
             members.append(
                 AxisMember(
                     unique_name=fields.get("UName", ""),
-                    caption=fields.get("Caption", ""),
+                    # Excel shows a member with an empty caption as "(blank)".
+                    caption=fields.get("Caption", "") or "(blank)",
                     hierarchy=member_el.get("Hierarchy", ""),
                     level=_int(fields.get("LNum")),
                     # Low 16 bits: estimated child count. Higher bits are display flags.

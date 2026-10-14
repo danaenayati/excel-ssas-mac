@@ -261,3 +261,106 @@ def test_show_details_is_refused_like_excel_when_a_filter_covers_several_items(d
     with pytest.raises(CubeError) as info:
         demo.details(CATALOG, CUBE, layout, [], "[Measures].[Rides]", 10)
     assert "Show Details" in info.value.message
+
+
+# -- Windows parity: per outer item, per-axis totals, every Show Values As kind ------
+def shown_grid(demo, rows, columns=(), shows=(), **options):
+    values = [{"measure": "[Measures].[Rides]", "caption": "Rides"}] + [
+        dict({"measure": "[Measures].[Rides]", "caption": "Rides"}, **s) for s in shows
+    ]
+    layout = Layout.from_json({"rows": list(rows), "columns": list(columns), "values": values, "options": options})
+    cellset, _ = demo.query(CATALOG, CUBE, layout)
+    return build_grid(cellset, layout)
+
+
+def test_grand_totals_per_axis_in_the_sample_cube(demo):
+    grid = shown_grid(demo, [placed(demo, CITY)], [placed(demo, SERVICE)], grandTotalRow=False, grandTotalColumn=True)
+    assert "grandTotal" not in grid["rowKinds"] and grid["colKinds"][-1] == "grandTotal"
+    grid = shown_grid(demo, [placed(demo, CITY)], [placed(demo, SERVICE)], grandTotalRow=True, grandTotalColumn=False)
+    assert grid["rowKinds"][-1] == "grandTotal" and "grandTotal" not in grid["colKinds"]
+
+
+def test_top_1_inner_item_is_chosen_within_each_outer_item(demo):
+    inner = dict(placed(demo, SERVICE), valueFilter={"operator": "top", "measure": "[Measures].[Rides]", "value": 1})
+    grid = run(demo, rows=[placed(demo, CITY), inner], grandTotals=False)
+    cities = [line[0]["member"]["caption"] for line in grid["rowHeaders"]]
+    assert len(cities) == len(set(cities)) == 9  # exactly one service per city
+    with_totals = run(demo, rows=[placed(demo, CITY), inner], subtotals=True)
+    values = column(with_totals)
+    kinds = with_totals["rowKinds"]
+    assert values[-1] == sum(v for v, k in zip(values, kinds) if k == "data")  # visual grand total
+
+
+def test_sort_by_value_of_an_inner_field_is_within_each_outer_item(demo):
+    inner = dict(placed(demo, SERVICE), sort={"by": "measure", "measure": "[Measures].[Rides]", "order": "desc"})
+    grid = run(demo, rows=[placed(demo, CITY), inner], grandTotals=False)
+    by_city: dict[str, list[int]] = {}
+    for line, values in zip(grid["rowHeaders"], grid["values"]):
+        by_city.setdefault(line[0]["member"]["caption"], []).append(values[0])
+    assert all(v == sorted(v, reverse=True) for v in by_city.values())
+
+
+def test_running_total_rank_and_difference_from_previous(demo):
+    city = placed(demo, CITY)
+    grid = shown_grid(
+        demo,
+        [city],
+        shows=[
+            {"showAs": "runningTotalIn", "baseField": CITY},
+            {"showAs": "rankDescending", "baseField": CITY},
+            {"showAs": "differenceFrom", "baseField": CITY, "baseItem": "previous"},
+            {"showAs": "percentRunningTotalIn", "baseField": CITY},
+        ],
+    )
+    assert [c["text"] for c in grid["colHeaderRows"][-1]] == [
+        "Rides",
+        "Rides (Running Total In City)",
+        "Rides (Rank Largest to Smallest City)",
+        "Rides (Difference From City, previous)",
+        "Rides (% Running Total In City)",
+    ]
+    lines = grid["values"][:-1]
+    rides = [line[0] for line in lines]
+    assert [line[1] for line in lines] == [sum(rides[: i + 1]) for i in range(len(rides))]
+    assert lines[-1][1] == grid["values"][-1][0]  # the last running total is the grand total
+    assert lines[-1][4] == pytest.approx(1.0)
+    ranks = [line[2] for line in lines]
+    assert sorted(ranks) == list(range(1, len(ranks) + 1)) and ranks[rides.index(max(rides))] == 1
+    assert lines[0][3] is None and lines[1][3] == rides[1] - rides[0]
+    assert grid["values"][-1][3] is None  # blank on the total line, as in Excel
+
+
+def test_percent_of_parent_row_total_and_parent_total(demo):
+    rows = [placed(demo, CITY), placed(demo, SERVICE)]
+    grid = shown_grid(
+        demo, rows, shows=[{"showAs": "percentOfParentRowTotal"}, {"showAs": "percentOfParentTotal", "baseField": CITY}], subtotals=True
+    )
+    shares: dict[str, float] = {}
+    for line, kind, values in zip(grid["rowHeaders"], grid["rowKinds"], grid["values"]):
+        if kind == "data":
+            shares[line[0]["member"]["caption"]] = shares.get(line[0]["member"]["caption"], 0) + values[1]
+            assert values[2] == pytest.approx(values[1])  # parent total of City = the city's subtotal
+    assert all(total == pytest.approx(1.0) for total in shares.values())
+    assert grid["values"][-1][1] == pytest.approx(1.0)
+
+
+def test_percent_of_an_item_difference_and_index(demo):
+    members = demo.members(CATALOG, CUBE, CITY, None, None, 50)["members"]
+    tehran = next(m for m in members if m["caption"] == "Tehran")["uniqueName"]
+    grid = shown_grid(
+        demo,
+        [placed(demo, CITY)],
+        [placed(demo, SERVICE)],
+        shows=[
+            {"showAs": "percentOf", "baseField": CITY, "baseItem": tehran},
+            {"showAs": "percentDifferenceFrom", "baseField": CITY, "baseItem": tehran},
+            {"showAs": "index"},
+        ],
+    )
+    labels_ = [line[0]["text"] for line in grid["rowHeaders"]]
+    t = labels_.index("Tehran")
+    assert grid["values"][t][1] == pytest.approx(1.0) and grid["values"][t][2] is None
+    other = labels_.index("Shiraz")
+    assert grid["values"][other][2] == pytest.approx(grid["values"][other][1] - 1)
+    # index of the grand total cell is 1 by definition
+    assert grid["values"][-1][-1] == pytest.approx(1.0)

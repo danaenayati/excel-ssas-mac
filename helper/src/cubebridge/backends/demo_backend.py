@@ -182,36 +182,57 @@ class DemoBackend:
 
         facts = self._filtered_facts(layout)
         # Label and value filters, each evaluated in the space the earlier ones left,
-        # as the nested sub-selects of the real query are.
+        # as the nested sub-selects of the real query are. A value filter on a field
+        # inside others keeps, for each combination of outer items, its own winners.
         allowed: dict[str, set[tuple]] = {}
-        for placed in (*layout.rows, *layout.columns):
-            if placed.label_filter is None and placed.value_filter is None:
-                continue
-            keep = self._narrow(placed, facts)
-            allowed[placed.hierarchy] = keep
-            facts = [f for f in facts if self._top_path(placed, f) in keep]
+        for fields in (layout.rows, layout.columns):
+            for depth, placed in enumerate(fields):
+                h = placed.hierarchy
+                if placed.label_filter is not None:
+                    keep = {
+                        p for p in self._items(placed, allowed)
+                        if _label_match(self._caption((h, p)), placed.label_filter)
+                    }
+                    allowed[h] = keep
+                    facts = [f for f in facts if self._top_path(placed, f) in keep]
+                if placed.value_filter is None:
+                    continue
+                outer = fields[:depth]
+                groups: dict[tuple, list[dict]] = {}
+                for fact in facts:
+                    groups.setdefault(tuple(self._top_path(o, fact) for o in outer), []).append(fact)
+                pairs = {
+                    (key, p)
+                    for key, group in groups.items()
+                    for p in self._value_items(placed, group, allowed)
+                }
+                allowed[h] = {p for _, p in pairs}
+                facts = [
+                    f for f in facts
+                    if (tuple(self._top_path(o, f) for o in outer), self._top_path(placed, f)) in pairs
+                ]
 
-        row_tuples = self._axis_tuples(layout.rows, layout, facts, allowed) if layout.rows else [()]
-        col_tuples = self._axis_tuples(layout.columns, layout, facts, allowed) if layout.columns else [()]
+        options = layout.options
+        row_tuples = (
+            self._axis_tuples(layout.rows, layout, facts, allowed, options.grand_total_row) if layout.rows else [()]
+        )
+        col_tuples = (
+            self._axis_tuples(layout.columns, layout, facts, allowed, options.grand_total_column)
+            if layout.columns
+            else [()]
+        )
         row_index = {t: i for i, t in enumerate(row_tuples)}
         col_index = {t: i for i, t in enumerate(col_tuples)}
         row_shown = [{t[i] for t in row_tuples} for i in range(len(layout.rows))]
         col_shown = [{t[i] for t in col_tuples} for i in range(len(layout.columns))]
 
         totals: dict[tuple[int, int], list[float]] = {}
-        row_totals: dict[int, list[float]] = {}
-        column_totals: dict[int, list[float]] = {}
-        grand = [0, 0.0, 0]
         for fact in facts:
             rows_hit = [row_index[t] for t in self._matching(fact, layout.rows, row_shown) if t in row_index]
             cols_hit = [col_index[t] for t in self._matching(fact, layout.columns, col_shown) if t in col_index]
-            _add(grand, fact)
             for r in rows_hit:
-                _add(row_totals.setdefault(r, [0, 0.0, 0]), fact)
                 for c in cols_hit:
                     _add(totals.setdefault((r, c), [0, 0.0, 0]), fact)
-            for c in cols_hit:
-                _add(column_totals.setdefault(c, [0, 0.0, 0]), fact)
 
         if layout.options.non_empty:
             keep_rows = sorted({r for r, _ in totals})
@@ -235,27 +256,116 @@ class DemoBackend:
             cellset.axes.append([tuple(self._axis_member(k) for k in row_tuples[r]) for r in keep_rows])
 
         width = len(columns_axis)
+        cache: dict[tuple, object] = {}
         for out_r, r in enumerate(keep_rows):
             for out_c, c in enumerate(keep_cols):
                 slot = totals.get((r, c))
                 if slot is None:
                     continue
+                context = {h: path for h, path in (*row_tuples[r], *col_tuples[c])}
                 for m_index, value in enumerate(values):
-                    number = _measure_value(value.measure, slot)
-                    fmt = _MEASURES[value.measure][2]
-                    if value.show_as != "normal":
-                        total = {
-                            "percentOfGrandTotal": grand,
-                            "percentOfColumnTotal": column_totals.get(c),
-                            "percentOfRowTotal": row_totals.get(r),
-                        }[value.show_as]
-                        whole = _measure_value(value.measure, total) if total else None
-                        number = None if number is None or not whole else number / whole
-                        fmt = "Percent"
+                    if value.show_as == "normal":
+                        number, fmt = _measure_value(value.measure, slot), _MEASURES[value.measure][2]
+                    else:
+                        number = self._shown_as(value, layout, context, facts, cache)
+                        fmt = _SHOWN_AS_FORMATS.get(value.show_as, "")
                     if number is not None:
                         ordinal = out_r * width + out_c * len(values) + m_index
                         cellset.cells[ordinal] = Cell(number, fmt, "")
         return cellset, text
+
+    def _shown_as(self, value: ValueField, layout: Layout, context: dict, facts: list[dict], cache: dict):
+        """One "Show Values As" cell, by Excel's definitions, as pivot/mdx.py asks a cube for it."""
+        m = value.measure
+
+        def at(changes: dict) -> object:
+            where = dict(context)
+            where.update(changes)
+            key = (m, tuple(sorted((h, p) for h, p in where.items() if p)))
+            if key not in cache:
+                slot, found = [0, 0.0, 0], False
+                for fact in facts:
+                    if all(self._path_of(h, fact)[: len(p)] == p for h, p in key[1]):
+                        _add(slot, fact)
+                        found = True
+                cache[key] = _measure_value(m, slot) if found else None
+            return cache[key]
+
+        def ratio(a: object, b: object) -> object:
+            return None if a is None or not b else a / b
+
+        here = at({})
+        rows = [f.hierarchy for f in layout.rows]
+        columns = [f.hierarchy for f in layout.columns]
+        kind = value.show_as
+        if kind == "percentOfGrandTotal":
+            return ratio(here, at({h: () for h in rows + columns}))
+        if kind == "percentOfColumnTotal":
+            return ratio(here, at({h: () for h in rows}))
+        if kind == "percentOfRowTotal":
+            return ratio(here, at({h: () for h in columns}))
+        if kind in ("percentOfParentRowTotal", "percentOfParentColumnTotal"):
+            for h in reversed(rows if kind == "percentOfParentRowTotal" else columns):
+                if context[h]:
+                    return ratio(here, at({h: context[h][:-1]}))
+            return 1.0
+        if kind == "index":
+            row_total, column_total = at({h: () for h in columns}), at({h: () for h in rows})
+            everything = at({h: () for h in rows + columns})
+            return None if here is None or not row_total or not column_total else here * everything / (row_total * column_total)
+
+        axis = rows if value.base_field in rows else columns
+        base = value.base_field
+        current = context[base]
+        if kind == "percentOfParentTotal":
+            return ratio(here, at({h: () for h in axis[axis.index(base) + 1 :]}))
+        if not current:  # the base field's total line
+            return {"runningTotalIn": here, "percentRunningTotalIn": 1.0}.get(kind)
+        level = self._level_paths(base, len(current))
+        index = level.index(current)
+        if kind in ("runningTotalIn", "percentRunningTotalIn"):
+            numbers = [at({base: p}) for p in level[: index + 1]]
+            running = None if all(n is None for n in numbers) else sum(n or 0 for n in numbers)
+            return running if kind == "runningTotalIn" else ratio(running, at({base: ()}))
+        if kind in ("rankAscending", "rankDescending"):
+            if here is None:
+                return None
+            others = [n for n in (at({base: p}) for p in level) if n is not None]
+            better = [n for n in others if (n < here if kind == "rankAscending" else n > here)]
+            return len(better) + 1
+        if value.base_item == "previous":
+            item = level[index - 1] if index > 0 else None
+        elif value.base_item == "next":
+            item = level[index + 1] if index + 1 < len(level) else None
+        else:
+            item = self._by_name[value.base_item][1] if value.base_item in self._by_name else None
+            if item == current:
+                return None if kind != "percentOf" else ratio(here, here)
+        other = at({base: item}) if item else None
+        if kind == "percentOf":
+            return ratio(here, other)
+        if other is None:
+            return None
+        if kind == "differenceFrom":
+            return (here or 0) - other
+        return None if not other else ((here or 0) - other) / other  # percentDifferenceFrom
+
+    def _path_of(self, hierarchy: str, fact: dict) -> tuple:
+        return tuple(fact[attr] for _, attr in self._hierarchies[hierarchy].levels)
+
+    def _level_paths(self, hierarchy: str, depth: int) -> list[tuple]:
+        """Every member of one level, in the hierarchy's order (what PrevMember walks)."""
+        out: list[tuple] = []
+
+        def visit(path: tuple) -> None:
+            for child in self._children.get((hierarchy, path), []):
+                if len(child) == depth:
+                    out.append(child)
+                else:
+                    visit(child)
+
+        visit(())
+        return out
 
     def details(
         self, catalog: str, cube: str, layout: Layout, members: list[str], measure: str, max_rows: int
@@ -418,40 +528,57 @@ class DemoBackend:
         h = self._hierarchies[placed.hierarchy]
         return (fact[h.levels[0][1]],)
 
-    def _narrow(self, placed: PlacedField, facts: list[dict]) -> set[tuple]:
-        """The field's top-level items that pass its label and value filters."""
+    def _items(self, placed: PlacedField, allowed: dict[str, set[tuple]]) -> list[tuple]:
+        """The field's top-level items left by its selection and any earlier filter."""
         h = self._hierarchy(placed.hierarchy)
         selected = self._selection(placed)
-        items = [p for p in self._children.get((h.unique_name, ()), []) if self._in_space(p, selected)]
-        if placed.label_filter is not None:
-            items = [p for p in items if _label_match(self._caption((h.unique_name, p)), placed.label_filter)]
-        if placed.value_filter is not None:
-            slots: dict[tuple, list[float]] = {}
-            for fact in facts:
-                _add(slots.setdefault(self._top_path(placed, fact), [0, 0.0, 0]), fact)
-            vf = placed.value_filter
-            numbers = {p: _measure_value(vf.measure, slots[p]) if p in slots else None for p in items}
-            items = _apply_value_filter(items, numbers, vf)
-        return set(items)
+        earlier = allowed.get(placed.hierarchy)
+        return [
+            p
+            for p in self._children.get((h.unique_name, ()), [])
+            if self._in_space(p, selected) and (earlier is None or p in earlier)
+        ]
+
+    def _value_items(self, placed: PlacedField, facts: list[dict], allowed: dict[str, set[tuple]]) -> list[tuple]:
+        """The items that pass the field's value filter, measured over `facts`."""
+        items = self._items(placed, allowed)
+        slots: dict[tuple, list[float]] = {}
+        for fact in facts:
+            _add(slots.setdefault(self._top_path(placed, fact), [0, 0.0, 0]), fact)
+        vf = placed.value_filter
+        numbers = {p: _measure_value(vf.measure, slots[p]) if p in slots else None for p in items}
+        return _apply_value_filter(items, numbers, vf)
 
     def _axis_tuples(
-        self, fields: tuple[PlacedField, ...], layout: Layout, facts: list[dict], allowed: dict[str, set[tuple]]
+        self,
+        fields: tuple[PlacedField, ...],
+        layout: Layout,
+        facts: list[dict],
+        allowed: dict[str, set[tuple]],
+        grand_total: bool,
     ) -> list[tuple[_Key, ...]]:
-        details = [self._detail(f, facts, allowed.get(f.hierarchy)) for f in fields]
         alls = [(f.hierarchy, ()) for f in fields]
+        by_value = [bool(f.sort and f.sort.by == "measure") for f in fields]
 
-        def build(depth: int) -> list[tuple[_Key, ...]]:
+        def build(depth: int, scope: list[dict]) -> list[tuple[_Key, ...]]:
+            detail = self._detail(fields[depth], scope, allowed.get(fields[depth].hierarchy))
             if depth == len(fields) - 1:
-                body = [(k,) for k in details[depth]]
+                body = [(k,) for k in detail]
+            elif any(by_value[depth + 1 :]):
+                # Inner order by value is worked out within each outer item (Generate).
+                body = []
+                for k in detail:
+                    inside = [f for f in scope if self._path_of(k[0], f)[: len(k[1])] == k[1]]
+                    body.extend((k,) + rest for rest in build(depth + 1, inside))
             else:
-                inner = build(depth + 1)
-                body = [(k,) + rest for k in details[depth] for rest in inner]
-            wanted = layout.options.grand_totals if depth == 0 else layout.options.subtotals
+                inner = build(depth + 1, scope)
+                body = [(k,) + rest for k in detail for rest in inner]
+            wanted = grand_total if depth == 0 else layout.options.subtotals
             if wanted:
                 body.append(tuple(alls[depth:]))
             return body
 
-        return build(0)
+        return build(0, facts)
 
     def _matching(self, fact: dict, fields: tuple[PlacedField, ...], shown: list[set[_Key]]):
         """Every axis tuple this fact contributes to: itself, its ancestors, and totals."""
@@ -464,6 +591,21 @@ class DemoBackend:
             candidates = [(h.unique_name, values[:depth]) for depth in range(len(values) + 1)]
             per_field.append([k for k in candidates if k in visible])
         return itertools.product(*per_field)
+
+
+_SHOWN_AS_FORMATS = {
+    **dict.fromkeys(
+        (
+            "percentOfGrandTotal", "percentOfColumnTotal", "percentOfRowTotal", "percentOf",
+            "percentOfParentRowTotal", "percentOfParentColumnTotal", "percentOfParentTotal",
+            "percentDifferenceFrom", "percentRunningTotalIn",
+        ),
+        "Percent",
+    ),
+    "index": "0.00",
+    "rankAscending": "#,##0",
+    "rankDescending": "#,##0",
+}
 
 
 def _add(slot: list[float], fact: dict) -> None:

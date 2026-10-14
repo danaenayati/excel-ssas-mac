@@ -29,6 +29,15 @@ def validate_unique_name(name: object) -> str:
     return name
 
 
+_BRACKETED = re.compile(_PART)
+
+
+def hierarchy_of(unique_name: str) -> str:
+    """The hierarchy part of a member's unique name, lower-cased for comparison."""
+    parts = _BRACKETED.findall(unique_name)
+    return ".".join(parts[:2]).lower() if len(parts) >= 2 else unique_name.lower()
+
+
 def quote_identifier(name: str) -> str:
     """Bracket-quote a plain name such as a cube name."""
     if any(ord(ch) < 0x20 for ch in name):

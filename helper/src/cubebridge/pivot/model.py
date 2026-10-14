@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass, field
 
 from ..errors import CubeError
-from .names import validate_unique_name
+from .names import hierarchy_of, validate_unique_name
 
 MAX_FIELDS_PER_AREA = 16
 MAX_MEMBERS_PER_FIELD = 5000
@@ -34,7 +34,22 @@ VALUE_OPERATORS = frozenset(
 )
 RANGE_OPERATORS = frozenset({"between", "notBetween"})
 TOP_BY = frozenset({"items", "percent", "sum"})
-SHOW_AS = frozenset({"normal", "percentOfGrandTotal", "percentOfColumnTotal", "percentOfRowTotal"})
+SHOW_AS = frozenset(
+    {
+        "normal", "percentOfGrandTotal", "percentOfColumnTotal", "percentOfRowTotal", "percentOf",
+        "percentOfParentRowTotal", "percentOfParentColumnTotal", "percentOfParentTotal",
+        "differenceFrom", "percentDifferenceFrom", "runningTotalIn", "percentRunningTotalIn",
+        "rankAscending", "rankDescending", "index",
+    }
+)
+NEEDS_BASE_FIELD = frozenset(
+    {
+        "percentOf", "percentOfParentTotal", "differenceFrom", "percentDifferenceFrom",
+        "runningTotalIn", "percentRunningTotalIn", "rankAscending", "rankDescending",
+    }
+)
+NEEDS_BASE_ITEM = frozenset({"percentOf", "differenceFrom", "percentDifferenceFrom"})
+RELATIVE_ITEMS = frozenset({"previous", "next"})
 
 
 @dataclass(frozen=True)
@@ -105,6 +120,8 @@ class ValueField:
     measure: str
     caption: str
     show_as: str = "normal"
+    base_field: str | None = None  # hierarchy unique name, on rows or columns
+    base_item: str | None = None  # "previous", "next" or a member unique name
 
 
 @dataclass(frozen=True)
@@ -112,6 +129,8 @@ class Options:
     grand_totals: bool = True
     subtotals: bool = False
     non_empty: bool = True
+    grand_total_row: bool = True  # the bottom row: the rows axis' All tuple
+    grand_total_column: bool = True  # the right-hand column: the columns axis' All tuple
 
 
 @dataclass(frozen=True)
@@ -142,11 +161,21 @@ class Layout:
         raw_options = data.get("options", {})
         if not isinstance(raw_options, dict):
             raise _bad("The report options are not an object.")
+        grand_totals = bool(raw_options.get("grandTotals", True))
         options = Options(
-            grand_totals=bool(raw_options.get("grandTotals", True)),
+            grand_totals=grand_totals,
             subtotals=bool(raw_options.get("subtotals", False)),
             non_empty=bool(raw_options.get("nonEmpty", True)),
+            grand_total_row=bool(raw_options.get("grandTotalRow", grand_totals)),
+            grand_total_column=bool(raw_options.get("grandTotalColumn", grand_totals)),
         )
+        on_axes = {placed.hierarchy.lower() for placed in (*rows, *columns)}
+        for value in values:
+            if value.base_field and value.base_field.lower() not in on_axes:
+                raise _bad(f"The base field of '{value.caption}' must be in Rows or Columns.")
+            if value.base_item and value.base_item not in RELATIVE_ITEMS:
+                if hierarchy_of(value.base_item) != value.base_field.lower():
+                    raise _bad(f"The base item of '{value.caption}' is not an item of its base field.")
         return cls(rows=rows, columns=columns, values=values, filters=filters, options=options)
 
 
@@ -282,7 +311,7 @@ def _value_list(value: object) -> tuple[ValueField, ...]:
     if len(value) > 64:
         raise _bad("The values area has more than 64 measures.")
     out = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     for item in value:
         if not isinstance(item, dict):
             raise _bad("A value field is not an object.")
@@ -292,10 +321,25 @@ def _value_list(value: object) -> tuple[ValueField, ...]:
         show_as = item.get("showAs") or "normal"
         if show_as not in SHOW_AS:
             raise _bad("A value field's 'Show Values As' setting is not valid.")
+        caption = _text(item.get("caption", ""), "caption")
+        base_field = base_item = None
+        if show_as in NEEDS_BASE_FIELD:
+            if not item.get("baseField"):
+                raise _bad(f"'{caption}' needs a base field for this 'Show Values As' setting.")
+            base_field = validate_unique_name(item.get("baseField"))
+        if show_as in NEEDS_BASE_ITEM:
+            raw_item = item.get("baseItem")
+            if not raw_item:
+                raise _bad(f"'{caption}' needs a base item for this 'Show Values As' setting.")
+            base_item = raw_item if raw_item in RELATIVE_ITEMS else validate_unique_name(raw_item)
         # The same measure may appear twice if it is shown two ways (count and %).
-        key = (measure.lower(), show_as)
+        key = (measure.lower(), show_as, (base_field or "").lower(), (base_item or "").lower())
         if key in seen:
             raise _bad("A measure is used twice in the Values area.")
         seen.add(key)
-        out.append(ValueField(measure=measure, caption=_text(item.get("caption", ""), "caption"), show_as=show_as))
+        out.append(
+            ValueField(
+                measure=measure, caption=caption, show_as=show_as, base_field=base_field, base_item=base_item
+            )
+        )
     return tuple(out)

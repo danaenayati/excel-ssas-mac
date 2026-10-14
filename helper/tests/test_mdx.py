@@ -354,10 +354,12 @@ def test_label_then_value_filter_on_one_field_and_item_selection_innermost():
             )
         ]
     )
+    # Items first, then the label filter, then the value filter in the space they leave.
     assert text.endswith(
-        "FROM (SELECT {TopCount(Filter({[Geo].[City].[All].Children}, "
-        'InStr(1, LCase([Geo].[City].CurrentMember.Member_Caption), "a") > 0), 1, [Measures].[Rides])} ON COLUMNS '
-        "FROM (SELECT ({[Geo].[City].&[1], [Geo].[City].&[2]}) ON COLUMNS FROM [Sales]))" + TAIL
+        "FROM (SELECT {TopCount({[Geo].[City].[All].Children}, 1, [Measures].[Rides])} ON COLUMNS "
+        "FROM (SELECT {Filter({[Geo].[City].[All].Children}, "
+        'InStr(1, LCase([Geo].[City].CurrentMember.Member_Caption), "a") > 0)} ON COLUMNS '
+        "FROM (SELECT ({[Geo].[City].&[1], [Geo].[City].&[2]}) ON COLUMNS FROM [Sales])))" + TAIL
     )
 
 
@@ -452,3 +454,143 @@ def test_details_validate_names_and_the_measure():
         details({"values": [RIDES]}, [], measure="[Geo].[City].&[1]")
     with pytest.raises(CubeError):
         details({"values": [RIDES]}, ["[Geo].[City].&[1]", "[Geo].[City].&[2]"])  # two members of one hierarchy
+
+
+# -- per outer item, as Windows does for inner fields --------------------------------
+def test_value_filter_on_an_inner_field_works_per_outer_item():
+    text = query(rows=[field(CITY), with_extras(field(SERVICE), valueFilter={"operator": "top", "measure": "[Measures].[Rides]", "value": 1})])
+    assert text.endswith(
+        "FROM (SELECT {Generate({[Geo].[City].[All].Children}, TopCount(CrossJoin({[Geo].[City].CurrentMember}, "
+        "{[Service].[Type].[All].Children}), 1, [Measures].[Rides]))} ON COLUMNS FROM [Sales])" + TAIL
+    )
+
+
+def test_value_filter_under_two_outer_fields_uses_the_current_tuple():
+    text = query(rows=[field("[A].[A]"), field("[B].[B]"), with_extras(field("[C].[C]"), valueFilter={"operator": "greaterThan", "measure": "[Measures].[Rides]", "value": 5})])
+    assert (
+        "Generate(CrossJoin({[A].[A].[All].Children}, {[B].[B].[All].Children}), "
+        "Filter(CrossJoin({([A].[A].CurrentMember, [B].[B].CurrentMember)}, {[C].[C].[All].Children}), [Measures].[Rides] > 5))"
+    ) in text
+
+
+def test_sort_by_value_of_an_inner_field_is_per_outer_item():
+    text = query(rows=[field(CITY), with_extras(field(SERVICE), sort={"by": "measure", "measure": "[Measures].[Rides]", "order": "desc"})])
+    assert (
+        "NON EMPTY {Generate({[Geo].[City].[All].Children}, CrossJoin({[Geo].[City].CurrentMember}, "
+        "Order({[Service].[Type].[All].Children}, [Measures].[Rides], DESC))), "
+        "{([Geo].[City].[All], [Service].[Type].[All])}} ON ROWS"
+    ) in text
+    # by caption the order does not depend on the outer item: plain CrossJoin
+    text = query(rows=[field(CITY), with_extras(field(SERVICE), sort={"by": "caption", "order": "asc"})])
+    assert "Generate" not in text
+
+
+def test_grand_totals_per_axis():
+    both = dict(rows=[field(CITY)], columns=[field(SERVICE)])
+    only_row = query(**both, grandTotalRow=True, grandTotalColumn=False)
+    assert "NON EMPTY {{[Geo].[City].[All].Children}, {[Geo].[City].[All]}} ON ROWS" in only_row
+    assert "CrossJoin({[Service].[Type].[All].Children}, {[Measures].[Rides]})" in only_row
+    only_column = query(**both, grandTotalRow=False, grandTotalColumn=True)
+    assert "NON EMPTY {[Geo].[City].[All].Children} ON ROWS" in only_column
+    assert "CrossJoin({{[Service].[Type].[All].Children}, {[Service].[Type].[All]}}, {[Measures].[Rides]})" in only_column
+
+
+# -- the rest of Excel's "Show Values As" -------------------------------------------
+def shown(kind, rows=(), columns=(), **extra):
+    value = dict(RIDES, showAs=kind, **extra)
+    text = query(rows=list(rows), columns=list(columns), values=[value])
+    return text[: text.index(" SELECT ")]
+
+
+def test_percent_of_a_base_item_and_of_the_previous_one():
+    text = shown("percentOf", rows=[field(DATE)], baseField=DATE, baseItem="[Date].[Calendar].[Year].&[2025]")
+    assert text == (
+        "WITH MEMBER [Measures].[Rides (% Of Calendar, 2025)] AS "
+        "IIF([Date].[Calendar].CurrentMember IS [Date].[Calendar].[All], NULL, "
+        "IIF(([Measures].[Rides], [Date].[Calendar].[Year].&[2025]) = 0, NULL, "
+        "[Measures].[Rides] / ([Measures].[Rides], [Date].[Calendar].[Year].&[2025]))), FORMAT_STRING = \"Percent\""
+    )
+    text = shown("percentOf", rows=[field(DATE)], baseField=DATE, baseItem="previous")
+    assert "([Measures].[Rides], [Date].[Calendar].CurrentMember.PrevMember)" in text
+    assert "[Measures].[Rides (% Of Calendar, previous)]" in text
+
+
+def test_percent_of_parent_row_total_checks_the_innermost_field_first():
+    text = shown("percentOfParentRowTotal", rows=[field(CITY), field(SERVICE)])
+    assert text == (
+        "WITH MEMBER [Measures].[Rides (% of Parent Row Total)] AS "
+        "IIF(NOT ([Service].[Type].CurrentMember IS [Service].[Type].[All]), "
+        "IIF(([Measures].[Rides], [Service].[Type].CurrentMember.Parent) = 0, NULL, "
+        "[Measures].[Rides] / ([Measures].[Rides], [Service].[Type].CurrentMember.Parent)), "
+        "IIF(NOT ([Geo].[City].CurrentMember IS [Geo].[City].[All]), "
+        "IIF(([Measures].[Rides], [Geo].[City].CurrentMember.Parent) = 0, NULL, "
+        "[Measures].[Rides] / ([Measures].[Rides], [Geo].[City].CurrentMember.Parent)), 1)), "
+        "FORMAT_STRING = \"Percent\""
+    )
+    assert shown("percentOfParentColumnTotal", columns=[field(SERVICE)]).count("[Service].[Type].CurrentMember.Parent") == 2
+
+
+def test_percent_of_parent_total_sets_the_fields_inside_the_base_field_to_all():
+    text = shown("percentOfParentTotal", rows=[field(CITY), field(SERVICE)], baseField=CITY)
+    assert "[Measures].[Rides] / ([Measures].[Rides], [Service].[Type].[All])" in text
+
+
+def test_difference_from_previous_and_percent_difference_from_an_item():
+    text = shown("differenceFrom", rows=[field(DATE)], baseField=DATE, baseItem="previous")
+    assert text == (
+        "WITH MEMBER [Measures].[Rides (Difference From Calendar, previous)] AS "
+        "IIF([Date].[Calendar].CurrentMember IS [Date].[Calendar].[All] OR "
+        "IsEmpty(([Measures].[Rides], [Date].[Calendar].CurrentMember.PrevMember)), NULL, "
+        "[Measures].[Rides] - ([Measures].[Rides], [Date].[Calendar].CurrentMember.PrevMember))"
+    )
+    text = shown("percentDifferenceFrom", rows=[field(DATE)], baseField=DATE, baseItem="[Date].[Calendar].[Year].&[2025]")
+    assert ("IIF([Date].[Calendar].CurrentMember IS [Date].[Calendar].[All] OR "
+            "[Date].[Calendar].CurrentMember IS [Date].[Calendar].[Year].&[2025] OR "
+            "IsEmpty(([Measures].[Rides], [Date].[Calendar].[Year].&[2025])) OR "
+            "([Measures].[Rides], [Date].[Calendar].[Year].&[2025]) = 0, NULL, "
+            "([Measures].[Rides] - ([Measures].[Rides], [Date].[Calendar].[Year].&[2025])) / "
+            "([Measures].[Rides], [Date].[Calendar].[Year].&[2025])), FORMAT_STRING = \"Percent\"") in text
+
+
+def test_running_total_and_its_percentage():
+    text = shown("runningTotalIn", rows=[field(DATE)], baseField=DATE)
+    assert text == (
+        "WITH MEMBER [Measures].[Rides (Running Total In Calendar)] AS "
+        "IIF([Date].[Calendar].CurrentMember IS [Date].[Calendar].[All], [Measures].[Rides], "
+        "Sum({[Date].[Calendar].CurrentMember.Level.Members.Item(0) : [Date].[Calendar].CurrentMember}, [Measures].[Rides]))"
+    )
+    text = shown("percentRunningTotalIn", rows=[field(DATE)], baseField=DATE)
+    assert "/ ([Measures].[Rides], [Date].[Calendar].[All])" in text and "FORMAT_STRING = \"Percent\"" in text
+
+
+def test_rank_both_ways():
+    text = shown("rankDescending", rows=[field(CITY)], baseField=CITY)
+    assert text == (
+        "WITH MEMBER [Measures].[Rides (Rank Largest to Smallest Calendar)] AS ".replace("Calendar", "City")
+        + "IIF([Geo].[City].CurrentMember IS [Geo].[City].[All] OR IsEmpty([Measures].[Rides]), NULL, "
+        "Rank([Geo].[City].CurrentMember, Order(NonEmpty([Geo].[City].CurrentMember.Level.Members, {[Measures].[Rides]}), "
+        "[Measures].[Rides], BDESC), [Measures].[Rides])), FORMAT_STRING = \"#,##0\""
+    )
+    assert "BASC" in shown("rankAscending", rows=[field(CITY)], baseField=CITY)
+
+
+def test_index():
+    text = shown("index", rows=[field(CITY)], columns=[field(SERVICE)])
+    assert text == (
+        "WITH MEMBER [Measures].[Rides (Index)] AS "
+        "IIF(([Measures].[Rides], [Service].[Type].[All]) = 0 OR ([Measures].[Rides], [Geo].[City].[All]) = 0, NULL, "
+        "([Measures].[Rides] * ([Measures].[Rides], [Geo].[City].[All], [Service].[Type].[All])) / "
+        "(([Measures].[Rides], [Service].[Type].[All]) * ([Measures].[Rides], [Geo].[City].[All]))), FORMAT_STRING = \"0.00\""
+    )
+
+
+def test_base_field_and_item_are_validated():
+    for extra in (
+        {"showAs": "runningTotalIn"},  # no base field
+        {"showAs": "runningTotalIn", "baseField": SERVICE},  # not on an axis
+        {"showAs": "differenceFrom", "baseField": CITY},  # no base item
+        {"showAs": "differenceFrom", "baseField": CITY, "baseItem": "[Service].[Type].&[1]"},  # item of another field
+        {"showAs": "differenceFrom", "baseField": CITY, "baseItem": "last"},
+    ):
+        with pytest.raises(CubeError):
+            Layout.from_json({"rows": [field(CITY)], "values": [dict(RIDES, **extra)]})

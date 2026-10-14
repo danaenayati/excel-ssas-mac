@@ -25,7 +25,7 @@ from decimal import Decimal
 
 from ..errors import CubeError
 from .model import Layout, LabelFilter, PlacedField, ValueField, ValueFilter
-from .names import quote_identifier, quote_string, validate_unique_name
+from .names import hierarchy_of, quote_identifier, quote_string, validate_unique_name
 
 CELL_PROPERTIES = "CELL PROPERTIES VALUE, FORMAT_STRING, FORMATTED_VALUE"
 DEFAULT_MEASURE = "[Measures].DefaultMember"
@@ -35,7 +35,26 @@ SHOW_AS_LABELS = {
     "percentOfGrandTotal": "% of Grand Total",
     "percentOfColumnTotal": "% of Column Total",
     "percentOfRowTotal": "% of Row Total",
+    "percentOf": "% Of",
+    "percentOfParentRowTotal": "% of Parent Row Total",
+    "percentOfParentColumnTotal": "% of Parent Column Total",
+    "percentOfParentTotal": "% of Parent Total",
+    "differenceFrom": "Difference From",
+    "percentDifferenceFrom": "% Difference From",
+    "runningTotalIn": "Running Total In",
+    "percentRunningTotalIn": "% Running Total In",
+    "rankAscending": "Rank Smallest to Largest",
+    "rankDescending": "Rank Largest to Smallest",
+    "index": "Index",
 }
+_PERCENT_KINDS = frozenset(
+    {
+        "percentOfGrandTotal", "percentOfColumnTotal", "percentOfRowTotal", "percentOf",
+        "percentOfParentRowTotal", "percentOfParentColumnTotal", "percentOfParentTotal",
+        "percentDifferenceFrom", "percentRunningTotalIn",
+    }
+)
+_FORMATS = {"index": "0.00", "rankAscending": "#,##0", "rankDescending": "#,##0"}
 
 _PART = re.compile(r"\[(?:[^\]]|\]\])*\]")
 
@@ -45,13 +64,14 @@ def build_query(cube: str, layout: Layout) -> str:
     definitions, measure_names = _value_members(layout)
     measures = "{" + ", ".join(measure_names) + "}" if measure_names else "{" + DEFAULT_MEASURE + "}"
 
+    options = layout.options
     if layout.columns:
-        columns = f"CrossJoin({_axis_set(layout.columns, layout)}, {measures})"
+        columns = f"CrossJoin({_axis_set(layout.columns, options.grand_total_column, options.subtotals)}, {measures})"
     else:
         columns = measures
     axes = [f"{non_empty}{columns} ON COLUMNS"]
     if layout.rows:
-        axes.append(f"{non_empty}{_axis_set(layout.rows, layout)} ON ROWS")
+        axes.append(f"{non_empty}{_axis_set(layout.rows, options.grand_total_row, options.subtotals)} ON ROWS")
 
     on_axes = (*layout.rows, *layout.columns)
     value_filtered = any(placed.value_filter for placed in on_axes)
@@ -69,10 +89,10 @@ def build_query(cube: str, layout: Layout) -> str:
             # The sheet shows "All" for this filter. Say so explicitly, or the cube
             # would apply the hierarchy's default member, which need not be All.
             slicer.append(placed.all_member)
-    for placed in on_axes:
-        narrowed = _narrowing(placed)
-        if narrowed:
-            source = _subselect("{" + narrowed + "}", source)
+    for fields in (layout.rows, layout.columns):
+        for depth, placed in enumerate(fields):
+            for narrowed in _narrowing(fields, depth):
+                source = _subselect("{" + narrowed + "}", source)
 
     with_clause = "WITH " + " ".join(definitions) + " " if definitions else ""
     where = f" WHERE ({', '.join(slicer)})" if slicer else ""
@@ -102,8 +122,14 @@ def members_query(
 
 
 def show_as_caption(value: ValueField) -> str:
-    """The header caption of a value field shown as a percentage."""
-    return f"{value.caption or _last_part(value.measure)} ({SHOW_AS_LABELS[value.show_as]})"
+    """The header caption of a value field shown another way, e.g. "Rides (% Of Calendar, 2025)"."""
+    label = SHOW_AS_LABELS[value.show_as]
+    if value.base_field:
+        label += f" {_last_part(value.base_field)}"
+    if value.base_item:
+        item = value.base_item if value.base_item in ("previous", "next") else _last_part(value.base_item)
+        label += f", {item}"
+    return f"{value.caption or _last_part(value.measure)} ({label})"
 
 
 def details_slicer(layout: Layout, members: list[str], measure: str) -> list[str]:
@@ -150,12 +176,6 @@ def details_query(cube: str, layout: Layout, members: list[str], measure: str, m
     )
 
 
-def hierarchy_of(unique_name: str) -> str:
-    """The hierarchy part of a member's unique name, lower-cased for comparison."""
-    parts = _PART.findall(unique_name)
-    return ".".join(parts[:2]).lower() if len(parts) >= 2 else unique_name.lower()
-
-
 # -- query pieces ------------------------------------------------------------------
 def _set(names: tuple[str, ...] | list[str]) -> str:
     return "{" + ", ".join(names) + "}"
@@ -186,16 +206,19 @@ def _detail(placed: PlacedField) -> str:
     return detail
 
 
-def _axis_set(fields: tuple[PlacedField, ...], layout: Layout) -> str:
+def _axis_set(fields: tuple[PlacedField, ...], grand_total: bool, subtotals: bool) -> str:
     """Detail tuples followed by their totals, outermost total last.
 
     T(n) = {D(n), {All(n)}}
     T(k) = {CrossJoin(D(k), T(k+1)), {(All(k), …, All(n))}}
 
     The All tuple at depth 0 is the grand total; deeper ones are subtotals of the
-    hierarchy just outside them.
+    hierarchy just outside them. When a field further in sorts by a measure, the
+    CrossJoin becomes a Generate, so that the inner order is worked out separately
+    for each outer item, as in Excel.
     """
     count = len(fields)
+    sorts_by_value = [bool(f.sort and f.sort.by == "measure") for f in fields]
 
     def all_tuple(start: int) -> str | None:
         alls = [f.all_member for f in fields[start:]]
@@ -205,24 +228,45 @@ def _axis_set(fields: tuple[PlacedField, ...], layout: Layout) -> str:
 
     def build(depth: int) -> str:
         detail = _detail(fields[depth])
-        body = detail if depth == count - 1 else f"CrossJoin({detail}, {build(depth + 1)})"
-        wanted = layout.options.grand_totals if depth == 0 else layout.options.subtotals
+        if depth == count - 1:
+            body = detail
+        elif any(sorts_by_value[depth + 1 :]):
+            body = f"Generate({detail}, CrossJoin({{{fields[depth].hierarchy}.CurrentMember}}, {build(depth + 1)}))"
+        else:
+            body = f"CrossJoin({detail}, {build(depth + 1)})"
+        wanted = grand_total if depth == 0 else subtotals
         total = all_tuple(depth) if wanted else None
         return f"{{{body}, {{{total}}}}}" if total else body
 
     return build(0)
 
 
-def _narrowing(placed: PlacedField) -> str | None:
-    """The field's top-level items after its label and value filters, or None."""
-    if placed.label_filter is None and placed.value_filter is None:
-        return None
-    expression = _top_level(placed.hierarchy, placed.all_member)
+def _narrowing(fields: tuple[PlacedField, ...], depth: int) -> list[str]:
+    """Sub-select sets for the field at `depth` on its axis: label filter, then value filter.
+
+    A value filter on a field inside other fields is evaluated for each combination of
+    the outer fields' items (the top 3 cities in each country), as Excel does.
+    """
+    placed = fields[depth]
+    top = _top_level(placed.hierarchy, placed.all_member)
+    sets = []
     if placed.label_filter is not None:
-        expression = f"Filter({expression}, {_label_condition(placed.hierarchy, placed.label_filter)})"
+        sets.append(f"Filter({top}, {_label_condition(placed.hierarchy, placed.label_filter)})")
     if placed.value_filter is not None:
-        expression = _value_expression(expression, placed.value_filter)
-    return expression
+        if depth == 0:
+            sets.append(_value_expression(top, placed.value_filter))
+        else:
+            outer = fields[:depth]
+            outer_items = (
+                _top_level(outer[0].hierarchy, outer[0].all_member)
+                if len(outer) == 1
+                else "CrossJoin(" + ", ".join(_top_level(f.hierarchy, f.all_member) for f in outer) + ")"
+            )
+            current = ", ".join(f"{f.hierarchy}.CurrentMember" for f in outer)
+            current = "{" + (f"({current})" if len(outer) > 1 else current) + "}"
+            per_outer = _value_expression(f"CrossJoin({current}, {top})", placed.value_filter)
+            sets.append(f"Generate({outer_items}, {per_outer})")
+    return sets
 
 
 def _label_condition(hierarchy: str, label: LabelFilter) -> str:
@@ -271,25 +315,103 @@ def _value_members(layout: Layout) -> tuple[list[str], list[str]]:
     """WITH MEMBER definitions for "Show Values As", and the measures to put on columns."""
     definitions: list[str] = []
     names: list[str] = []
-    row_alls = [f.all_member for f in layout.rows if f.all_member]
-    column_alls = [f.all_member for f in layout.columns if f.all_member]
     for value in layout.values:
         if value.show_as == "normal":
             names.append(value.measure)
             continue
-        alls = {
-            "percentOfGrandTotal": row_alls + column_alls,
-            "percentOfColumnTotal": row_alls,
-            "percentOfRowTotal": column_alls,
-        }[value.show_as]
-        total = "(" + ", ".join([value.measure, *alls]) + ")"
         name = "[Measures]." + quote_identifier(show_as_caption(value))
-        definitions.append(
-            f"MEMBER {name} AS IIF({total} = 0, NULL, {value.measure} / {total}), "
-            f"FORMAT_STRING = {quote_string('Percent')}"
-        )
+        definition = f"MEMBER {name} AS {_shown_as(value, layout)}"
+        if value.show_as in _PERCENT_KINDS:
+            definition += f", FORMAT_STRING = {quote_string('Percent')}"
+        elif value.show_as in _FORMATS:
+            definition += f", FORMAT_STRING = {quote_string(_FORMATS[value.show_as])}"
+        definitions.append(definition)
         names.append(name)
     return definitions, names
+
+
+def _tuple(*parts: str) -> str:
+    return "(" + ", ".join(parts) + ")"
+
+
+def _ratio(numerator: str, denominator: str) -> str:
+    return f"IIF({denominator} = 0, NULL, {numerator} / {denominator})"
+
+
+def _is_all(placed: PlacedField) -> str | None:
+    return f"{placed.hierarchy}.CurrentMember IS {placed.all_member}" if placed.all_member else None
+
+
+def _shown_as(value: ValueField, layout: Layout) -> str:
+    """The MDX for one "Show Values As" kind, Excel's definitions."""
+    m = value.measure
+    kind = value.show_as
+    row_alls = [f.all_member for f in layout.rows if f.all_member]
+    column_alls = [f.all_member for f in layout.columns if f.all_member]
+
+    if kind == "percentOfGrandTotal":
+        return _ratio(m, _tuple(m, *row_alls, *column_alls))
+    if kind == "percentOfColumnTotal":
+        return _ratio(m, _tuple(m, *row_alls))
+    if kind == "percentOfRowTotal":
+        return _ratio(m, _tuple(m, *column_alls))
+    if kind in ("percentOfParentRowTotal", "percentOfParentColumnTotal"):
+        # The innermost field not at its total decides whose parent divides.
+        expression = "1"
+        for placed in layout.rows if kind == "percentOfParentRowTotal" else layout.columns:
+            ratio = _ratio(m, _tuple(m, f"{placed.hierarchy}.CurrentMember.Parent"))
+            at_all = _is_all(placed)
+            expression = f"IIF(NOT ({at_all}), {ratio}, {expression})" if at_all else ratio
+        return expression
+    if kind == "index":
+        everything = _tuple(m, *row_alls, *column_alls)
+        row_total, column_total = _tuple(m, *column_alls), _tuple(m, *row_alls)
+        return (
+            f"IIF({row_total} = 0 OR {column_total} = 0, NULL, "
+            f"({m} * {everything}) / ({row_total} * {column_total}))"
+        )
+
+    axis = layout.rows if any(f.hierarchy.lower() == value.base_field.lower() for f in layout.rows) else layout.columns
+    position = next(i for i, f in enumerate(axis) if f.hierarchy.lower() == value.base_field.lower())
+    base = axis[position]
+    at_all = _is_all(base)
+    current = f"{base.hierarchy}.CurrentMember"
+
+    if kind == "percentOfParentTotal":
+        inside = [f.all_member for f in axis[position + 1 :] if f.all_member]
+        return _ratio(m, _tuple(m, *inside))
+    if kind in ("runningTotalIn", "percentRunningTotalIn"):
+        running = f"Sum({{{current}.Level.Members.Item(0) : {current}}}, {m})"
+        if kind == "runningTotalIn":
+            return f"IIF({at_all}, {m}, {running})" if at_all else running
+        if not base.all_member:
+            return "NULL"
+        return f"IIF({at_all}, 1, {_ratio(running, _tuple(m, base.all_member))})"
+    if kind in ("rankAscending", "rankDescending"):
+        order = "BASC" if kind == "rankAscending" else "BDESC"
+        blank = " OR ".join(c for c in (at_all, f"IsEmpty({m})") if c)
+        ranked = f"Order(NonEmpty({current}.Level.Members, {{{m}}}), {m}, {order})"
+        return f"IIF({blank}, NULL, Rank({current}, {ranked}, {m}))"
+
+    # percentOf, differenceFrom, percentDifferenceFrom: against a base item
+    if value.base_item == "previous":
+        item = f"{current}.PrevMember"
+    elif value.base_item == "next":
+        item = f"{current}.NextMember"
+    else:
+        item = value.base_item
+    other = _tuple(m, item)
+    blanks = [c for c in (at_all,) if c]
+    if value.base_item not in ("previous", "next"):
+        blanks.append(f"{current} IS {item}")
+    if kind == "percentOf":
+        ratio = _ratio(m, other)
+        return f"IIF({at_all}, NULL, {ratio})" if at_all else ratio
+    blanks.append(f"IsEmpty({other})")
+    if kind == "differenceFrom":
+        return f"IIF({' OR '.join(blanks)}, NULL, {m} - {other})"
+    blanks.append(f"{other} = 0")
+    return f"IIF({' OR '.join(blanks)}, NULL, ({m} - {other}) / {other})"
 
 
 def _number(value: float) -> str:

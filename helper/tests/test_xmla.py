@@ -211,3 +211,8 @@ def test_drillthrough_rowset_columns_follow_the_schema_and_values_are_typed():
 def test_a_rowset_without_schema_falls_back_to_first_seen_columns_as_text():
     parsed = xmla.parse(x.rowset([{"A": "1", "B": "x"}, {"B": "y", "C": "2"}]))
     assert xmla.typed_rows(parsed) == [["1", "x", None], [None, "y", "2"]]
+
+
+def test_a_member_with_an_empty_caption_reads_blank_as_in_excel():
+    data = x.cellset(axes=[x.axis("Axis0", [[x.member("[Geo].[City]", "[Geo].[City].&[]", "", 1)]])], cells=[])
+    assert xmla.parse(data).cellset.axes[0][0][0].caption == "(blank)"
