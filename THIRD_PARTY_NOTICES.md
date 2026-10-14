@@ -18,6 +18,23 @@ instance-name resolution, and error categories for a desktop user interface.
 
 ## Runtime dependencies
 
-Installed from PyPI into the helper's own environment; see their own licences:
-pyspnego (MIT), cryptography (Apache-2.0 / BSD), keyring (MIT).
-The task pane bundles React (MIT).
+Cube Explorer itself is licensed under the GNU General Public License, version 3 or
+later (see `LICENSE`). Every library below is under a licence that permits that.
+
+Installed by `install.sh` from PyPI into the helper's private environment (not part of
+this repository), each under its own licence:
+
+| Library | Licence |
+|---|---|
+| pyspnego | MIT |
+| keyring (with jaraco.classes, jaraco.context, jaraco.functools, more-itertools) | MIT |
+| cryptography | Apache-2.0 or BSD-3-Clause |
+| cffi | MIT-0 |
+| pycparser | BSD-3-Clause |
+
+Bundled into the Excel panel when it is built: React, React DOM and Scheduler (MIT).
+
+Tools the installer uses, downloaded from their publishers and checked against pinned
+SHA-256 checksums, and not shipped with Cube Explorer: uv (Apache-2.0 or MIT), Python
+(PSF License), Node.js (MIT). Build-only packages (TypeScript, Vite, Vitest and their
+dependencies) are listed in `addin/package-lock.json`.

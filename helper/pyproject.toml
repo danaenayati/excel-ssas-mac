@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "cubebridge"
 version = "0.1.0"
 description = "Local helper that connects Excel for Mac to SQL Server Analysis Services"
+license = "GPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
   "pyspnego>=0.10",
