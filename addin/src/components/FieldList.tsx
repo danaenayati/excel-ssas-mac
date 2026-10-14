@@ -235,12 +235,20 @@ const LEAF_ICONS: Record<Leaf["type"], "attribute" | "hierarchy" | "kpi" | "set"
   calculated: null,
 };
 
-/** Keep the leaves whose caption contains `needle`, and the branches above them. */
+/**
+ * Keep the leaves whose caption contains `needle`, and the branches above them; a branch
+ * whose own label contains it (a table, measure group or folder) is kept whole.
+ */
 export function filterFieldTree(entries: Entry[], needle: string): Entry[] {
   if (needle === "") return entries;
   const out: Entry[] = [];
   for (const entry of entries) {
     if (entry.type === "branch") {
+      // A table, measure group or folder found by its own name is listed whole.
+      if (entry.label.toLowerCase().indexOf(needle) >= 0) {
+        out.push(entry);
+        continue;
+      }
       const children = filterFieldTree(entry.children, needle);
       if (children.length > 0) out.push({ ...entry, children });
     } else if (captionOf(entry).toLowerCase().indexOf(needle) >= 0) {
