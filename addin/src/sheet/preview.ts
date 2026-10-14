@@ -33,6 +33,8 @@ export interface PreviewCell {
   fill?: boolean;
   muted?: boolean;
   indent?: number;
+  /** A KPI Status or Trend cell: drawn as an icon, as Excel does. */
+  icon?: "status" | "trend";
 }
 
 export interface PreviewSnapshot {
@@ -196,6 +198,7 @@ export class PreviewHost implements SheetHost {
     each(block.fill, (cell) => (cell.fill = true));
     each(block.muted, (cell) => (cell.muted = true));
     for (const group of block.indents) each(group.rects, (cell) => (cell.indent = group.level));
+    for (const icon of block.icons ?? []) each([icon.rect], (cell) => (cell.icon = icon.kind));
 
     this.names.set(reportId, { sheetId: sheet.id, rect: target });
     this.changed();

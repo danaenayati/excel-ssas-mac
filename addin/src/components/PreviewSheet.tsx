@@ -56,7 +56,15 @@ const Row = memo(
           style={cell && cell.indent ? { paddingLeft: 4 + cell.indent * 10 } : undefined}
           onMouseDown={() => onSelect(row, col)}
         >
-          {cell ? formatForPreview(cell.value, cell.format) : ""}
+          {cell && cell.icon && typeof cell.value === "number" ? (
+            <span className={cx("pv-icon", cell.icon, cell.value >= 0.5 ? "up" : cell.value >= -0.5 ? "level" : "down")}>
+              {cell.icon === "trend" ? (cell.value >= 0.5 ? "↑" : cell.value >= -0.5 ? "→" : "↓") : "●"}
+            </span>
+          ) : cell ? (
+            formatForPreview(cell.value, cell.format)
+          ) : (
+            ""
+          )}
         </td>,
       );
     }

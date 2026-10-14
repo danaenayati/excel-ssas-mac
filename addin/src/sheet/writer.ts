@@ -154,6 +154,19 @@ function applyFormat(
   }
 }
 
+/** Excel's KPI icons: -1 red / down, 0 yellow / level, 1 green / up; the icon only. */
+function addKpiIcons(range: Excel.Range, kind: "status" | "trend"): void {
+  const format = range.conditionalFormats.add(Excel.ConditionalFormatType.iconSet);
+  const icons = format.iconSet;
+  icons.style = kind === "status" ? Excel.IconSet.threeTrafficLights1 : Excel.IconSet.threeArrows;
+  icons.showIconOnly = true;
+  icons.criteria = [
+    {} as Excel.ConditionalIconCriterion,
+    { type: Excel.ConditionalFormatIconRuleType.number, operator: Excel.ConditionalIconCriterionOperator.greaterThanOrEqual, formula: "=-0.5" },
+    { type: Excel.ConditionalFormatIconRuleType.number, operator: Excel.ConditionalIconCriterionOperator.greaterThanOrEqual, formula: "=0.5" },
+  ];
+}
+
 export async function writeBlock(
   context: Excel.RequestContext,
   reportId: string,
@@ -177,6 +190,16 @@ export async function writeBlock(
   }
   targetRange.clear();
   await context.sync();
+  if (supportsExcelApi("1.6")) {
+    // KPI icons from the last write are conditional formats, which clear() may leave.
+    try {
+      if (previous) context.workbook.worksheets.getItem(previous.sheetId).getRange(rectA1(previous)).conditionalFormats.clearAll();
+      targetRange.conditionalFormats.clearAll();
+      await context.sync();
+    } catch {
+      // Nothing to clear, or not allowed: the new write goes on regardless.
+    }
+  }
 
   // 2. Number formats, then values, one chunk per request. Formats go first so that
   //    text cells are already "Text" when their value arrives.
@@ -228,6 +251,19 @@ export async function writeBlock(
   if (block.autofit) targetRange.format.autofitColumns();
   setName(context, reportId, targetRange);
   await context.sync();
+
+  // 4. KPI Status and Trend as icons, as Excel shows them. Only a look: a refusal leaves
+  //    the numbers (-1, 0, 1) in place.
+  if (block.icons && block.icons.length > 0 && supportsExcelApi("1.6")) {
+    try {
+      for (const icon of block.icons) {
+        addKpiIcons(sheet.getRange(rectA1(offsetRect(icon.rect, anchor.row, anchor.col))), icon.kind);
+      }
+      await context.sync();
+    } catch {
+      // Icon sets refused (an older Excel): the numbers stay.
+    }
+  }
 
   return { sheetId: anchor.sheetId, sheetName: anchor.sheetName, ...target };
 }

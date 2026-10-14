@@ -1674,3 +1674,9 @@ code.calc-detail {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* KPI icons in the preview sheet, in Excel's colours. */
+.pv-icon.up { color: #00a651; }
+.pv-icon.level { color: #f5b800; }
+.pv-icon.down { color: #e3171d; }
+.pv-icon.trend.level { color: #f5b800; }

@@ -135,6 +135,8 @@ export interface BlockFields {
   valueFormats?: (string | null)[];
   /** "Repeat All Item Labels": write a repeated outer row label on every line. Not in compact form. */
   repeatLabels?: boolean;
+  /** For each value field in Values order: a KPI's Status or Trend, shown as icons as in Excel. */
+  valueIcons?: (KpiIcon | null)[];
   /** "For empty cells show": the text for value cells that have no value. */
   emptyCellText?: string;
   /** Excel's Report Layout. Absent: tabular. */
@@ -159,6 +161,9 @@ export function blockFields(
     rowsFiltered: layout.rows.map(isFiltered),
     columnsFiltered: layout.columns.map(isFiltered),
     valueFormats: (layout.values ?? []).map((value) => value.numberFormat || null),
+    valueIcons: (layout.values ?? []).map((value) =>
+      value.kpi && (value.kpi.part === "status" || value.kpi.part === "trend") ? value.kpi.part : null,
+    ),
     repeatLabels: Boolean(layout.options && layout.options.repeatLabels),
     emptyCellText: (layout.options && layout.options.emptyCellText) || "",
   };
@@ -184,9 +189,14 @@ export function valueFieldIndex(
   return index !== undefined && index >= 0 && index < valueFields ? index : null;
 }
 
+/** How a KPI column is drawn: Status as traffic lights, Trend as arrows (values -1, 0, 1). */
+export type KpiIcon = "status" | "trend";
+
 export interface Block {
   rows: number;
   cols: number;
+  /** Value columns of KPI parts that Excel shows as icons rather than numbers. */
+  icons?: { kind: KpiIcon; rect: Rect }[];
   /** rows x cols. Empty cells are "". */
   values: SheetValue[][];
   /** rows x cols Excel number formats. */
@@ -428,6 +438,13 @@ export function buildBlock(input: Grid, fields: BlockFields = { filters: 0, rows
           : override(c) ?? palette[formats[c]] ?? GENERAL_FORMAT;
     }
   }
+  const valueIcons = fields.valueIcons ?? [];
+  const icons: { kind: KpiIcon; rect: Rect }[] = [];
+  for (let c = 0; N > 0 && c < C; c++) {
+    const index = valueFieldIndex(grid.colValueIndex, c, valueIcons.length);
+    const kind = index === null ? null : valueIcons[index];
+    if (kind) icons.push({ kind, rect: { row: dataTop, col: RS + c, rows: N, cols: 1 } });
+  }
   for (let r = 0; r < RS; r++) {
     runs(
       N,
@@ -468,6 +485,7 @@ export function buildBlock(input: Grid, fields: BlockFields = { filters: 0, rows
     fill,
     muted: [],
     indents,
+    icons,
     fieldCells,
     autofit: true,
     members,

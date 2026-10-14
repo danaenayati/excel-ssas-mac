@@ -751,10 +751,33 @@ describe("blockFields", () => {
       rowsFiltered: [false, false],
       columnsFiltered: [false],
       valueFormats: [],
+      valueIcons: [],
       repeatLabels: false,
       emptyCellText: "",
     });
     expect(blockFields({ filters: [], rows: [], columns: [] })).toMatchObject({ filters: 0, rows: 0, columns: [] });
+  });
+
+  it("marks a KPI's Status and Trend for icons, and nothing else", () => {
+    const values = [
+      { measure: "[Measures].[S]", caption: "S Value", kpi: { name: "S", part: "value" as const } },
+      { measure: "[Measures].[S]", caption: "S Status", kpi: { name: "S", part: "status" as const } },
+      { measure: "[Measures].[R]", caption: "R" },
+    ];
+    expect(blockFields({ filters: [], rows: [], columns: [], values }).valueIcons).toEqual([null, "status", null]);
+  });
+});
+
+describe("KPI icons", () => {
+  it("covers every data line of each Status or Trend column", () => {
+    // Columns alternate value fields 0 and 1; field 1 is a KPI's Status.
+    const block = buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"], valueIcons: [null, "status"] });
+    const { dataTop, dataRows, headerCols } = block.shape;
+    expect(block.icons).toEqual([1, 3, 5].map((c) => ({
+      kind: "status",
+      rect: { row: dataTop, col: headerCols + c, rows: dataRows, cols: 1 },
+    })));
+    expect(buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"] }).icons).toEqual([]);
   });
 });
 
