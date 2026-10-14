@@ -5,7 +5,7 @@ import { createMockApi } from "../dev/mockApi";
 import type { Extent, ReportDef } from "../sheet/host";
 import { FILTER_FORMAT, PLACEHOLDER_TEXT, guessFieldCell } from "../sheet/layout";
 import { PreviewHost } from "../sheet/preview";
-import type { Fields, Layout } from "../types";
+import type { Fields, Grid, Layout } from "../types";
 import { emptyLayout, layoutReducer, type LayoutAction } from "./layout";
 import { newReportDef } from "./report";
 import { ReportRunner, type RunOutcome } from "./runner";
@@ -438,6 +438,99 @@ describe("drill", () => {
     expect(cellText(0, 0)).toBe("City");
     expect(cellText(0, 1)).toBe("Rey");
     expect(cellText(3, 0)).toBe("Calendar");
+  });
+});
+
+describe("recalling a report written elsewhere", () => {
+  // `runner` stands for the right-click commands' runtime, `pane` for the task pane: two
+  // runners on one sheet, each with its own memory.
+  let pane: ReportRunner;
+  let queries: number;
+  let hold: boolean;
+
+  beforeEach(() => {
+    queries = 0;
+    hold = false;
+    const counted: Api = {
+      ...api,
+      query: (id, request, signal) => {
+        queries++;
+        if (!hold) return api.query(id, request, signal);
+        hold = false;
+        // A slow cube: answers only by being stopped.
+        return new Promise<Grid>((_resolve, reject) =>
+          signal?.addEventListener("abort", () =>
+            reject(new ApiFailure({ category: "cancelled", message: "Cancelled." }, 499)),
+          ),
+        );
+      },
+    };
+    pane = new ReportRunner({ api: counted, host, confirmOverwrite: async () => true });
+  });
+
+  const sheet = () => JSON.stringify([...host.snapshot().cells.entries()]);
+
+  it("remembers what each cell stands for without writing the sheet again", async () => {
+    host.select(0, 0);
+    const def = report(basic());
+    expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    expect(pane.memberAt(def.id, 1, 0)).toBeNull();
+    const before = sheet();
+
+    expect(await pane.recall(def)).toBe(true);
+    expect(pane.memberAt(def.id, 1, 0)?.member.caption).toBe("2025");
+    const at = { row: 1, col: 1, rows: 4, cols: 2 };
+    expect(pane.detailsFor(def.id, at)).toMatchObject({ measure: measure("Rides").uniqueName });
+    expect(sheet()).toBe(before);
+    expect(await host.loadReports()).toEqual([def]);
+  });
+
+  it("keeps nothing when the result is not the size of the block on the sheet", async () => {
+    host.select(0, 0);
+    const def = report(basic());
+    expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    // The definition says one year is expanded; the sheet still shows it collapsed.
+    const calendar = hierarchy("Calendar").uniqueName;
+    const expanded = {
+      ...def,
+      layout: layoutOf([{ type: "expand", hierarchy: calendar, member: "[Date].[Calendar].[Year].&[2025]" }], def.layout),
+    };
+    expect(await pane.recall(expanded)).toBe(false);
+    expect(pane.memberAt(def.id, 1, 0)).toBeNull();
+  });
+
+  it("tries once until the report's result is forgotten again", async () => {
+    host.select(0, 0);
+    const def = report(basic());
+    expect(await pane.recall(def)).toBe(false); // not on the sheet yet
+    expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    expect(await pane.recall(def)).toBe(false);
+    expect(queries).toBe(1);
+
+    pane.forget(def.id);
+    expect(await pane.recall(def)).toBe(true);
+    expect(await pane.recall(def)).toBe(false); // remembered: nothing to ask
+    expect(queries).toBe(2);
+  });
+
+  it("is stopped by a run, which has the connection to itself, and can be tried again", async () => {
+    host.select(0, 0);
+    const first = report(basic());
+    expectWritten(await runner.run(first, { anchor: null, useSelection: true }));
+    host.select(10, 0);
+    const second = report(basic());
+    expectWritten(await runner.run(second, { anchor: null, useSelection: true }));
+
+    hold = true;
+    const recalled = pane.recall(first);
+    const written = pane.run(second, { anchor: null, useSelection: false });
+    expect(await recalled).toBe(false);
+    expectWritten(await written);
+    expect(cancels).toBe(1);
+    expect(pane.memberAt(first.id, 1, 0)).toBeNull();
+
+    expect(await pane.recall(first)).toBe(true);
+    expect(pane.memberAt(first.id, 1, 0)?.member.caption).toBe("2025");
   });
 });
 

@@ -1099,6 +1099,20 @@ export function App({ api, host, mock }: Props) {
     // Offer it only if the field is still in the layout being edited.
     if (onSheet) filterField = filterLabels ? def.layout[filterLabels][0] ?? null : findField(def.layout, onSheet.hierarchy);
   }
+
+  // The selected cell is in a report written elsewhere (a right-click command, or before
+  // the pane opened): ask the cube for it again, quietly, rather than for a Refresh.
+  const recallId = drill.state === "stale" && def && !runner.runtimes.has(def.id) ? def.id : null;
+  useEffect(() => {
+    if (recallId === null || busy !== null) return;
+    const saved = reportsRef.current.find((d) => d.id === recallId);
+    if (!saved) return;
+    void runner.recall(saved).then((ok) => {
+      if (!ok) return;
+      setTick((n) => n + 1);
+      refreshSelection();
+    });
+  }, [recallId, busy, runner, reportsRef, refreshSelection]);
   // "Row Labels" with several fields: Windows names the button, and each field's selection.
   const labelsFields = def && filterLabels ? def.layout[filterLabels] : [];
   const filterSummary =

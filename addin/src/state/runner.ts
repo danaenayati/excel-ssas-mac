@@ -8,7 +8,8 @@
 //
 // It also writes the placeholder a report with no fields leaves at its place on the
 // sheet, and remembers, for each report, which member and which field each cell of the
-// last result stands for.
+// last result stands for: from its own writes, or by asking the cube again, without
+// writing, for a report written elsewhere (`recall`).
 //
 // A report's charts (sheet/charts.ts) follow it as a PivotChart follows its PivotTable:
 // every write of the report writes their data again. Insert Chart and Delete Chart go
@@ -123,6 +124,28 @@ export interface ReportRuntime {
   chart?: ChartTable;
 }
 
+/** What to remember of a result written as `block`. */
+function runtimeOf(def: ReportDef, grid: Grid, block: Block): ReportRuntime & { chart: ChartTable } {
+  // The block's grid has the columns in sheet order.
+  const shown = block.grid;
+  return {
+    rows: block.rows,
+    cols: block.cols,
+    members: block.members,
+    headers: { rowHeaders: shown.rowHeaders, colHeaderRows: shown.colHeaderRows },
+    stats: grid.stats,
+    dataRows: block.shape.dataRows,
+    shape: block.shape,
+    fieldCells: block.fieldCells,
+    layout: def.layout,
+    colValueIndex: shown.colValueIndex ?? [],
+    lines: block.lines,
+    columnMembers: block.columnMembers,
+    sheet: { values: block.values, numberFormats: block.numberFormats },
+    chart: chartTable(shown, def.layout),
+  };
+}
+
 export type RunOutcome =
   | {
       kind: "written";
@@ -184,6 +207,10 @@ export class ReportRunner {
   private flight: Flight | null = null;
   private cancelledSeqs = new Set<number>();
   private sheetQueue: Promise<unknown> = Promise.resolve();
+  /** Recalls in progress, by report. */
+  private readonly recalls = new Map<string, { connectionId: string; abort: AbortController }>();
+  /** Reports recalled since their result was last forgotten: one try each. */
+  private readonly recallTried = new Set<string>();
 
   constructor(private readonly deps: RunnerDeps) {}
 
@@ -309,6 +336,57 @@ export class ReportRunner {
   forget(reportId: string): void {
     this.runtimes.delete(reportId);
     this.charts.delete(reportId);
+    this.recallTried.delete(reportId);
+  }
+
+  /**
+   * Remember again what the cells of a report written elsewhere stand for (a right-click
+   * command rewrote it, or the pane was opened on a saved workbook), so that they can be
+   * drilled and filtered without a Refresh: ask the cube for the report, quietly, and keep
+   * the result only if it is the size of the block on the sheet. The sheet is not touched.
+   * One try per report until its result is forgotten again; a run stops it. Resolves true
+   * when the report's cells can be read again.
+   */
+  async recall(def: ReportDef): Promise<boolean> {
+    if (this.flight || this.runtimes.has(def.id) || this.recallTried.has(def.id) || isEmptyLayout(def.layout)) {
+      return false;
+    }
+    this.recallTried.add(def.id);
+    const seq = this.seq;
+    const entry = { connectionId: def.connectionId, abort: new AbortController() };
+    this.recalls.set(def.id, entry);
+    const dropped = () => seq !== this.seq || entry.abort.signal.aborted || this.runtimes.has(def.id);
+    try {
+      const request = { catalog: def.catalog, cube: def.cube, layout: def.layout };
+      const grid = await this.deps.api.query(def.connectionId, request, entry.abort.signal);
+      if (dropped()) return false;
+      const block = buildBlock(grid, blockFields(def.layout));
+      const extent = await this.deps.host.getReportExtent(def.id);
+      if (dropped() || !extent || extent.rows !== block.rows || extent.cols !== block.cols) return false;
+      this.runtimes.set(def.id, runtimeOf(def, grid, block));
+      return true;
+    } catch {
+      return false;
+    } finally {
+      if (this.recalls.get(def.id) === entry) this.recalls.delete(def.id);
+    }
+  }
+
+  /** Stop every recall, so that a run has the connection to itself. Each may be tried again. */
+  private async stopRecalls(): Promise<void> {
+    const stopped = [...this.recalls.entries()];
+    this.recalls.clear();
+    for (const [reportId, recall] of stopped) {
+      recall.abort.abort();
+      this.recallTried.delete(reportId);
+    }
+    for (const connectionId of new Set(stopped.map(([, recall]) => recall.connectionId))) {
+      try {
+        await this.deps.api.cancel(connectionId);
+      } catch {
+        // Nothing to stop, or the helper is gone; the run will say so.
+      }
+    }
   }
 
   /** The report's charts: as this runner last saved them, else as its definition says. */
@@ -397,6 +475,12 @@ export class ReportRunner {
       return { kind: cancelled ? "cancelled" : "superseded" };
     };
 
+    if (this.recalls.size > 0) {
+      await this.stopRecalls();
+      const gone = stale();
+      if (gone) return gone;
+    }
+
     // Tell the helper to drop the query this run replaces before sending a new one,
     // so the two cannot be confused on the server.
     const previous = this.flight;
@@ -475,27 +559,9 @@ export class ReportRunner {
     const block = buildBlock(grid, blockFields(def.layout));
     const placed = await this.place(def, block, options, flight, stale);
     if ("kind" in placed) return placed;
-    // The block's grid has the columns in sheet order.
-    const shown = block.grid;
-    const table = chartTable(shown, def.layout);
-    const runtime: ReportRuntime = {
-      rows: block.rows,
-      cols: block.cols,
-      members: block.members,
-      headers: { rowHeaders: shown.rowHeaders, colHeaderRows: shown.colHeaderRows },
-      stats: grid.stats,
-      dataRows: block.shape.dataRows,
-      shape: block.shape,
-      fieldCells: block.fieldCells,
-      layout: def.layout,
-      colValueIndex: shown.colValueIndex ?? [],
-      lines: block.lines,
-      columnMembers: block.columnMembers,
-      sheet: { values: block.values, numberFormats: block.numberFormats },
-      chart: table,
-    };
+    const runtime = runtimeOf(def, grid, block);
     this.runtimes.set(def.id, runtime);
-    const followed = await this.followCharts(def, table);
+    const followed = await this.followCharts(def, runtime.chart);
     await this.deps.host.saveReport(followed.def);
     const outcome: RunOutcome = { kind: "written", extent: placed, runtime, def: followed.def };
     if (followed.error) outcome.chartError = followed.error;

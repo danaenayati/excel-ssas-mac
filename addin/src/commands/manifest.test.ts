@@ -31,6 +31,14 @@ describe("the manifest's right-click menu", () => {
     expect(used.filter((id) => !defined.has(id))).toEqual([]);
   });
 
+  it("gives every item an icon, without which Excel for Mac crashes on right-click", () => {
+    const items = all(/<Item id="[^"]+">([\s\S]*?)<\/Item>/);
+    expect(items).toHaveLength(COMMANDS.length);
+    for (const item of items) {
+      for (const size of ["16", "32", "80"]) expect(item).toContain(`<bt:Image size="${size}" resid="Icon.${size}"/>`);
+    }
+  });
+
   it("uses Windows' words", () => {
     const labels = all(/<bt:String id="Cell\.\w+\.Label" DefaultValue="([^"]+)"/);
     expect(labels).toEqual([

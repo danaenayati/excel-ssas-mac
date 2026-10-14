@@ -107,8 +107,10 @@ loop can be tried and tested off VPN.
 - Grid: header rows for column hierarchies and measures, one sheet column per row
   hierarchy, indent by level, bold totals, Excel number formats derived from the cube's
   format strings.
-- The member behind each label is kept in memory for drill. After reopening a file,
-  one Refresh restores it.
+- The member behind each label is kept in memory for drill. For a report written
+  elsewhere (after reopening a file, or by a right-click command) the pane asks the cube
+  for it again, without writing, when a cell of it is selected, and keeps the result
+  only if it is the size of the block on the sheet.
 
 ## Security
 

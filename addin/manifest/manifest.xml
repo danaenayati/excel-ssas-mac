@@ -5,7 +5,7 @@
            xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
            xsi:type="TaskPaneApp">
   <Id>9dcc8fab-dcab-4acc-93d0-c5938eaa1342</Id>
-  <Version>1.2.0.0</Version>
+  <Version>1.2.1.0</Version>
   <ProviderName>CubeBridge</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Cube Explorer"/>
@@ -114,6 +114,11 @@
                     <Title resid="Cell.ShowDetails.Label"/>
                     <Description resid="Cell.ShowDetails.Tooltip"/>
                   </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
                   <Action xsi:type="ExecuteFunction">
                     <FunctionName>cubeShowDetails</FunctionName>
                   </Action>
@@ -124,6 +129,11 @@
                     <Title resid="Cell.Refresh.Label"/>
                     <Description resid="Cell.Refresh.Tooltip"/>
                   </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
                   <Action xsi:type="ExecuteFunction">
                     <FunctionName>cubeRefresh</FunctionName>
                   </Action>
@@ -134,6 +144,11 @@
                     <Title resid="Cell.RefreshAll.Label"/>
                     <Description resid="Cell.RefreshAll.Tooltip"/>
                   </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
                   <Action xsi:type="ExecuteFunction">
                     <FunctionName>cubeRefreshAll</FunctionName>
                   </Action>
@@ -144,6 +159,11 @@
                     <Title resid="Cell.Expand.Label"/>
                     <Description resid="Cell.Expand.Tooltip"/>
                   </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
                   <Action xsi:type="ExecuteFunction">
                     <FunctionName>cubeExpand</FunctionName>
                   </Action>
@@ -154,6 +174,11 @@
                     <Title resid="Cell.Collapse.Label"/>
                     <Description resid="Cell.Collapse.Tooltip"/>
                   </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
                   <Action xsi:type="ExecuteFunction">
                     <FunctionName>cubeCollapse</FunctionName>
                   </Action>
@@ -164,6 +189,11 @@
                     <Title resid="Cell.ExpandField.Label"/>
                     <Description resid="Cell.ExpandField.Tooltip"/>
                   </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
                   <Action xsi:type="ExecuteFunction">
                     <FunctionName>cubeExpandField</FunctionName>
                   </Action>
@@ -174,6 +204,11 @@
                     <Title resid="Cell.CollapseField.Label"/>
                     <Description resid="Cell.CollapseField.Tooltip"/>
                   </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
                   <Action xsi:type="ExecuteFunction">
                     <FunctionName>cubeCollapseField</FunctionName>
                   </Action>
