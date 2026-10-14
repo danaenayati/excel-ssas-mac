@@ -62,8 +62,11 @@ _HIERARCHIES = (
 )
 _DATE_HIERARCHIES = frozenset({"[Date].[Month Start]"})
 CITY_HIERARCHY = "[Geography].[City]"
-# Named sets: unique name -> (caption, how its cities are chosen)
-_SETS = {"[Top 3 Cities]": "Top 3 Cities", "[Gulf Cities]": "Gulf Cities"}
+# Named sets: unique name -> caption. The first two are cities; the third pairs cities
+# with services, so it spans two fields.
+_SETS = {"[Top 3 Cities]": "Top 3 Cities", "[Gulf Cities]": "Gulf Cities", "[Top Service Cities]": "Top Service Cities"}
+SERVICE_HIERARCHY = "[Service].[Service Type]"
+_SET_HIERARCHIES = {"[Top Service Cities]": (CITY_HIERARCHY, SERVICE_HIERARCHY)}
 _KPI = "Average Fare"
 _KPI_GOAL = 4.0
 _KPI_FORMATS = {"value": "Currency", "goal": "Currency", "status": "0", "trend": "0"}
@@ -134,6 +137,12 @@ class DemoBackend:
             "[Top 3 Cities]": sorted(by_city, key=lambda p: -by_city[p])[:3],
             "[Gulf Cities]": [("Dubai",), ("Abu Dhabi",)],
         }
+        by_pair: dict[tuple, int] = {}
+        for fact in self._facts:
+            key = ((fact["city"],), (fact["service"],))
+            by_pair[key] = by_pair.get(key, 0) + fact["rides"]
+        # Tuples of paths, one per hierarchy of the set.
+        self._set_tuples = {"[Top Service Cities]": sorted(by_pair, key=lambda k: -by_pair[k])[:5]}
         everything = [0, 0.0, 0]
         for fact in self._facts:
             _add(everything, fact)
@@ -157,6 +166,11 @@ class DemoBackend:
             entry = {"uniqueName": h.unique_name, "caption": h.caption, "folder": "", "kind": h.kind, "allMember": h.all_member}
             if h.unique_name in _DATE_HIERARCHIES:
                 entry["isDate"] = True
+            if h.kind == "user":
+                entry["levels"] = [
+                    {"uniqueName": f"{h.unique_name}.[{name}]", "caption": name, "number": i + 1}
+                    for i, (name, _attr) in enumerate(h.levels)
+                ]
             dimension["hierarchies"].append(entry)
         return {
             "measures": [
@@ -170,15 +184,23 @@ class DemoBackend:
             ],
             "sets": [
                 {"uniqueName": name, "caption": caption, "folder": "", "dimension": "[Geography]",
-                 "hierarchy": CITY_HIERARCHY, "allMember": f"{CITY_HIERARCHY}.[All]"}
+                 "hierarchy": CITY_HIERARCHY, "allMember": f"{CITY_HIERARCHY}.[All]",
+                 "hierarchies": list(_SET_HIERARCHIES.get(name, (CITY_HIERARCHY,))),
+                 "allMembers": [f"{h}.[All]" for h in _SET_HIERARCHIES.get(name, (CITY_HIERARCHY,))]}
                 for name, caption in sorted(_SETS.items(), key=lambda item: item[1].lower())
             ],
         }
 
-    def members(self, catalog: str, cube: str, hierarchy: str, parent: str | None, search: str | None, limit: int) -> dict:
+    def members(
+        self, catalog: str, cube: str, hierarchy: str, parent: str | None, search: str | None, limit: int,
+        level: str | None = None,
+    ) -> dict:
         self._check(catalog, cube)
         h = self._hierarchy(hierarchy)
-        if search:
+        depth = self._level_depth(h, level) if level else 1
+        if depth > 1 and not search and not parent:
+            keys = [(h.unique_name, path) for path in self._level_paths(h.unique_name, depth)]
+        elif search:
             needle = search.lower()
             keys = [k for k in self._walk(h, ()) if needle in self._caption(k).lower()]
         else:
@@ -225,7 +247,10 @@ class DemoBackend:
             if name not in _MEASURES and name not in self._calculations:
                 raise CubeError("server", "The cube rejected the request.", f"The measure {name} was not found in the cube.")
 
-        facts = self._filtered_facts(layout)
+        # "Include filtered items in totals": the axes' selections and filters decide which
+        # items are shown, but the numbers, totals included, come from every fact.
+        non_visual = layout.options.include_filtered
+        facts = self._filtered_facts(layout, axes=not non_visual)
         # Label and value filters, each evaluated in the space the earlier ones left,
         # as the nested sub-selects of the real query are. A value filter on a field
         # inside others keeps, for each combination of outer items, its own winners.
@@ -239,7 +264,8 @@ class DemoBackend:
                         if _label_match(self._caption((h, p)), placed.label_filter)
                     }
                     allowed[h] = keep
-                    facts = [f for f in facts if self._top_path(placed, f) in keep]
+                    if not non_visual:
+                        facts = [f for f in facts if self._top_path(placed, f) in keep]
                 if placed.date_filter is not None:
                     window = dates.window(placed.date_filter, datetime.date.today())
                     keep = {
@@ -247,7 +273,8 @@ class DemoBackend:
                         if isinstance(p[0], datetime.date) and window.contains(p[0])
                     }
                     allowed[h] = keep
-                    facts = [f for f in facts if self._top_path(placed, f) in keep]
+                    if not non_visual:
+                        facts = [f for f in facts if self._top_path(placed, f) in keep]
                 if placed.value_filter is None:
                     continue
                 outer = fields[:depth]
@@ -260,10 +287,11 @@ class DemoBackend:
                     for p in self._value_items(placed, group, allowed)
                 }
                 allowed[h] = {p for _, p in pairs}
-                facts = [
-                    f for f in facts
-                    if (tuple(self._top_path(o, f) for o in outer), self._top_path(placed, f)) in pairs
-                ]
+                if not non_visual:
+                    facts = [
+                        f for f in facts
+                        if (tuple(self._top_path(o, f) for o in outer), self._top_path(placed, f)) in pairs
+                    ]
 
         options = layout.options
         row_tuples = (
@@ -278,8 +306,8 @@ class DemoBackend:
         )
         row_index = {t: i for i, t in enumerate(row_tuples)}
         col_index = {t: i for i, t in enumerate(col_tuples)}
-        row_shown = [{t[i] for t in row_tuples} for i in range(len(layout.rows))]
-        col_shown = [{t[i] for t in col_tuples} for i in range(len(layout.columns))]
+        row_shown = _shown_per_field(row_tuples, layout.rows)
+        col_shown = _shown_per_field(col_tuples, layout.columns)
 
         totals: dict[tuple[int, int], list[float]] = {}
         for fact in facts:
@@ -627,15 +655,25 @@ class DemoBackend:
         """Selected member paths for a field, or None when nothing is selected. A named
         set selects its own items, which also limits the totals."""
         if placed.named_set:
-            return list(self._set_paths.get(placed.named_set, []))
+            return None if placed.set_hierarchies else list(self._set_paths.get(placed.named_set, []))
         if not placed.members:
             return None
         self._hierarchy(placed.hierarchy)
         return [key[1] for key in map(self._by_name.get, placed.members) if key and key[0] == placed.hierarchy]
 
-    def _filtered_facts(self, layout: Layout) -> list[dict]:
+    def _filtered_facts(self, layout: Layout, axes: bool = True) -> list[dict]:
+        """The facts left by page filters and slicers, and (axes) by Rows' and Columns'
+        selections and sets too, as the query's sub-selects leave them."""
         facts = self._facts
-        for placed in (*layout.rows, *layout.columns, *layout.filters):
+        on_axes = (*layout.rows, *layout.columns) if axes else ()
+        for placed in on_axes:
+            if placed.named_set and placed.set_hierarchies:
+                tuples = set(self._set_tuples.get(placed.named_set, []))
+                facts = [
+                    f for f in facts
+                    if tuple(self._path_of(h, f)[:1] for h in placed.set_hierarchies) in tuples
+                ]
+        for placed in (*on_axes, *layout.filters, *layout.slicers):
             selected = self._selection(placed)
             if selected is None:
                 continue
@@ -651,37 +689,62 @@ class DemoBackend:
             return True
         return any(path[: len(s)] == s or s[: len(path)] == path for s in selected)
 
-    def _detail(self, placed: PlacedField, facts: list[dict], allowed: set[tuple] | None) -> list[_Key]:
+    def _detail(self, placed: PlacedField, facts: list[dict], allowed: set[tuple] | None) -> list[tuple[_Key, ...]]:
+        """The field's items, each a tuple of keys: one per hierarchy the field shows."""
         h = self._hierarchy(placed.hierarchy)
+        if placed.named_set and placed.set_hierarchies:
+            present = {tuple(self._path_of(x, f)[:1] for x in placed.set_hierarchies) for f in facts}
+            return [
+                tuple(zip(placed.set_hierarchies, paths))
+                for paths in self._set_tuples[placed.named_set]
+                if paths in present
+            ]
         if placed.named_set:
             # The set's items, in the set's order: nothing to expand or sort.
             present = {self._top_path(placed, f) for f in facts}
-            return [(h.unique_name, p) for p in self._set_paths[placed.named_set] if p in present]
+            return [((h.unique_name, p),) for p in self._set_paths[placed.named_set] if p in present]
         expanded = {self._by_name[name][1] for name in placed.expanded if name in self._by_name}
         selected = self._selection(placed)
         sort_key = self._sort_key(placed, facts)
         grouped = {self._by_name[m][1] for m in placed.grouped if m in self._by_name}
-        out: list[_Key] = []
+        depth = self._top_depth(placed)
+        out: list[tuple[_Key, ...]] = []
 
-        def visit(parent: tuple) -> None:
+        def visit(parent: tuple | None) -> None:
+            top = parent is None
+            candidates = (
+                (self._level_paths(h.unique_name, depth) if depth > 1 else self._children.get((h.unique_name, ()), []))
+                if top
+                else self._children.get((h.unique_name, parent), [])
+            )
             children = [
                 child
-                for child in self._children.get((h.unique_name, parent), [])
-                if self._in_space(child, selected) and (allowed is None or child[:1] in allowed)
-                and not (not parent and child in grouped)
+                for child in candidates
+                if self._in_space(child, selected) and (allowed is None or child[:depth] in allowed)
+                and not (top and child in grouped)
             ]
-            if not parent:
+            if top:
                 # Groups and calculated items follow the items, and sort with them.
                 children += [(_CUSTOM, item.name) for item in placed.custom_items]
             if sort_key is not None:
                 children.sort(key=sort_key, reverse=placed.sort.order == "desc")
             for child in children:
-                out.append((h.unique_name, child))
+                out.append(((h.unique_name, child),))
                 if child in expanded:
                     visit(child)
 
-        visit(())
+        visit(None)
         return out
+
+    def _top_depth(self, placed: PlacedField) -> int:
+        """Depth of the field's own items: 1, or the placed level's number."""
+        return placed.level.number if placed.level is not None else 1
+
+    def _level_depth(self, h: _Hierarchy, level: str) -> int:
+        for i, (name, _attr) in enumerate(h.levels):
+            if f"{h.unique_name}.[{name}]" == level:
+                return i + 1
+        raise CubeError("not-found", "That level is not in the sample cube.", level)
 
     def _sort_key(self, placed: PlacedField, facts: list[dict]):
         """How siblings are ordered: by caption, or by a measure over the current facts."""
@@ -709,7 +772,7 @@ class DemoBackend:
         return key
 
     def _top_path(self, placed: PlacedField, fact: dict) -> tuple:
-        return self._top_path_of(placed.hierarchy, fact)
+        return self._path_of(placed.hierarchy, fact)[: self._top_depth(placed)]
 
     def _top_path_of(self, hierarchy: str, fact: dict) -> tuple:
         h = self._hierarchies[hierarchy]
@@ -720,11 +783,9 @@ class DemoBackend:
         h = self._hierarchy(placed.hierarchy)
         selected = self._selection(placed)
         earlier = allowed.get(placed.hierarchy)
-        return [
-            p
-            for p in self._children.get((h.unique_name, ()), [])
-            if self._in_space(p, selected) and (earlier is None or p in earlier)
-        ]
+        depth = self._top_depth(placed)
+        tops = self._level_paths(h.unique_name, depth) if depth > 1 else self._children.get((h.unique_name, ()), [])
+        return [p for p in tops if self._in_space(p, selected) and (earlier is None or p in earlier)]
 
     def _value_items(self, placed: PlacedField, facts: list[dict], allowed: dict[str, set[tuple]]) -> list[tuple]:
         """The items that pass the field's value filter, measured over `facts`."""
@@ -745,29 +806,31 @@ class DemoBackend:
         grand_total: bool,
         at_top: bool = False,
     ) -> list[tuple[_Key, ...]]:
-        alls = [(f.hierarchy, ()) for f in fields]
-        by_value = [bool(f.sort and f.sort.by == "measure") for f in fields]
+        alls = [tuple((h, ()) for h in f.hierarchies) for f in fields]
+        non_visual = layout.options.include_filtered
+        per_outer = [bool(f.sort and f.sort.by == "measure") or (non_visual and f.value_filter is not None) for f in fields]
 
         def build(depth: int, scope: list[dict]) -> list[tuple[_Key, ...]]:
             detail = self._detail(fields[depth], scope, allowed.get(fields[depth].hierarchy))
             if depth == len(fields) - 1:
-                body = [(k,) for k in detail]
-            elif any(by_value[depth + 1 :]):
+                body = list(detail)
+            elif any(per_outer[depth + 1 :]):
                 # Inner order by value is worked out within each outer item (Generate).
                 body = []
-                for k in detail:
-                    inside = [f for f in scope if self._path_of(k[0], f)[: len(k[1])] == k[1]]
-                    body.extend((k,) + rest for rest in build(depth + 1, inside))
+                for item in detail:
+                    inside = [f for f in scope if all(self._path_of(h, f)[: len(p)] == p for h, p in item if p[:1] != (_CUSTOM,))]
+                    body.extend(item + rest for rest in build(depth + 1, inside))
             else:
                 inner = build(depth + 1, scope)
-                body = [(k,) + rest for k in detail for rest in inner]
+                body = [item + rest for item in detail for rest in inner]
             wanted = grand_total if depth == 0 else layout.options.subtotals
             if wanted:
+                total = tuple(k for keys in alls[depth:] for k in keys)
                 # The grand total always ends the axis; subtotals may head their group.
                 if depth > 0 and at_top:
-                    body.insert(0, tuple(alls[depth:]))
+                    body.insert(0, total)
                 else:
-                    body.append(tuple(alls[depth:]))
+                    body.append(total)
             return body
 
         return build(0, facts)
@@ -778,14 +841,20 @@ class DemoBackend:
             return [()]
         per_field = []
         for placed, visible in zip(fields, shown):
+            if placed.set_hierarchies:
+                # A set of several fields: the fact's own tuple, or the total of them all.
+                own = tuple((h, self._path_of(h, fact)[:1]) for h in placed.set_hierarchies)
+                total = tuple((h, ()) for h in placed.set_hierarchies)
+                per_field.append([c for c in (own, total) if c in visible])
+                continue
             h = self._hierarchies[placed.hierarchy]
             values = tuple(fact[attr] for _, attr in h.levels)
-            candidates = [(h.unique_name, values[:depth]) for depth in range(len(values) + 1)]
+            candidates = [((h.unique_name, values[:depth]),) for depth in range(len(values) + 1)]
             for item in placed.custom_items:
                 if item.members and any(self._by_name.get(m, (None, None))[1] == values[:1] for m in item.members):
-                    candidates.append((h.unique_name, (_CUSTOM, item.name)))
+                    candidates.append(((h.unique_name, (_CUSTOM, item.name)),))
             per_field.append([k for k in candidates if k in visible])
-        return itertools.product(*per_field)
+        return [tuple(k for keys in combo for k in keys) for combo in itertools.product(*per_field)]
 
     # -- cube formulas (worked out in demo_formulas.py) ----------------------------
     def cells(self, catalog: str, cube: str, tuples: list[list[str]]) -> list[dict]:
@@ -986,3 +1055,12 @@ def _evaluate(formula: str, resolve, what: str) -> object:
     if isinstance(result, float) and result.is_integer() and abs(result) < 2**53:
         return int(result)
     return result
+
+
+def _shown_per_field(tuples: list[tuple], fields: tuple[PlacedField, ...]) -> list[set[tuple]]:
+    """For each field, the key groups it shows on the axis (one key per hierarchy)."""
+    out, at = [], 0
+    for f in fields:
+        out.append({t[at:at + f.width] for t in tuples})
+        at += f.width
+    return out

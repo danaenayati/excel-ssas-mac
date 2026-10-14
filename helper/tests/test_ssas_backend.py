@@ -210,9 +210,13 @@ def test_fields_are_grouped_filtered_and_typed(backend):
          "parts": ["value", "goal", "trend"]},
     ]
     assert fields["sets"] == [
-        {"uniqueName": "[Mixed]", "caption": "Mixed", "folder": "F", "dimension": "[Geo]", "hierarchy": None, "allMember": None},
+        # A set spanning two fields lists both, so it can be placed.
+        {"uniqueName": "[Mixed]", "caption": "Mixed", "folder": "F", "dimension": "[Geo]", "hierarchy": "[Geo].[City]",
+         "allMember": "[Geo].[City].[All]", "hierarchies": ["[Geo].[City]", "[Date].[Calendar]"],
+         "allMembers": ["[Geo].[City].[All]", "[Date].[Calendar].[All Periods]"]},
         {"uniqueName": "[Top Cities]", "caption": "Top Cities", "folder": "", "dimension": "[Geo]",
-         "hierarchy": "[Geo].[City]", "allMember": "[Geo].[City].[All]"},
+         "hierarchy": "[Geo].[City]", "allMember": "[Geo].[City].[All]", "hierarchies": ["[Geo].[City]"],
+         "allMembers": ["[Geo].[City].[All]"]},
     ]
 
 

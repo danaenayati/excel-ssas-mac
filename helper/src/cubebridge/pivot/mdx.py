@@ -19,6 +19,11 @@ Excel uses it for PivotTables too. The shape follows what Excel generates:
   than the items, so that a ratio is worked out from a group's totals rather than
   added up across the group.
 - Date Filters compare each item's MemberValue with dates worked out in pivot/dates.py.
+- Slicers filter like page filters. "Include filtered items in totals" (non-visual
+  totals) moves item selections and label, date and value filters from sub-selects
+  onto the axis sets themselves, so the All members' totals count every item.
+- A field can be one level of a user hierarchy, or a named set spanning several
+  hierarchies (one tuple position per hierarchy).
 
 Every name comes through `Layout.from_json`, which has already validated it, and so
 has every formula (`validate_expression`), which is placed in parentheses.
@@ -108,26 +113,31 @@ def build_query(
 
     options = layout.options
     at_top = options.subtotals_at_top
+    nv = options.include_filtered
     if layout.columns:
         # Excel's "at Top of Group" moves row subtotals only: column subtotals stay right of their items.
-        columns = f"CrossJoin({_axis_set(layout.columns, options.grand_total_column, options.subtotals)}, {measures})"
+        column_set = _axis_set(layout.columns, options.grand_total_column, options.subtotals, False, nv, today)
+        columns = f"CrossJoin({column_set}, {measures})"
     else:
         columns = measures
     axes = [f"{non_empty}{columns} ON COLUMNS"]
     if layout.rows:
-        axes.append(f"{non_empty}{_axis_set(layout.rows, options.grand_total_row, options.subtotals, at_top)} ON ROWS")
+        row_set = _axis_set(layout.rows, options.grand_total_row, options.subtotals, at_top, nv, today)
+        axes.append(f"{non_empty}{row_set} ON ROWS")
 
     on_axes = (*layout.rows, *layout.columns)
-    value_filtered = any(placed.value_filter for placed in on_axes)
+    # A value filter in a sub-select needs page filters in the sub-selects too; on the axis
+    # (non-visual totals) it is evaluated in the WHERE clause's context anyway.
+    value_filtered = not nv and any(placed.value_filter for placed in on_axes)
     source = quote_identifier(cube)
     slicer: list[str] = []
-    for placed in on_axes:
+    for placed in on_axes if not nv else ():
         if placed.named_set:
             # Totals count only the set's items, as Excel's visual totals do.
             source = _subselect("{" + placed.named_set + "}", source)
         if placed.members:
             source = _subselect("(" + _set(placed.members) + ")", source)
-    for placed in layout.filters:
+    for placed in (*layout.filters, *layout.slicers):
         if len(placed.members) == 1 and not value_filtered:
             slicer.append(placed.members[0])
         elif placed.members:
@@ -136,7 +146,7 @@ def build_query(
             # The sheet shows "All" for this filter. Say so explicitly, or the cube
             # would apply the hierarchy's default member, which need not be All.
             slicer.append(placed.all_member)
-    for fields in (layout.rows, layout.columns):
+    for fields in (layout.rows, layout.columns) if not nv else ():
         for depth, placed in enumerate(fields):
             for narrowed in _narrowing(fields, depth, today):
                 source = _subselect("{" + narrowed + "}", source)
@@ -153,10 +163,17 @@ def members_query(
     parent: str | None,
     search: str | None,
     limit: int,
+    level: str | None = None,
 ) -> str:
-    """A query whose ROWS axis lists members; it returns no cells."""
+    """A query whose ROWS axis lists members; it returns no cells. With `level`, the top
+    items are that level's members (a field placed as one level)."""
     hierarchy = validate_unique_name(hierarchy)
-    if search:
+    if level and not search and not parent:
+        level = validate_unique_name(level)
+        if hierarchy_of(level) != hierarchy.lower():
+            raise CubeError("bad-request", "That level belongs to another field.")
+        members = f"{{{level}.Members}}"
+    elif search:
         members = (
             f"Filter({{{hierarchy}.AllMembers}}, "
             f"InStr(1, LCase({hierarchy}.CurrentMember.Member_Caption), {quote_string(search.lower())}) > 0)"
@@ -209,12 +226,12 @@ def details_slicer(layout: Layout, members: list[str], measure: str) -> list[str
             raise CubeError("bad-request", "Show Details was given two members of one field.")
         pinned.add(hierarchy)
         slicer.append(name)
-    for placed in layout.filters:
+    for placed in (*layout.filters, *layout.slicers):
         if len(placed.members) == 1:
             slicer.append(placed.members[0])
             pinned.add(placed.hierarchy.lower())
-    for placed in (*layout.rows, *layout.columns, *layout.filters):
-        if placed.narrowed and placed.hierarchy.lower() not in pinned:
+    for placed in (*layout.rows, *layout.columns, *layout.filters, *layout.slicers):
+        if placed.narrowed and not all(h.lower() in pinned for h in placed.hierarchies):
             raise CubeError(
                 "bad-request",
                 f"Show Details is not available here because '{placed.caption}' is filtered to several "
@@ -268,10 +285,49 @@ def _calculation_definitions(layout: Layout) -> list[str]:
     return out
 
 
-def _detail(placed: PlacedField) -> str:
+def _top(placed: PlacedField) -> str:
+    """The field's own items: its placed level's members, or the hierarchy's top level."""
+    if placed.level is not None:
+        return f"{{{placed.level.unique_name}.Members}}"
+    return _top_level(placed.hierarchy, placed.all_member)
+
+
+def _items_of(placed: PlacedField) -> str:
+    return "{" + placed.named_set + "}" if placed.named_set else _top(placed)
+
+
+def _current(placed: PlacedField) -> str:
+    """The field's current item: a member, or a tuple for a set of several hierarchies."""
+    parts = [f"{h}.CurrentMember" for h in placed.hierarchies]
+    return parts[0] if len(parts) == 1 else "(" + ", ".join(parts) + ")"
+
+
+def _selected_condition(placed: PlacedField) -> str:
+    """True for an item that is selected, holds a selected item, or is inside one."""
+    current = f"{placed.hierarchy}.CurrentMember"
+    selected = _set(placed.members)
+    return (
+        f"(Count(Intersect(Descendants({current}, 0, SELF_AND_AFTER), {selected})) > 0 "
+        f"OR Count(Intersect(Ascendants({current}), {selected})) > 0)"
+    )
+
+
+def _detail(placed: PlacedField, non_visual: bool = False, today: datetime.date | None = None) -> str:
     if placed.named_set:
         return "{" + placed.named_set + "}"
-    detail = _top_level(placed.hierarchy, placed.all_member)
+    detail = _top(placed)
+    if non_visual:
+        # Non-visual totals: the filters narrow the items shown, not the cube space, so
+        # the All members still total every item. Same order as the sub-selects.
+        if placed.members:
+            detail = f"Filter({detail}, {_selected_condition(placed)})"
+        if placed.label_filter is not None:
+            detail = f"Filter({detail}, {_label_condition(placed.hierarchy, placed.label_filter)})"
+        if placed.date_filter is not None:
+            condition = _date_condition(placed.hierarchy, placed.date_filter, today or datetime.date.today())
+            detail = f"Filter({detail}, {condition})"
+        if placed.value_filter is not None:
+            detail = _value_expression(detail, placed.value_filter)
     if placed.custom_items:
         # Grouped items give way to their group; groups and calculated items follow.
         grouped = placed.grouped
@@ -279,6 +335,8 @@ def _detail(placed: PlacedField) -> str:
         detail = "{" + ", ".join([base, *(custom_item_name(placed, item) for item in placed.custom_items)]) + "}"
     if placed.expanded:
         detail = f"DrilldownMember({detail}, {_set(placed.expanded)}, RECURSIVE)"
+        if non_visual and placed.members:
+            detail = f"Filter({detail}, {_selected_condition(placed)} OR {_is_custom(placed)})"
     if placed.sort:
         key = (
             f"{placed.hierarchy}.CurrentMember.Member_Caption"
@@ -290,7 +348,14 @@ def _detail(placed: PlacedField) -> str:
     return detail
 
 
-def _axis_set(fields: tuple[PlacedField, ...], grand_total: bool, subtotals: bool, at_top: bool = False) -> str:
+def _axis_set(
+    fields: tuple[PlacedField, ...],
+    grand_total: bool,
+    subtotals: bool,
+    at_top: bool = False,
+    non_visual: bool = False,
+    today: datetime.date | None = None,
+) -> str:
     """Detail tuples followed by their totals, outermost total last.
 
     T(n) = {D(n), {All(n)}}
@@ -303,20 +368,21 @@ def _axis_set(fields: tuple[PlacedField, ...], grand_total: bool, subtotals: boo
     for each outer item, as in Excel.
     """
     count = len(fields)
-    sorts_by_value = [bool(f.sort and f.sort.by == "measure") for f in fields]
+    # Worked out for each outer item: a sort by value, and (non-visual) a value filter.
+    per_outer = [bool(f.sort and f.sort.by == "measure") or (non_visual and f.value_filter is not None) for f in fields]
 
     def all_tuple(start: int) -> str | None:
-        alls = [f.all_member for f in fields[start:]]
+        alls = [a for f in fields[start:] for a in f.all_members]
         if any(a is None for a in alls):
             return None
         return alls[0] if len(alls) == 1 else "(" + ", ".join(alls) + ")"
 
     def build(depth: int) -> str:
-        detail = _detail(fields[depth])
+        detail = _detail(fields[depth], non_visual, today)
         if depth == count - 1:
             body = detail
-        elif any(sorts_by_value[depth + 1 :]):
-            body = f"Generate({detail}, CrossJoin({{{fields[depth].hierarchy}.CurrentMember}}, {build(depth + 1)}))"
+        elif any(per_outer[depth + 1 :]):
+            body = f"Generate({detail}, CrossJoin({{{_current(fields[depth])}}}, {build(depth + 1)}))"
         else:
             body = f"CrossJoin({detail}, {build(depth + 1)})"
         wanted = grand_total if depth == 0 else subtotals
@@ -336,7 +402,7 @@ def _narrowing(fields: tuple[PlacedField, ...], depth: int, today: datetime.date
     the outer fields' items (the top 3 cities in each country), as Excel does.
     """
     placed = fields[depth]
-    top = _top_level(placed.hierarchy, placed.all_member)
+    top = _top(placed)
     sets = []
     if placed.label_filter is not None:
         sets.append(f"Filter({top}, {_label_condition(placed.hierarchy, placed.label_filter)})")
@@ -349,12 +415,10 @@ def _narrowing(fields: tuple[PlacedField, ...], depth: int, today: datetime.date
         else:
             outer = fields[:depth]
             outer_items = (
-                _top_level(outer[0].hierarchy, outer[0].all_member)
-                if len(outer) == 1
-                else "CrossJoin(" + ", ".join(_top_level(f.hierarchy, f.all_member) for f in outer) + ")"
+                _items_of(outer[0]) if len(outer) == 1 else "CrossJoin(" + ", ".join(_items_of(f) for f in outer) + ")"
             )
-            current = ", ".join(f"{f.hierarchy}.CurrentMember" for f in outer)
-            current = "{" + (f"({current})" if len(outer) > 1 else current) + "}"
+            parts = [f"{h}.CurrentMember" for f in outer for h in f.hierarchies]
+            current = "{" + (f"({', '.join(parts)})" if len(parts) > 1 else parts[0]) + "}"
             per_outer = _value_expression(f"CrossJoin({current}, {top})", placed.value_filter)
             sets.append(f"Generate({outer_items}, {per_outer})")
     return sets
@@ -483,6 +547,14 @@ def _ratio(numerator: str, denominator: str) -> str:
     return f"IIF({denominator} = 0, NULL, {numerator} / {denominator})"
 
 
+def _is_custom(placed: PlacedField) -> str:
+    """True for one of the field's groups or calculated items; "1 = 0" when it has none."""
+    if not placed.custom_items:
+        return "1 = 0"
+    names = ", ".join(custom_item_name(placed, item) for item in placed.custom_items)
+    return f"Count(Intersect({{{placed.hierarchy}.CurrentMember}}, {{{names}}})) > 0"
+
+
 def _is_all(placed: PlacedField) -> str | None:
     return f"{placed.hierarchy}.CurrentMember IS {placed.all_member}" if placed.all_member else None
 
@@ -491,8 +563,8 @@ def _shown_as(value: ValueField, layout: Layout) -> str:
     """The MDX for one "Show Values As" kind, Excel's definitions."""
     m = value.measure
     kind = value.show_as
-    row_alls = [f.all_member for f in layout.rows if f.all_member]
-    column_alls = [f.all_member for f in layout.columns if f.all_member]
+    row_alls = [a for f in layout.rows for a in f.all_members if a]
+    column_alls = [a for f in layout.columns for a in f.all_members if a]
 
     if kind == "percentOfGrandTotal":
         return _ratio(m, _tuple(m, *row_alls, *column_alls))

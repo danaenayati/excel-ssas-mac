@@ -42,10 +42,13 @@ def build_grid(
             f"Add a filter or remove a field to bring it under {cell_limit:,}.",
         )
 
-    col_lines, col_kinds = _axis_lines(col_tuples, layout.columns, _calculated_items(layout.columns))
-    col_header_rows = [[line[i] for line in col_lines] for i in range(len(layout.columns))]
+    # "Include filtered items in totals" marks the totals with an asterisk, as Excel does.
+    star = "*" if layout.options.include_filtered and _anything_narrowed(layout) else ""
+    col_width = sum(f.width for f in layout.columns)
+    col_lines, col_kinds = _axis_lines(col_tuples, layout.columns, _calculated_items(layout.columns), star)
+    col_header_rows = [[line[i] for line in col_lines] for i in range(col_width)]
     col_header_rows.append(
-        [_header(_measure_caption(tup, layout), 0, "measure") for tup in col_tuples]
+        [_header(_measure_caption(tup, layout, col_width), 0, "measure") for tup in col_tuples]
     )
 
     # The value field each column shows. Read from the column's own measure member, not
@@ -54,16 +57,18 @@ def build_grid(
     for index, member in enumerate(value_members(layout)):
         by_name.setdefault(member.name.lower(), index)
     col_value_index = [
-        by_name.get(tup[-1].unique_name.lower(), -1) if len(tup) > len(layout.columns) else -1 for tup in col_tuples
+        by_name.get(tup[-1].unique_name.lower(), -1) if len(tup) > col_width else -1 for tup in col_tuples
     ]
 
     if has_row_axis and layout.rows:
-        row_headers, row_kinds = _axis_lines(row_tuples, layout.rows, _calculated_items(layout.rows))
-        row_captions = [f.caption for f in layout.rows]
+        row_headers, row_kinds = _axis_lines(row_tuples, layout.rows, _calculated_items(layout.rows), star)
+        row_captions = _field_captions(layout.rows)
+        row_field_of = _field_of(layout.rows)
     else:
-        row_headers = [[_header("Total", 0, "grandTotal")] for _ in range(n_rows)]
+        row_headers = [[_header("Total" + star, 0, "grandTotal")] for _ in range(n_rows)]
         row_kinds = ["data"] * n_rows
         row_captions = [""]
+        row_field_of = [0]
 
     palette = [GENERAL]
     palette_index = {GENERAL: 0}
@@ -98,6 +103,8 @@ def build_grid(
         "rowKinds": row_kinds,
         "colKinds": col_kinds,
         "colValueIndex": col_value_index,
+        "rowFieldOf": row_field_of,
+        "colFieldOf": _field_of(layout.columns),
         "stats": {"rows": n_rows, "columns": n_cols, "elapsedMs": int(elapsed_ms), "mdx": mdx},
     }
 
@@ -106,10 +113,10 @@ def _header(text: str, indent: int, kind: str, member: dict | None = None) -> di
     return {"text": text, "indent": indent, "kind": kind, "member": member}
 
 
-def _member_ref(member: AxisMember, placed: PlacedField, expanded: frozenset[str], calculated: bool) -> dict:
+def _member_ref(member: AxisMember, hierarchy: str, expanded: frozenset[str], calculated: bool) -> dict:
     ref = {
         "uniqueName": member.unique_name,
-        "hierarchy": placed.hierarchy,
+        "hierarchy": hierarchy,
         "caption": member.caption,
         "level": member.level,
         "hasChildren": member.child_count > 0 and not calculated,
@@ -125,43 +132,85 @@ def _calculated_items(fields: tuple[PlacedField, ...]) -> frozenset[str]:
     return frozenset(custom_item_name(f, item).lower() for f in fields for item in f.custom_items)
 
 
+def _anything_narrowed(layout: Layout) -> bool:
+    return any(f.narrowed for f in (*layout.rows, *layout.columns, *layout.filters, *layout.slicers))
+
+
+def _field_of(fields: tuple[PlacedField, ...]) -> list[int]:
+    """For each header column (or row) of an axis, the index of the field it belongs to."""
+    return [i for i, f in enumerate(fields) for _ in range(f.width)]
+
+
+def _field_captions(fields: tuple[PlacedField, ...]) -> list[str]:
+    """One caption per header column: a set spanning several fields adds the others' names."""
+    out = []
+    for f in fields:
+        out.append(f.caption)
+        for hierarchy in f.hierarchies[1:]:
+            match = _LAST_PART.search(hierarchy)
+            out.append(match.group(1).replace("]]", "]") if match else hierarchy)
+    return out
+
+
 def _axis_lines(
-    tuples: list[tuple[AxisMember, ...]], fields: tuple[PlacedField, ...], calculated: frozenset[str] = frozenset()
+    tuples: list[tuple[AxisMember, ...]],
+    fields: tuple[PlacedField, ...],
+    calculated: frozenset[str] = frozenset(),
+    star: str = "",
 ) -> tuple[list[list[dict]], list[str]]:
-    """One line of header cells per tuple (one cell per field), plus each line's kind."""
+    """One line of header cells per tuple (one cell per hierarchy), plus each line's kind.
+
+    A field is usually one hierarchy, but a named set may span several: it then takes one
+    column per hierarchy, and its total is the tuple of their All members.
+    """
+    columns = [(i, f, h, a) for i, f in enumerate(fields) for h, a in zip(f.hierarchies, f.all_members)]
+    starts, at = [], 0
+    for f in fields:
+        starts.append(at)
+        at += f.width
+    width = len(columns)
     expanded = [frozenset(f.expanded) for f in fields]
     lines: list[list[dict]] = []
     kinds: list[str] = []
     previous: tuple[AxisMember, ...] | None = None
     for tup in tuples:
-        members = tup[: len(fields)]
-        if len(members) < len(fields):
+        members = tup[:width]
+        if len(members) < width:
             raise CubeError("server", "The cube returned a result that does not match the report layout.")
         first_all = next(
-            (i for i, (mem, f) in enumerate(zip(members, fields)) if f.all_member and mem.unique_name == f.all_member),
+            (
+                i for i, f in enumerate(fields)
+                if f.all_members[0] and members[starts[i]].unique_name == f.all_members[0]
+            ),
             None,
         )
         kind = "data" if first_all is None else ("grandTotal" if first_all == 0 else "subtotal")
         # With measures innermost on columns, the same hierarchy tuple repeats once per
         # measure; only its first occurrence is labelled.
-        repeat_of_previous = previous is not None and _same(previous, members, len(members))
+        repeat_of_previous = previous is not None and _same(previous, members, width)
 
         line = []
-        for i, (mem, placed) in enumerate(zip(members, fields)):
+        for v, (fi, placed, hierarchy, all_member) in enumerate(columns):
+            mem = members[v]
+            last_of_field = v == starts[fi] + placed.width - 1
             if kind == "grandTotal":
-                line.append(_header("Grand Total" if i == 0 and not repeat_of_previous else "", 0, "grandTotal"))
-            elif kind == "subtotal" and i >= first_all - 1:
-                label = f"{mem.caption} Total" if i == first_all - 1 and not repeat_of_previous else ""
+                line.append(_header("Grand Total" + star if v == 0 and not repeat_of_previous else "", 0, "grandTotal"))
+            elif kind == "subtotal" and (fi > first_all - 1 or (fi == first_all - 1 and last_of_field)):
+                label = f"{mem.caption} Total{star}" if fi == first_all - 1 and not repeat_of_previous else ""
                 line.append(_header(label, 0, "subtotal"))
             else:
-                suppressed = previous is not None and _same(previous, members, i + 1)
-                indent = max(0, mem.level - (1 if placed.all_member else 0))
+                suppressed = previous is not None and _same(previous, members, v + 1)
+                if placed.level is not None and placed.width == 1:
+                    base = placed.level.number
+                else:
+                    base = 1 if all_member else 0
+                indent = max(0, mem.level - base)
                 line.append(
                     _header(
                         "" if suppressed else mem.caption,
                         indent,
                         "blank" if suppressed else "member",
-                        _member_ref(mem, placed, expanded[i], mem.unique_name.lower() in calculated),
+                        _member_ref(mem, hierarchy, expanded[fi], mem.unique_name.lower() in calculated),
                     )
                 )
         lines.append(line)
@@ -174,8 +223,8 @@ def _same(a: tuple[AxisMember, ...], b: tuple[AxisMember, ...], count: int) -> b
     return all(a[j].unique_name == b[j].unique_name for j in range(count))
 
 
-def _measure_caption(tup: tuple[AxisMember, ...], layout: Layout) -> str:
-    if len(tup) > len(layout.columns):
+def _measure_caption(tup: tuple[AxisMember, ...], layout: Layout, col_width: int) -> str:
+    if len(tup) > col_width:
         return tup[-1].caption
     return layout.values[0].caption if layout.values else ""
 

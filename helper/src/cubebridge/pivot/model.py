@@ -132,6 +132,12 @@ class CustomItem:
 
 
 @dataclass(frozen=True)
+class Level:
+    unique_name: str
+    number: int  # LEVEL_NUMBER; 0 is the top (All, when there is one)
+
+
+@dataclass(frozen=True)
 class PlacedField:
     hierarchy: str
     caption: str
@@ -145,6 +151,24 @@ class PlacedField:
     date_filter: DateFilter | None = None
     custom_items: tuple[CustomItem, ...] = ()
     named_set: str | None = None  # "[Set Name]" when this field is a named set
+    # A set spanning several hierarchies: all of them in tuple order, and their All members.
+    set_hierarchies: tuple[str, ...] = ()
+    set_all_members: tuple[str | None, ...] = ()
+    level: Level | None = None  # place only this level of a user hierarchy
+
+    @property
+    def hierarchies(self) -> tuple[str, ...]:
+        """Every hierarchy this field shows: one, or a multi-field set's."""
+        return self.set_hierarchies or (self.hierarchy,)
+
+    @property
+    def all_members(self) -> tuple[str | None, ...]:
+        return self.set_all_members if self.set_hierarchies else (self.all_member,)
+
+    @property
+    def width(self) -> int:
+        """Header columns (or rows) the field takes: one per hierarchy."""
+        return len(self.hierarchies)
 
     @property
     def narrowed(self) -> bool:
@@ -194,6 +218,8 @@ class Options:
     grand_total_column: bool = True  # the right-hand column: the columns axis' All tuple
     # Each subtotal before the items it adds up (compact and outline form only).
     subtotals_at_top: bool = False
+    # Windows' "Include filtered items in totals": non-visual totals, marked with "*".
+    include_filtered: bool = False
 
 
 @dataclass(frozen=True)
@@ -204,6 +230,7 @@ class Layout:
     filters: tuple[PlacedField, ...] = ()
     options: Options = Options()
     calculated_measures: tuple[CalculatedMeasure, ...] = ()
+    slicers: tuple[PlacedField, ...] = ()  # filter like page filters; no cell in the sheet
 
     @classmethod
     def from_json(cls, data: object) -> Layout:
@@ -213,14 +240,16 @@ class Layout:
         rows = _placed_list(data.get("rows", []), "rows")
         columns = _placed_list(data.get("columns", []), "columns")
         filters = _placed_list(data.get("filters", []), "filters")
+        slicers = _placed_list(data.get("slicers") or [], "slicers")
         values = _value_list(data.get("values", []))
 
         seen: set[str] = set()
-        for placed in (*rows, *columns, *filters):
-            key = placed.hierarchy.lower()
-            if key in seen:
-                raise _bad(f"'{placed.caption}' is used in more than one area.")
-            seen.add(key)
+        for placed in (*rows, *columns, *filters, *slicers):
+            for hierarchy in placed.hierarchies:
+                key = hierarchy.lower()
+                if key in seen:
+                    raise _bad(f"'{placed.caption}' is used in more than one area.")
+                seen.add(key)
 
         raw_options = data.get("options", {})
         if not isinstance(raw_options, dict):
@@ -235,9 +264,10 @@ class Layout:
             # Excel's tabular form has no subtotals at the top of a group.
             subtotals_at_top=raw_options.get("subtotalsAt") == "top"
             and raw_options.get("form", "tabular") in ("compact", "outline"),
+            include_filtered=raw_options.get("includeFilteredItems") is True,
         )
         calculated = _calculated_measures(data.get("calculatedMeasures"))
-        on_axes = {placed.hierarchy.lower() for placed in (*rows, *columns)}
+        on_axes = {h.lower() for placed in (*rows, *columns) for h in placed.hierarchies}
         for value in values:
             if value.base_field and value.base_field.lower() not in on_axes:
                 raise _bad(f"The base field of '{value.caption}' must be in Rows or Columns.")
@@ -245,7 +275,8 @@ class Layout:
                 if hierarchy_of(value.base_item) != value.base_field.lower():
                     raise _bad(f"The base item of '{value.caption}' is not an item of its base field.")
         return cls(
-            rows=rows, columns=columns, values=values, filters=filters, options=options, calculated_measures=calculated
+            rows=rows, columns=columns, values=values, filters=filters, options=options,
+            calculated_measures=calculated, slicers=slicers,
         )
 
 
@@ -438,6 +469,43 @@ def _calculated_measures(value: object) -> tuple[CalculatedMeasure, ...]:
     return tuple(out)
 
 
+MAX_LEVEL_NUMBER = 64
+
+
+def _level(value: object, hierarchy: str) -> Level | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _bad("A field's level is not valid.")
+    name = validate_unique_name(value.get("uniqueName"))
+    number = value.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or not 0 <= number <= MAX_LEVEL_NUMBER:
+        raise _bad("A field's level number is not valid.")
+    if hierarchy_of(name) != hierarchy.lower():
+        raise _bad("A field's level belongs to another field.")
+    return Level(unique_name=name, number=number)
+
+
+def _set_hierarchies(
+    item: dict, hierarchy: str, all_member: str | None, caption: str
+) -> tuple[tuple[str, ...], tuple[str | None, ...]]:
+    """The hierarchies of a set that spans several; () for a set of one field."""
+    raw = item.get("setHierarchies")
+    if not raw:
+        return (), ()
+    spans = _name_list(raw, f"The fields of the set '{caption}'")
+    if len(spans) < 2 or spans[0].lower() != hierarchy.lower() or len({h.lower() for h in spans}) != len(spans):
+        raise _bad(f"The fields of the set '{caption}' are not valid.")
+    raw_alls = item.get("setAllMembers") or []
+    if not isinstance(raw_alls, list) or len(raw_alls) != len(spans):
+        raw_alls = [all_member] + [None] * (len(spans) - 1)
+    alls = tuple(validate_unique_name(a) if a else None for a in raw_alls)
+    for h, a in zip(spans, alls):
+        if a is not None and hierarchy_of(a) != h.lower():
+            raise _bad(f"The fields of the set '{caption}' are not valid.")
+    return spans, alls
+
+
 def _placed_list(value: object, area: str) -> tuple[PlacedField, ...]:
     if not isinstance(value, list):
         raise _bad(f"The {area} area must be a list.")
@@ -457,14 +525,16 @@ def _placed_list(value: object, area: str) -> tuple[PlacedField, ...]:
             raise _bad("memberCaptions must be a list.")
         caption = _text(item.get("caption", ""), "caption")
         all_member = validate_unique_name(all_member) if all_member else None
+        on_axis = area in ("rows", "columns")
         named_set = item.get("set")
         if named_set:
-            if area == "filters":
+            if not on_axis:
                 raise _bad(f"The set '{caption}' can go in Rows or Columns only.")
+            spans, alls = _set_hierarchies(item, hierarchy, all_member, caption)
             # A set's items are its tuples: nothing else about the field applies.
             out.append(
                 PlacedField(hierarchy=hierarchy, caption=caption, all_member=all_member,
-                            named_set=validate_unique_name(named_set))
+                            named_set=validate_unique_name(named_set), set_hierarchies=spans, set_all_members=alls)
             )
             continue
         out.append(
@@ -475,12 +545,13 @@ def _placed_list(value: object, area: str) -> tuple[PlacedField, ...]:
                 expanded=_name_list(item.get("expanded", []), "expanded"),
                 members=members,
                 member_captions=tuple(_text(c, "member caption") for c in captions[: len(members)]),
-                # Page filters only select items, as in Excel.
-                sort=_sort(item.get("sort")) if area != "filters" else None,
-                label_filter=_label_filter(item.get("labelFilter")) if area != "filters" else None,
-                value_filter=_value_filter(item.get("valueFilter")) if area != "filters" else None,
-                date_filter=_date_filter(item.get("dateFilter")) if area != "filters" else None,
-                custom_items=_custom_items(item.get("customItems"), hierarchy) if area != "filters" else (),
+                # Page filters and slicers only select items, as in Excel.
+                sort=_sort(item.get("sort")) if on_axis else None,
+                label_filter=_label_filter(item.get("labelFilter")) if on_axis else None,
+                value_filter=_value_filter(item.get("valueFilter")) if on_axis else None,
+                date_filter=_date_filter(item.get("dateFilter")) if on_axis else None,
+                custom_items=_custom_items(item.get("customItems"), hierarchy) if on_axis else (),
+                level=_level(item.get("level"), hierarchy),
             )
         )
     return tuple(out)

@@ -66,6 +66,25 @@ def _date_hierarchies(level_rows: list[dict[str, str]]) -> set[str]:
     }
 
 
+def _user_levels(level_rows: list[dict[str, str]]) -> dict[str, list[dict]]:
+    """Each hierarchy's visible levels below All, top down, for placing one level alone."""
+    out: dict[str, list[dict]] = {}
+    for r in level_rows:
+        hierarchy, unique = r.get("HIERARCHY_UNIQUE_NAME"), _valid(r.get("LEVEL_UNIQUE_NAME"))
+        if not hierarchy or unique is None or _int(r.get("LEVEL_TYPE")) == _LEVEL_TYPE_ALL:
+            continue
+        if r.get("LEVEL_IS_VISIBLE") is not None and not _is_true(r.get("LEVEL_IS_VISIBLE")):
+            continue
+        level = {"uniqueName": unique, "caption": r.get("LEVEL_CAPTION") or r.get("LEVEL_NAME") or unique,
+                 "number": _int(r.get("LEVEL_NUMBER"))}
+        if r.get("LEVEL_DBTYPE") in _DATE_DBTYPES or _int(r.get("LEVEL_TYPE")) == _LEVEL_TYPE_DAYS:
+            level["isDate"] = True
+        out.setdefault(hierarchy, []).append(level)
+    for levels in out.values():
+        levels.sort(key=lambda level: level["number"])
+    return out
+
+
 def _kpis(rows: list[dict[str, str]]) -> list[dict]:
     out = []
     for r in rows:
@@ -93,17 +112,21 @@ def _sets(rows: list[dict[str, str]], dimensions: set[str], all_members: dict[st
             continue
         hierarchies = [h for h in (_valid(part.strip()) for part in _split_names(r.get("DIMENSIONS", ""))) if h]
         dimension = hierarchies[0].split("].[")[0] + "]" if hierarchies else ""
-        hierarchy = hierarchies[0] if len(hierarchies) == 1 and hierarchies[0].count("].[") == 1 else None
-        out.append(
-            {
-                "uniqueName": "[" + name.replace("]", "]]") + "]",
-                "caption": r.get("SET_CAPTION") or name,
-                "folder": r.get("SET_DISPLAY_FOLDER", ""),
-                "dimension": dimension if dimension in dimensions else "",
-                "hierarchy": hierarchy,
-                "allMember": all_members.get(hierarchy) if hierarchy else None,
-            }
-        )
+        known = [h for h in hierarchies if h in all_members]
+        hierarchy = known[0] if known and len(known) == len(hierarchies) else None
+        entry = {
+            "uniqueName": "[" + name.replace("]", "]]") + "]",
+            "caption": r.get("SET_CAPTION") or name,
+            "folder": r.get("SET_DISPLAY_FOLDER", ""),
+            "dimension": dimension if dimension in dimensions else "",
+            "hierarchy": hierarchy,
+            "allMember": all_members.get(hierarchy) if hierarchy else None,
+        }
+        if hierarchy:
+            # Every hierarchy of its tuples, so a set spanning several fields can be placed.
+            entry["hierarchies"] = known
+            entry["allMembers"] = [all_members.get(h) for h in known]
+        out.append(entry)
     return sorted(out, key=lambda s: s["caption"].lower())
 
 
@@ -267,6 +290,7 @@ class SsasBackend:
 
         measure_rows, dimension_rows, hierarchy_rows, level_rows, kpi_rows, set_rows = self._call(load)
         date_hierarchies = _date_hierarchies(level_rows)
+        levels_of = _user_levels(level_rows)
 
         measures = []
         self._measure_formats[(catalog, cube)] = {
@@ -321,6 +345,8 @@ class SsasBackend:
             }
             if unique in date_hierarchies:
                 entry["isDate"] = True
+            if entry["kind"] == "user" and levels_of.get(unique):
+                entry["levels"] = levels_of[unique]
             dimension["hierarchies"].append(entry)
         self._all_members[(catalog, cube)] = all_members
 
@@ -336,14 +362,17 @@ class SsasBackend:
         }
 
     # -- members and queries -----------------------------------------------------
-    def members(self, catalog: str, cube: str, hierarchy: str, parent: str | None, search: str | None, limit: int) -> dict:
+    def members(
+        self, catalog: str, cube: str, hierarchy: str, parent: str | None, search: str | None, limit: int,
+        level: str | None = None,
+    ) -> dict:
         if (catalog, cube) not in self._all_members:
             self.fields(catalog, cube)
         known = self._all_members[(catalog, cube)]
         if hierarchy not in known:
             raise CubeError("not-found", "That field is no longer in the cube. Reload the field list.", hierarchy)
         all_member = known[hierarchy]
-        text = mdx.members_query(cube, hierarchy, all_member, parent, search, limit)
+        text = mdx.members_query(cube, hierarchy, all_member, parent, search, limit, level)
         cellset = self._call(lambda s: s.execute(text, catalog))
         tuples = cellset.axes[1] if len(cellset.axes) > 1 else []
         found = [

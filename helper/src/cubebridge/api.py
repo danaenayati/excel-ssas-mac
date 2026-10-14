@@ -390,6 +390,7 @@ class App:
         if not isinstance(limit, int) or isinstance(limit, bool):
             raise _bad("'limit' must be a whole number.")
         parent = _text(body, "parent", required=False, limit=1000)
+        level = _text(body, "level", required=False, limit=1000)
         return self._backend(id).members(
             _text(body, "catalog"),
             _text(body, "cube"),
@@ -397,6 +398,7 @@ class App:
             validate_unique_name(parent) if parent else None,
             _text(body, "search", required=False, limit=200) or None,
             max(1, min(limit, MAX_MEMBER_LIMIT)),
+            level=validate_unique_name(level) if level else None,
         )
 
     def _query(self, id: str, body: dict, **_):

@@ -46,6 +46,7 @@ class Backend(Protocol):
         parent: str | None,
         search: str | None,
         limit: int,
+        level: str | None = None,
     ) -> dict: ...
 
     def query(self, catalog: str, cube: str, layout: Layout) -> tuple[CellSet, str]:
