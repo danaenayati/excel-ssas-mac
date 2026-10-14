@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Layout } from "../types";
 import {
+  DEFAULT_OPTIONS,
+  NEW_REPORT_OPTIONS,
   grandTotalsShown,
+  newLayout,
+  reportForm,
+  subtotalsChoice,
   needsBaseField,
   needsBaseItem,
   resetOrphanedShowAs,
@@ -914,5 +919,67 @@ describe("Show Values As with a base field", () => {
     expect(reset.map((v) => v.measure)).toEqual([rides.uniqueName]);
     expect(layout.values[0]).toEqual({ measure: rides.uniqueName, caption: "Rides" });
     expect(resetOrphanedShowAs(shown).layout).toBe(shown);
+  });
+});
+
+describe("Report Layout and the Subtotals choice", () => {
+  it("starts a new report as Excel does: Compact Form, subtotals at the top of each group", () => {
+    const layout = newLayout();
+    expect(isEmptyLayout(layout)).toBe(true);
+    expect(layout.options).toEqual({
+      grandTotals: true,
+      subtotals: true,
+      nonEmpty: true,
+      form: "compact",
+      subtotalsAt: "top",
+    });
+    expect(layout.options).toEqual(NEW_REPORT_OPTIONS);
+    expect(newLayout().options).not.toBe(newLayout().options);
+  });
+
+  it("reads a definition without a form as tabular, without subtotals unless it says so", () => {
+    expect(reportForm(emptyLayout().options)).toBe("tabular");
+    expect(subtotalsChoice(emptyLayout().options)).toBe("none");
+    expect(subtotalsChoice({ ...DEFAULT_OPTIONS, subtotals: true })).toBe("bottom");
+    expect(reportForm({ ...DEFAULT_OPTIONS, form: "outline" })).toBe("outline");
+    // Not one of the three: tabular.
+    expect(reportForm({ ...DEFAULT_OPTIONS, form: "pivot" as never })).toBe("tabular");
+  });
+
+  it("switches the form, and changes nothing when it is already that form", () => {
+    const outline = layoutReducer(newLayout(), { type: "setForm", form: "outline" });
+    expect(outline.options.form).toBe("outline");
+    expect(layoutReducer(outline, { type: "setForm", form: "outline" })).toBe(outline);
+    // An old report without a form is tabular already.
+    const old = emptyLayout();
+    expect(layoutReducer(old, { type: "setForm", form: "tabular" })).toBe(old);
+    const compact = layoutReducer(old, { type: "setForm", form: "compact" });
+    expect(compact.options).toEqual({ ...DEFAULT_OPTIONS, form: "compact" });
+    expect(layoutReducer(compact, { type: "setForm", form: "bogus" as never })).toBe(compact);
+  });
+
+  it("sets the three Subtotals choices", () => {
+    const start = newLayout();
+    expect(layoutReducer(start, { type: "setSubtotals", at: "top" })).toBe(start);
+    const bottom = layoutReducer(start, { type: "setSubtotals", at: "bottom" });
+    expect(bottom.options).toMatchObject({ subtotals: true, subtotalsAt: "bottom" });
+    expect(subtotalsChoice(bottom.options)).toBe("bottom");
+    const none = layoutReducer(bottom, { type: "setSubtotals", at: "none" });
+    expect(none.options.subtotals).toBe(false);
+    expect(subtotalsChoice(none.options)).toBe("none");
+    expect(layoutReducer(none, { type: "setSubtotals", at: "none" })).toBe(none);
+    const top = layoutReducer(none, { type: "setSubtotals", at: "top" });
+    expect(top.options).toMatchObject({ subtotals: true, subtotalsAt: "top" });
+    // An old report with subtotals on and nothing stored about where: at the bottom.
+    const old = layoutReducer(emptyLayout(), { type: "setOption", option: "subtotals", value: true });
+    expect(layoutReducer(old, { type: "setSubtotals", at: "bottom" })).toBe(old);
+  });
+
+  it("shows subtotals at the bottom in tabular form, and keeps the top choice for the other forms", () => {
+    const tabular = layoutReducer(newLayout(), { type: "setForm", form: "tabular" });
+    expect(tabular.options.subtotalsAt).toBe("top");
+    expect(subtotalsChoice(tabular.options)).toBe("bottom");
+    const back = layoutReducer(tabular, { type: "setForm", form: "outline" });
+    expect(subtotalsChoice(back.options)).toBe("top");
   });
 });

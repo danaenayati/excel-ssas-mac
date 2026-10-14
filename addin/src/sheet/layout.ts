@@ -5,12 +5,23 @@
 // Block layout, top to bottom (see `Grid` in types.ts):
 //   F rows   caption | value            page filters
 //   1 row    blank                      only when F > 0
+//   1 row    "Column Labels"            compact form with column fields only
 //   H rows   R corner cells | C header cells   (last row's corner = row field captions)
 //   N rows   R row-header cells | C values
 // All positions in a Block are relative to its top-left cell.
+//
+// Excel's three report layouts differ in the row headers only:
+//   tabular  one column per row field; an outer item shares its first inner item's line
+//            (the grid's own lines, one per tuple)
+//   outline  one column per row field; each outer item on a line of its own, its inner
+//            items from the next line on, one column further right
+//   compact  every row field in one column ("Row Labels"); each outer item on a line of
+//            its own, inner items below it, indented one step per field
+// In outline and compact form a sheet line therefore does not always show a grid line:
+// `Block.lines` says which grid line each one shows, if any.
 
-import { isFiltered } from "../state/layout";
-import type { CellValue, Grid, HeaderCell, Layout, MemberRef } from "../types";
+import { isFiltered, reportForm, subtotalsChoice, type ReportForm } from "../state/layout";
+import type { CellValue, Grid, HeaderCell, Layout, LayoutOptions, LineKind, MemberRef } from "../types";
 import { chunkRect, runs, type Rect } from "./geometry";
 
 /** Excel's "Text" number format: stops Excel from reading "2024" or "March 2025" as a number or date. */
@@ -34,6 +45,10 @@ export const FILTER_FORMAT = '@" ▾"';
 export const FILTERED_FORMAT = '@" ▼"';
 /** What a report with no fields shows at its place on the sheet. */
 export const PLACEHOLDER_TEXT = "Cube report: tick fields in the Cube Explorer panel to build it";
+/** Compact form's button for all row fields, in Windows' words. */
+export const ROW_LABELS = "Row Labels";
+/** Compact form's button for all column fields, above the column items. */
+export const COLUMN_LABELS = "Column Labels";
 
 export type Axis = "rows" | "columns";
 export type SheetValue = string | number | boolean;
@@ -54,10 +69,26 @@ export interface BlockShape {
   dataRows: number;
   /** C */
   dataCols: number;
-  /** Row of the first column-header row. */
+  /** Row of the first column-header row of the grid. */
   headerTop: number;
   /** Row of the first data row. */
   dataTop: number;
+  /** Compact form with column fields: the "Column Labels" row, just above `headerTop`. */
+  columnLabelsRow?: number;
+}
+
+/** A data line of the block and the grid line behind it. */
+export interface DataLine {
+  /**
+   * The grid line whose values the sheet line shows. Null for an outer item's own line
+   * in outline and compact form when it shows no values (subtotals off, or at the bottom).
+   */
+  grid: number | null;
+  /**
+   * Unique names of the row members its values belong to, outermost first, as Show
+   * Details needs them. A subtotal's own item is included ("Tehran Total" is Tehran's).
+   */
+  members: string[];
 }
 
 export interface IndentGroup {
@@ -73,6 +104,16 @@ export interface FieldCell {
   area: "filters" | "rows" | "columns";
   /** Position of the field in that area of the layout. */
   index: number;
+  /**
+   * "Row Labels" or "Column Labels" of compact form: the cell stands for every field of
+   * its area (Windows asks "Select field:" first) and `index` is the first of them.
+   */
+  labels?: boolean;
+}
+
+/** The text of a "Row Labels" or "Column Labels" cell. */
+export function labelsCaption(area: FieldCell["area"]): string {
+  return area === "columns" ? COLUMN_LABELS : ROW_LABELS;
 }
 
 /** What `buildBlock` needs to know about the layout: the grid itself names no fields. */
@@ -92,10 +133,17 @@ export interface BlockFields {
    * cube's. Applied to every value cell of that field.
    */
   valueFormats?: (string | null)[];
-  /** "Repeat All Item Labels": write a repeated outer row label on every line. */
+  /** "Repeat All Item Labels": write a repeated outer row label on every line. Not in compact form. */
   repeatLabels?: boolean;
   /** "For empty cells show": the text for value cells that have no value. */
   emptyCellText?: string;
+  /** Excel's Report Layout. Absent: tabular. */
+  form?: ReportForm;
+  /**
+   * "top" when the grid was asked for with each subtotal before its group (compact and
+   * outline form only). Absent: subtotals, if any, follow their group.
+   */
+  subtotalsAt?: "top";
 }
 
 export function blockFields(
@@ -104,7 +152,7 @@ export function blockFields(
     options?: Layout["options"];
   },
 ): BlockFields {
-  return {
+  const fields: BlockFields = {
     filters: layout.filters.length,
     rows: layout.rows.length,
     columns: layout.columns.map((field) => field.caption),
@@ -114,6 +162,12 @@ export function blockFields(
     repeatLabels: Boolean(layout.options && layout.options.repeatLabels),
     emptyCellText: (layout.options && layout.options.emptyCellText) || "",
   };
+  if (layout.options) {
+    const form = reportForm(layout.options);
+    if (form !== "tabular") fields.form = form;
+    if (subtotalsChoice(layout.options) === "top") fields.subtotalsAt = "top";
+  }
+  return fields;
 }
 
 /**
@@ -150,6 +204,16 @@ export interface Block {
   /** Member behind a header cell, keyed by `memberKey(row, col)`. */
   members: Map<string, MemberHit>;
   shape: BlockShape;
+  /** One per data row: the grid line it shows and the row members behind it. */
+  lines: DataLine[];
+  /** One per value column: the column members behind it, a subtotal's own item included. */
+  columnMembers: string[][];
+  /**
+   * The grid as written: the one given, or a copy with its columns in sheet order (Excel
+   * keeps column subtotals after their items when the row subtotals are at the top).
+   * Value column c of the block is column c of this grid.
+   */
+  grid: Grid;
 }
 
 export function memberKey(row: number, col: number): string {
@@ -195,20 +259,40 @@ export function fieldCellAt(
  *   - header row i (column field i): the corner cell nearest the data gets that field's
  *     caption, with the arrow.
  *
- * Without `fields` the block is the bare grid: no filter cells, no column captions.
+ * In compact form the row fields share one column: the corner reads "Row Labels" and a
+ * "Column Labels" row above the column items replaces the column fields' captions; each
+ * of the two stands for every field of its area.
+ *
+ * Without `fields` the block is the bare grid, in tabular form: no filter cells, no
+ * column captions.
  */
-export function buildBlock(grid: Grid, fields: BlockFields = { filters: 0, rows: 0, columns: [] }): Block {
+export function buildBlock(input: Grid, fields: BlockFields = { filters: 0, rows: 0, columns: [] }): Block {
+  const form: ReportForm = fields.form ?? "tabular";
+  const atTop = form !== "tabular" && fields.subtotalsAt === "top";
+  const K = fields.columns.length;
+  const grid = atTop ? columnsInSheetOrder(input, K) : input;
+
   const F = grid.filterRows.length;
   const H = grid.colHeaderRows.length;
   const R = grid.rowFieldCaptions.length;
-  const N = grid.rowHeaders.length;
   const C = grid.colKinds.length;
 
-  const headerTop = F > 0 ? F + 1 : 0;
+  // The row fields are laid out by form only when the grid has one column per row field.
+  const rowForm: ReportForm = fields.rows > 0 && R === fields.rows ? form : "tabular";
+  const compactRows = rowForm === "compact";
+  const sheet = sheetRows(grid, rowForm, atTop && rowForm !== "tabular");
+  const N = sheet.headers.length;
+  /** Row-header columns on the sheet. */
+  const RS = compactRows ? 1 : R;
+  const labelsRow = form === "compact" && K > 0;
+
+  const top = F > 0 ? F + 1 : 0;
+  const headerTop = top + (labelsRow ? 1 : 0);
   const dataTop = headerTop + H;
   const rows = dataTop + N;
-  // A filter row needs two cells even if the grid itself is one column wide.
-  const cols = Math.max(R + C, F > 0 ? 2 : 1);
+  // A filter row needs two cells even if the grid itself is one column wide; the
+  // "Column Labels" cell needs one right of the corner.
+  const cols = Math.max(RS + C, labelsRow ? RS + 1 : 1, F > 0 ? 2 : 1);
 
   const values: SheetValue[][] = [];
   const numberFormats: string[][] = [];
@@ -235,12 +319,10 @@ export function buildBlock(grid: Grid, fields: BlockFields = { filters: 0, rows:
   const setFilterCell = (row: number, col: number, cell: FieldCell, arrow: boolean) => {
     fieldCells.set(memberKey(row, col), cell);
     if (!arrow) return;
-    const filtered =
-      cell.area === "rows"
-        ? Boolean(fields.rowsFiltered && fields.rowsFiltered[cell.index])
-        : cell.area === "columns"
-          ? Boolean(fields.columnsFiltered && fields.columnsFiltered[cell.index])
-          : false;
+    const list =
+      cell.area === "rows" ? fields.rowsFiltered : cell.area === "columns" ? fields.columnsFiltered : undefined;
+    // "Row Labels" and "Column Labels" stand for every field of their area.
+    const filtered = cell.labels ? Boolean(list && list.some(Boolean)) : Boolean(list && list[cell.index]);
     numberFormats[row][col] = filtered ? FILTERED_FORMAT : FILTER_FORMAT;
   };
 
@@ -261,96 +343,121 @@ export function buildBlock(grid: Grid, fields: BlockFields = { filters: 0, rows:
     fill.push(captions);
   }
 
-  // Column header rows: R corner cells, then C header cells.
+  // Compact form: "Column Labels" right above the first column item.
+  if (labelsRow) {
+    for (let c = 0; c < cols; c++) setText(top, c, "");
+    setText(top, RS, COLUMN_LABELS);
+    setFilterCell(top, RS, { area: "columns", index: 0, labels: true }, true);
+  }
+
+  // Column header rows: RS corner cells, then C header cells.
   for (let h = 0; h < H; h++) {
     const row = headerTop + h;
     const cells = grid.colHeaderRows[h] ?? [];
     const last = h === H - 1;
-    for (let r = 0; r < R; r++) {
-      setText(row, r, last ? grid.rowFieldCaptions[r] ?? "" : "");
-      if (last && r < fields.rows) setFilterCell(row, r, { area: "rows", index: r }, true);
+    if (compactRows) {
+      setText(row, 0, last ? ROW_LABELS : "");
+      if (last) setFilterCell(row, 0, { area: "rows", index: 0, labels: true }, true);
+    } else {
+      for (let r = 0; r < R; r++) {
+        setText(row, r, last ? grid.rowFieldCaptions[r] ?? "" : "");
+        if (last && r < fields.rows) setFilterCell(row, r, { area: "rows", index: r }, true);
+      }
     }
     // A column field's own caption, in the corner cell next to its header cells. The
-    // last header row is the measures' and its corner belongs to the row fields.
-    if (!last && h < fields.columns.length && R > 0) {
-      setText(row, R - 1, fields.columns[h]);
-      setFilterCell(row, R - 1, { area: "columns", index: h }, true);
+    // last header row is the measures' and its corner belongs to the row fields. Compact
+    // form has "Column Labels" instead.
+    if (!last && h < K && RS > 0 && form !== "compact") {
+      setText(row, RS - 1, fields.columns[h]);
+      setFilterCell(row, RS - 1, { area: "columns", index: h }, true);
     }
     for (let c = 0; c < C; c++) {
       const cell = cells[c];
-      setText(row, R + c, cell ? cell.text : "");
+      setText(row, RS + c, cell ? cell.text : "");
       if (cell && cell.member) {
-        members.set(memberKey(row, R + c), { member: cell.member, axis: "columns" });
+        members.set(memberKey(row, RS + c), { member: cell.member, axis: "columns" });
       }
     }
     runs(
       C,
       (c) => indentOf(cells[c]) || null,
       (level, start, length) =>
-        addIndent(level, { row, col: R + start, rows: 1, cols: length }),
+        addIndent(level, { row, col: RS + start, rows: 1, cols: length }),
     );
   }
   if (H > 0) {
-    const header: Rect = { row: headerTop, col: 0, rows: H, cols };
+    const header: Rect = { row: top, col: 0, rows: dataTop - top, cols };
     bold.push(header);
     fill.push(header);
   }
 
-  // Data rows: R row-header cells, then C values.
+  // Data rows: RS row-header cells, then C values.
   const palette = grid.formatPalette;
   const emptyText = fields.emptyCellText ?? "";
   const valueFormats = fields.valueFormats ?? [];
+  const repeat = Boolean(fields.repeatLabels) && !compactRows;
   const override = (c: number): string | null => {
     const index = valueFieldIndex(grid.colValueIndex, c, valueFormats.length);
     return index === null ? null : valueFormats[index] ?? null;
   };
   for (let n = 0; n < N; n++) {
     const row = dataTop + n;
-    const headers = grid.rowHeaders[n] ?? [];
-    for (let r = 0; r < R; r++) {
+    const headers = sheet.headers[n] ?? [];
+    for (let r = 0; r < RS; r++) {
       const cell = headers[r];
       // A repeat of the outer label is sent blank, with its member: shown again if asked.
-      const text = !cell
-        ? ""
-        : cell.kind === "blank" && cell.member && fields.repeatLabels
-          ? cell.member.caption
-          : cell.text;
+      const text = !cell ? "" : cell.kind === "blank" && cell.member && repeat ? cell.member.caption : cell.text;
       setText(row, r, text);
       if (cell && cell.member) {
         members.set(memberKey(row, r), { member: cell.member, axis: "rows" });
       }
     }
-    const line = grid.values[n] ?? [];
-    const formats = grid.cellFormats[n] ?? [];
+    // An outer item's own line without values has no value cells, not empty ones.
+    const g = sheet.lines[n].grid;
+    if (g === null) continue;
+    const line = grid.values[g] ?? [];
+    const formats = grid.cellFormats[g] ?? [];
     for (let c = 0; c < C; c++) {
       const raw = line[c];
       const empty = raw === null || raw === undefined;
       const value = empty && emptyText !== "" ? emptyText : toSheetValue(raw);
-      values[row][R + c] = value;
-      numberFormats[row][R + c] =
+      values[row][RS + c] = value;
+      numberFormats[row][RS + c] =
         typeof value === "string" && value !== ""
           ? TEXT_FORMAT
           : override(c) ?? palette[formats[c]] ?? GENERAL_FORMAT;
     }
   }
-  for (let r = 0; r < R; r++) {
+  for (let r = 0; r < RS; r++) {
     runs(
       N,
-      (n) => indentOf((grid.rowHeaders[n] ?? [])[r]) || null,
+      (n) => indentOf((sheet.headers[n] ?? [])[r]) || null,
       (level, start, length) =>
         addIndent(level, { row: dataTop + start, col: r, rows: length, cols: 1 }),
     );
   }
-  // Total rows are bold across the whole width.
+  // Total rows, and in outline and compact form the outer items' own lines, are bold
+  // across the whole width.
   runs(
     N,
-    (n) => (grid.rowKinds[n] && grid.rowKinds[n] !== "data" ? true : null),
+    (n) => (sheet.kinds[n] && sheet.kinds[n] !== "data" ? true : null),
     (_key, start, length) => bold.push({ row: dataTop + start, col: 0, rows: length, cols }),
   );
 
   const indents: IndentGroup[] = Array.from(indentRects.entries())
     .sort((a, b) => a[0] - b[0])
     .map(([level, rects]) => ({ level, rects }));
+
+  const shape: BlockShape = {
+    filterRows: F,
+    headerRows: H,
+    headerCols: RS,
+    dataRows: N,
+    dataCols: C,
+    headerTop,
+    dataTop,
+  };
+  if (labelsRow) shape.columnLabelsRow = top;
 
   return {
     rows,
@@ -364,16 +471,335 @@ export function buildBlock(grid: Grid, fields: BlockFields = { filters: 0, rows:
     fieldCells,
     autofit: true,
     members,
-    shape: {
-      filterRows: F,
-      headerRows: H,
-      headerCols: R,
-      dataRows: N,
-      dataCols: C,
-      headerTop,
-      dataTop,
-    },
+    shape,
+    lines: sheet.lines,
+    // Moved into sheet order, the columns follow their groups; otherwise they are as asked.
+    columnMembers: columnMembers(grid, atTop && grid === input),
+    grid,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Axis items: what each line or column stands for.
+// ---------------------------------------------------------------------------
+
+/** An item of a field on an axis line: its member, or the text shown when it has none. */
+interface PathItem {
+  member: MemberRef | null;
+  /** Indent of its own cell: its level in the hierarchy. */
+  indent: number;
+  text: string;
+}
+
+/**
+ * One position on an axis: a grid line, or the run of columns that repeat one column
+ * tuple for each measure.
+ */
+interface AxisUnit {
+  start: number;
+  size: number;
+  kind: LineKind;
+  /** The header cells of its first position, one per field. */
+  cells: (HeaderCell | undefined)[];
+  /**
+   * Its items, outermost first: every field's for a data line, none for the grand total,
+   * and for a subtotal the items outside it and then its own, the one its "X Total" cell
+   * names (with no member when that cannot be told).
+   */
+  path: PathItem[];
+}
+
+function itemOf(cell: HeaderCell | undefined): PathItem {
+  return {
+    member: cell && cell.member ? cell.member : null,
+    indent: indentOf(cell),
+    text: cell ? (cell.member ? cell.member.caption : cell.text) : "",
+  };
+}
+
+function sameItem(a: PathItem | undefined, b: PathItem | undefined): boolean {
+  return Boolean(a && b && a.member && b.member && a.member.uniqueName === b.member.uniqueName);
+}
+
+function memberNames(path: PathItem[]): string[] {
+  const out: string[] = [];
+  for (const item of path) {
+    if (item.member && out.indexOf(item.member.uniqueName) < 0) out.push(item.member.uniqueName);
+  }
+  return out;
+}
+
+/** The same column tuple again, for the next measure: every label blanked, nothing new. */
+function repeatsTuple(before: (HeaderCell | undefined)[], cells: (HeaderCell | undefined)[]): boolean {
+  for (let i = 0; i < cells.length; i++) {
+    const a = before[i];
+    const b = cells[i];
+    if (b && b.member) {
+      if (b.kind !== "blank" || !a || !a.member || a.member.uniqueName !== b.member.uniqueName) return false;
+    } else if ((a && a.member) || (b ? b.text : "") !== "" || (a ? a.kind : null) !== (b ? b.kind : null)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The units of an axis with their items. A subtotal line carries the members outside
+ * it but not its own item: that is read from the first line of its group, which is the
+ * next unit when subtotals head their group (`atTop`) and the previous one when they
+ * follow it.
+ */
+function axisUnits(
+  count: number,
+  fieldCount: number,
+  cellsAt: (pos: number) => (HeaderCell | undefined)[],
+  kindAt: (pos: number) => LineKind,
+  groupRepeats: boolean,
+  atTop: boolean,
+): AxisUnit[] {
+  const units: AxisUnit[] = [];
+  for (let pos = 0; pos < count; pos++) {
+    const cells = cellsAt(pos);
+    const kind = kindAt(pos);
+    const last = units[units.length - 1];
+    if (groupRepeats && last && last.kind === kind && repeatsTuple(cellsAt(pos - 1), cells)) {
+      last.size++;
+      continue;
+    }
+    units.push({ start: pos, size: 1, kind, cells, path: [] });
+  }
+  const depthOf = (unit: AxisUnit) =>
+    Math.max(0, unit.cells.findIndex((cell) => cell !== undefined && cell.kind === "subtotal"));
+  units.forEach((unit, u) => {
+    if (unit.kind === "grandTotal") return;
+    if (unit.kind !== "subtotal") {
+      for (let i = 0; i < fieldCount; i++) unit.path.push(itemOf(unit.cells[i]));
+      return;
+    }
+    const depth = depthOf(unit);
+    for (let i = 0; i < depth; i++) unit.path.push(itemOf(unit.cells[i]));
+    const label = unit.cells[depth];
+    let own: PathItem = { member: null, indent: 0, text: label ? label.text : "" };
+    const first = units[atTop ? u + 1 : u - 1];
+    const inGroup =
+      first !== undefined &&
+      (first.kind === "data" || (first.kind === "subtotal" && depthOf(first) > depth)) &&
+      unit.path.every((item, i) => sameItem(item, itemOf(first.cells[i])));
+    if (inGroup) {
+      const cell = first.cells[depth];
+      if (cell && cell.member) own = itemOf(cell);
+    }
+    unit.path.push(own);
+  });
+  return units;
+}
+
+function columnUnits(grid: Grid, atTop: boolean): AxisUnit[] {
+  // Every header row but the last (the measures') belongs to a column field.
+  const fieldRows = Math.max(0, grid.colHeaderRows.length - 1);
+  return axisUnits(
+    grid.colKinds.length,
+    fieldRows,
+    (c) => Array.from({ length: fieldRows }, (_, r) => (grid.colHeaderRows[r] ?? [])[c]),
+    (c) => grid.colKinds[c] ?? "data",
+    true,
+    atTop,
+  );
+}
+
+/** For each value column, the column members behind it, a subtotal's own item included. */
+function columnMembers(grid: Grid, atTop: boolean): string[][] {
+  const out: string[][] = [];
+  for (const unit of columnUnits(grid, atTop)) {
+    const names = memberNames(unit.path);
+    for (let i = 0; i < unit.size; i++) out.push(names.slice());
+  }
+  return out;
+}
+
+/**
+ * The grid with each column subtotal moved after the items it adds up. The helper puts
+ * subtotals at the top of their group on both axes; Excel does that on rows only and
+ * keeps column subtotals on the right. Labels are blanked again for the new order, as
+ * the helper does: an item is written in the first column of its run only.
+ */
+function columnsInSheetOrder(grid: Grid, K: number): Grid {
+  if (K < 2 || grid.colHeaderRows.length !== K + 1) return grid;
+  const units = columnUnits(grid, true);
+  const inGroup = (unit: AxisUnit, subtotal: AxisUnit) =>
+    subtotal.path.every((item, i) => sameItem(item, unit.path[i]));
+  const order: AxisUnit[] = [];
+  const waiting: AxisUnit[] = [];
+  for (const unit of units) {
+    while (waiting.length > 0 && !inGroup(unit, waiting[waiting.length - 1])) {
+      order.push(waiting.pop() as AxisUnit);
+    }
+    if (unit.kind === "subtotal") waiting.push(unit);
+    else order.push(unit);
+  }
+  while (waiting.length > 0) order.push(waiting.pop() as AxisUnit);
+  if (order.every((unit, i) => unit === units[i])) return grid;
+
+  const columns: number[] = [];
+  const unitOf: AxisUnit[] = [];
+  for (const unit of order) {
+    for (let i = 0; i < unit.size; i++) {
+      columns.push(unit.start + i);
+      unitOf.push(unit);
+    }
+  }
+  // What a column shows for field r: an item, or a total (past a subtotal's own item).
+  const key = (unit: AxisUnit, r: number): string | null => {
+    if (r < unit.path.length) {
+      const member = unit.path[r].member;
+      return member ? member.uniqueName : null;
+    }
+    return unit.kind === "data" ? null : "\u0000total";
+  };
+  const sameUpTo = (a: AxisUnit, b: AxisUnit, r: number) => {
+    for (let i = 0; i <= r; i++) {
+      const x = key(a, i);
+      if (x === null || x !== key(b, i)) return false;
+    }
+    return true;
+  };
+  const pick = <T>(line: T[] | undefined): T[] => columns.map((c) => (line ?? [])[c]);
+  const colHeaderRows = grid.colHeaderRows.map((line, r) => {
+    const moved = pick(line);
+    if (r >= K) return moved;
+    return moved.map((cell, p): HeaderCell => {
+      if (!cell || !cell.member || (cell.kind !== "member" && cell.kind !== "blank")) return cell;
+      return p > 0 && sameUpTo(unitOf[p - 1], unitOf[p], r)
+        ? { ...cell, text: "", kind: "blank" }
+        : { ...cell, text: cell.member.caption, kind: "member" };
+    });
+  });
+  return {
+    ...grid,
+    colHeaderRows,
+    colKinds: pick(grid.colKinds),
+    colValueIndex: grid.colValueIndex ? pick(grid.colValueIndex) : grid.colValueIndex,
+    values: grid.values.map((line) => pick(line)),
+    cellFormats: grid.cellFormats.map((line) => pick(line)),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Row lines by report form.
+// ---------------------------------------------------------------------------
+
+interface SheetRows {
+  /** Header cells of each data line: one per row field, or one in compact form. */
+  headers: HeaderCell[][];
+  /** Each line's kind, for the bold of total lines. */
+  kinds: LineKind[];
+  lines: DataLine[];
+}
+
+/**
+ * The data lines of the sheet. Tabular form writes the grid's lines as they are. Outline
+ * and compact form give each outer item a line of its own before its inner items; with
+ * subtotals at the top of the group (`atTop`) that line shows the subtotal's values and
+ * the subtotal has no line of its own. Otherwise the subtotal ("Tehran Total") follows
+ * its group, as in tabular form.
+ */
+function sheetRows(grid: Grid, form: ReportForm, atTop: boolean): SheetRows {
+  const R = grid.rowFieldCaptions.length;
+  const units = axisUnits(
+    grid.rowHeaders.length,
+    R,
+    (g) => grid.rowHeaders[g] ?? [],
+    (g) => grid.rowKinds[g] ?? "data",
+    false,
+    atTop,
+  );
+  if (form === "tabular") {
+    return {
+      headers: grid.rowHeaders,
+      kinds: grid.rowKinds,
+      lines: units.map((unit) => ({ grid: unit.start, members: memberNames(unit.path) })),
+    };
+  }
+
+  const compact = form === "compact";
+  const out: SheetRows = { headers: [], kinds: [], lines: [] };
+  /** The outer items whose own line is written, by depth, with that line's indent. */
+  const open: { item: PathItem; indent: number }[] = [];
+  const baseIndent = (depth: number) => (depth === 0 ? 0 : open[depth - 1] ? open[depth - 1].indent + 1 : depth);
+  const blankCell = (item?: PathItem): HeaderCell => ({
+    text: "",
+    indent: item ? item.indent : 0,
+    kind: "blank",
+    member: item ? item.member : null,
+  });
+  const push = (cells: HeaderCell[], kind: LineKind, line: DataLine) => {
+    out.headers.push(cells);
+    out.kinds.push(kind);
+    out.lines.push(line);
+  };
+
+  /** The line of the item at `depth` of `path`, showing grid line `values`. Returns its indent. */
+  const itemLine = (path: PathItem[], depth: number, values: number | null, kind: LineKind): number => {
+    const item = path[depth];
+    const indent = baseIndent(depth) + item.indent;
+    const cell: HeaderCell = { text: item.text, indent: compact ? indent : item.indent, kind: "member", member: item.member };
+    const cells = compact
+      ? [cell]
+      : Array.from({ length: R }, (_, i) => (i < depth ? blankCell(path[i]) : i === depth ? cell : blankCell()));
+    push(cells, kind, { grid: values, members: memberNames(path.slice(0, depth + 1)) });
+    return indent;
+  };
+
+  /**
+   * Write the own lines of the outer items `path[0..upto)` that are not written yet, and
+   * from depth `fresh` on in any case. The innermost of them shows grid line `values`.
+   */
+  const openItems = (path: PathItem[], upto: number, fresh: number, values: number | null) => {
+    let j = 0;
+    while (j < upto && j < fresh && j < open.length && sameItem(open[j].item, path[j])) j++;
+    open.length = j;
+    for (; j < upto; j++) {
+      const indent = itemLine(path, j, j === upto - 1 ? values : null, "subtotal");
+      open.push({ item: path[j], indent });
+    }
+  };
+
+  /** "Tehran Total" after its group, a subtotal whose item cannot be told, or Grand Total. */
+  const totalLine = (unit: AxisUnit, depth: number) => {
+    const label = (grid.rowHeaders[unit.start] ?? [])[depth];
+    const text = label ? label.text : "";
+    const kind: LineKind = unit.kind === "grandTotal" ? "grandTotal" : "subtotal";
+    const line: DataLine = { grid: unit.start, members: memberNames(unit.path) };
+    if (compact) {
+      const own = open[depth] && sameItem(open[depth].item, unit.path[depth]) ? open[depth].indent : baseIndent(depth);
+      push([{ text, indent: kind === "grandTotal" ? 0 : own, kind, member: null }], kind, line);
+      return;
+    }
+    const cells = Array.from({ length: R }, (_, i): HeaderCell =>
+      i < depth ? blankCell(unit.path[i]) : { text: i === depth ? text : "", indent: 0, kind, member: null },
+    );
+    push(cells, kind, line);
+  };
+
+  for (const unit of units) {
+    if (unit.kind === "grandTotal") {
+      open.length = 0;
+      totalLine(unit, 0);
+    } else if (unit.kind === "subtotal") {
+      const depth = unit.path.length - 1;
+      if (atTop && unit.path[depth].member) {
+        // Its values go on its item's own line, which starts the group.
+        openItems(unit.path, depth + 1, depth, unit.start);
+      } else {
+        totalLine(unit, depth);
+        open.length = Math.min(open.length, depth);
+      }
+    } else {
+      openItems(unit.path, R - 1, R, null);
+      itemLine(unit.path, R - 1, unit.start, "data");
+    }
+  }
+  return out;
 }
 
 /**
@@ -404,6 +830,21 @@ export function placeholderBlock(): Block {
       headerTop: 0,
       dataTop: 0,
     },
+    lines: [],
+    columnMembers: [],
+    grid: {
+      filterRows: [],
+      rowFieldCaptions: [""],
+      colHeaderRows: [[]],
+      rowHeaders: [],
+      values: [],
+      formatPalette: [GENERAL_FORMAT],
+      cellFormats: [],
+      rowKinds: [],
+      colKinds: [],
+      colValueIndex: [],
+      stats: { rows: 0, columns: 0, elapsedMs: 0, mdx: "" },
+    },
   };
 }
 
@@ -428,19 +869,27 @@ export function columnHeaderAt(
  * Where the filter cells of a report should be, worked out from its layout alone, for
  * when there is no result in memory (the workbook was just reopened). It assumes what
  * the helper does: one filter row per filter, one header row per column field with the
- * measures' row last, one corner column per row field (one in any case). A caller that
- * has the cell's text should check it against the field's caption before trusting a
- * row or column answer.
+ * measures' row last, one corner column per row field (one in any case, and one only
+ * in compact form, which has its "Column Labels" row above the header rows). A caller
+ * that has the cell's text should check it against the field's caption (or
+ * `labelsCaption`) before trusting a row or column answer.
  */
 export function guessFieldCell(
-  layout: Pick<Layout, "filters" | "rows" | "columns">,
+  layout: Pick<Layout, "filters" | "rows" | "columns"> & { options?: LayoutOptions },
   row: number,
   col: number,
 ): FieldCell | null {
   if (row < 0 || col < 0) return null;
   const F = layout.filters.length;
   if (row < F) return col <= 1 ? { area: "filters", index: row } : null;
-  const headerTop = F > 0 ? F + 1 : 0;
+  const top = F > 0 ? F + 1 : 0;
+  if (layout.options && reportForm(layout.options) === "compact") {
+    const labelsRow = layout.columns.length > 0;
+    if (labelsRow && row === top) return col === 1 ? { area: "columns", index: 0, labels: true } : null;
+    const last = top + (labelsRow ? 1 : 0) + layout.columns.length;
+    return row === last && col === 0 && layout.rows.length > 0 ? { area: "rows", index: 0, labels: true } : null;
+  }
+  const headerTop = top;
   const h = row - headerTop;
   const H = layout.columns.length + 1;
   const R = Math.max(1, layout.rows.length);
@@ -562,6 +1011,24 @@ export function detailsMembers(headers: GridHeaders, row: number, col: number): 
   };
   for (const cell of headers.rowHeaders[row] ?? []) add(cell);
   for (const line of headers.colHeaderRows) add(line[col]);
+  return out;
+}
+
+/**
+ * The members behind value cell (`line`, `col`) of a block, counted from its first data
+ * line and value column, for Show Details: the row members of its line and the column
+ * members of its column, a subtotal's own item included. Null when the line shows no
+ * values (an outer item's own line in outline or compact form) or is out of range.
+ */
+export function valueCellMembers(
+  block: Pick<Block, "lines" | "columnMembers">,
+  line: number,
+  col: number,
+): string[] | null {
+  const shown = block.lines[line];
+  if (!shown || shown.grid === null || col < 0 || col >= block.columnMembers.length) return null;
+  const out = shown.members.slice();
+  for (const name of block.columnMembers[col]) if (out.indexOf(name) < 0) out.push(name);
   return out;
 }
 

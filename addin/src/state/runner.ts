@@ -21,15 +21,16 @@ import {
   blockFields,
   buildBlock,
   columnHeaderAt,
-  detailsMembers,
   expandableMembers,
   expandedDescendants,
   memberKey,
   placeholderBlock,
+  valueCellMembers,
   valueFieldIndex,
   type Axis,
   type Block,
   type BlockShape,
+  type DataLine,
   type FieldCell,
   type GridHeaders,
   type MemberHit,
@@ -79,8 +80,16 @@ export interface ReportRuntime {
   fieldCells: Map<string, FieldCell>;
   /** The layout that produced the block: the fields those cells point into. */
   layout: Layout;
-  /** `Grid.colValueIndex` of the result: the value field behind each value column. */
+  /** `Grid.colValueIndex` of the result, in sheet order: the value field behind each value column. */
   colValueIndex: number[];
+  /**
+   * Per data row of the block, the grid line it shows (none for an outer item's own line
+   * in outline and compact form) and the row members behind it. Sheet rows map to grid
+   * lines through this, never by position.
+   */
+  lines: DataLine[];
+  /** Per value column of the block, the column members behind it. */
+  columnMembers: string[][];
 }
 
 export type RunOutcome =
@@ -191,6 +200,20 @@ export class ReportRunner {
   }
 
   /**
+   * For compact form's "Row Labels" or "Column Labels" cell, its area: the checklist it
+   * opens offers each field of that area (Windows' "Select field:"). Null for any other
+   * cell, and when there is no result to tell by.
+   */
+  labelsAt(
+    reportId: string,
+    at: { row: number; col: number; rows: number; cols: number },
+  ): "rows" | "columns" | null {
+    const runtime = this.current(reportId, at);
+    const cell = runtime ? runtime.fieldCells.get(memberKey(at.row, at.col)) : undefined;
+    return cell && cell.labels && cell.area !== "filters" ? cell.area : null;
+  }
+
+  /**
    * The field the pane offers to filter for a selected cell: a filter cell's field, or
    * the column field whose header row the cell is in. Same null / undefined as above.
    */
@@ -222,8 +245,10 @@ export class ReportRunner {
     if (line < 0 || line >= shape.dataRows || column < 0 || column >= shape.dataCols) return null;
     const index = valueFieldIndex(runtime.colValueIndex, column, runtime.layout.values.length);
     if (index === null) return null;
+    const members = valueCellMembers(runtime, line, column);
+    if (members === null) return null;
     return {
-      members: detailsMembers(runtime.headers, line, column),
+      members,
       measure: runtime.layout.values[index].measure,
       layout: runtime.layout,
     };
@@ -329,17 +354,21 @@ export class ReportRunner {
     const block = buildBlock(grid, blockFields(def.layout));
     const placed = await this.place(def, block, options, flight, stale);
     if ("kind" in placed) return placed;
+    // The block's grid has the columns in sheet order.
+    const shown = block.grid;
     const runtime: ReportRuntime = {
       rows: block.rows,
       cols: block.cols,
       members: block.members,
-      headers: { rowHeaders: grid.rowHeaders, colHeaderRows: grid.colHeaderRows },
+      headers: { rowHeaders: shown.rowHeaders, colHeaderRows: shown.colHeaderRows },
       stats: grid.stats,
       dataRows: block.shape.dataRows,
       shape: block.shape,
       fieldCells: block.fieldCells,
       layout: def.layout,
-      colValueIndex: grid.colValueIndex ?? [],
+      colValueIndex: shown.colValueIndex ?? [],
+      lines: block.lines,
+      columnMembers: block.columnMembers,
     };
     this.runtimes.set(def.id, runtime);
     await this.deps.host.saveReport(def);

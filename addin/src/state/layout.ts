@@ -94,6 +94,10 @@ export type LayoutAction =
   | { type: "setGrandTotals"; row: boolean; column: boolean }
   /** "For empty cells show": text written into value cells without a value. */
   | { type: "setEmptyCellText"; text: string }
+  /** Excel's Report Layout: Compact, Outline or Tabular Form. */
+  | { type: "setForm"; form: ReportForm }
+  /** Excel's Subtotals choice (Design tab): none, at the bottom or at the top of each group. */
+  | { type: "setSubtotals"; at: SubtotalsChoice }
   /** "Expand Entire Field": these members of the field, one level deeper. */
   | { type: "expandField"; hierarchy: string; members: string[] }
   /** "Collapse Entire Field". */
@@ -156,14 +160,54 @@ export function grandTotalsShown(options: LayoutOptions): { row: boolean; column
   };
 }
 
+/** Excel's Report Layout. */
+export type ReportForm = NonNullable<LayoutOptions["form"]>;
+export const REPORT_FORMS: readonly ReportForm[] = ["compact", "outline", "tabular"];
+
+/** Excel's three Subtotals choices: "Do Not Show", "at Bottom of Group", "at Top of Group". */
+export type SubtotalsChoice = "none" | "bottom" | "top";
+
+/** The form a report is shown in. Absent: tabular, the only form before the others existed. */
+export function reportForm(options: LayoutOptions): ReportForm {
+  return options.form === "compact" || options.form === "outline" ? options.form : "tabular";
+}
+
+/**
+ * Where subtotals are shown, as the sheet shows them: tabular form has no subtotals at
+ * the top of a group (Excel greys that choice out), so there it is "bottom" whatever is
+ * stored. The stored choice is kept for when the form changes back, as in Excel.
+ */
+export function subtotalsChoice(options: LayoutOptions): SubtotalsChoice {
+  if (!options.subtotals) return "none";
+  return options.subtotalsAt === "top" && reportForm(options) !== "tabular" ? "top" : "bottom";
+}
+
+/**
+ * What a stored definition reads as where it says nothing: the options from before
+ * Report Layout existed (tabular form, no subtotals), so an old report keeps its look.
+ */
 export const DEFAULT_OPTIONS: LayoutOptions = {
   grandTotals: true,
   subtotals: false,
   nonEmpty: true,
 };
 
+/** A new report starts as Excel starts one: Compact Form, subtotals at the top of each group. */
+export const NEW_REPORT_OPTIONS: LayoutOptions = {
+  ...DEFAULT_OPTIONS,
+  subtotals: true,
+  form: "compact",
+  subtotalsAt: "top",
+};
+
+/** No fields, and the options a stored definition without any reads as. */
 export function emptyLayout(): Layout {
   return { rows: [], columns: [], values: [], filters: [], options: { ...DEFAULT_OPTIONS } };
+}
+
+/** The layout of a new report (or one whose cube changed): no fields, Excel's defaults. */
+export function newLayout(): Layout {
+  return { ...emptyLayout(), options: { ...NEW_REPORT_OPTIONS } };
 }
 
 /** True when there is nothing to query: no field in Rows, Columns or Values. */
@@ -514,6 +558,18 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
       if (text === "") delete options.emptyCellText;
       else options.emptyCellText = text;
       return { ...layout, options };
+    }
+
+    case "setForm":
+      if (REPORT_FORMS.indexOf(action.form) < 0 || reportForm(layout.options) === action.form) return layout;
+      return { ...layout, options: { ...layout.options, form: action.form } };
+
+    case "setSubtotals": {
+      const o = layout.options;
+      if (action.at === "none") return o.subtotals ? { ...layout, options: { ...o, subtotals: false } } : layout;
+      if (action.at !== "top" && action.at !== "bottom") return layout;
+      if (o.subtotals && (o.subtotalsAt ?? "bottom") === action.at) return layout;
+      return { ...layout, options: { ...o, subtotals: true, subtotalsAt: action.at } };
     }
 
     case "expandField":

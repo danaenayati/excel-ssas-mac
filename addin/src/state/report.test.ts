@@ -474,3 +474,40 @@ describe("reading the Windows options back", () => {
     expect(def.layout.options).toEqual({ grandTotals: true, subtotals: false, nonEmpty: true, emptyCellText: "x".repeat(20) });
   });
 });
+
+describe("reading Report Layout and the Subtotals choice back", () => {
+  it("starts new reports in Compact Form with subtotals at the top, and round-trips it", () => {
+    const def = newReportDef("demo", "Sample", "Rides");
+    expect(def.layout.options).toMatchObject({ form: "compact", subtotals: true, subtotalsAt: "top" });
+    expect(parseReportDef(serializeReportDef(def), def.id)).toEqual(def);
+    for (const form of ["outline", "tabular"] as const) {
+      const options = { ...def.layout.options, form, subtotalsAt: "bottom" as const };
+      const other = { ...def, layout: { ...def.layout, options } };
+      expect(parseReportDef(serializeReportDef(other), def.id)?.layout.options).toEqual(options);
+    }
+  });
+
+  it("keeps an old report tabular, with its own subtotals flag", () => {
+    const old = (subtotals: boolean) =>
+      parseReportDef(JSON.stringify({ id: "abc", layout: { options: { grandTotals: true, subtotals, nonEmpty: true } } }))!
+        .layout.options;
+    expect(old(true)).toEqual({ grandTotals: true, subtotals: true, nonEmpty: true });
+    expect(old(false)).toEqual({ grandTotals: true, subtotals: false, nonEmpty: true });
+  });
+
+  it("drops a form or a subtotal position it does not know", () => {
+    const read = (options: unknown) => parseReportDef(JSON.stringify({ id: "abc", layout: { options } }))!.layout.options;
+    expect(read({ subtotals: true, form: "pivot", subtotalsAt: 1 })).toEqual({ grandTotals: true, subtotals: true, nonEmpty: true });
+    expect(read({ form: ["compact"], subtotalsAt: "middle" })).toEqual({ grandTotals: true, subtotals: false, nonEmpty: true });
+    expect(read({ form: "outline", subtotalsAt: "top" })).toMatchObject({ form: "outline", subtotalsAt: "top" });
+  });
+
+  it("gives a report whose cube or database changes a new report's layout", () => {
+    const tabular = currentReducer(open(), { type: "layout", action: { type: "setForm", form: "tabular" } })!;
+    expect(tabular.def.layout.options.form).toBe("tabular");
+    const otherCube = currentReducer(tabular, { type: "setCube", cube: "Other" })!;
+    expect(otherCube.def.layout.options).toMatchObject({ form: "compact", subtotals: true, subtotalsAt: "top" });
+    const otherDb = currentReducer(tabular, { type: "setCatalog", catalog: "Finance" })!;
+    expect(otherDb.def.layout.options).toMatchObject({ form: "compact", subtotals: true, subtotalsAt: "top" });
+  });
+});
