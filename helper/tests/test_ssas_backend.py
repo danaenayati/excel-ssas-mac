@@ -56,6 +56,32 @@ RESPONSES = {
             {"DIMENSION_UNIQUE_NAME": "[Audit]", "DIMENSION_CAPTION": "Audit", "DIMENSION_TYPE": "3", "DIMENSION_IS_VISIBLE": "false"},
         ]
     ),
+    "MDSCHEMA_LEVELS": x.rowset(
+        [
+            {"HIERARCHY_UNIQUE_NAME": "[Date].[Calendar]", "LEVEL_NUMBER": "0", "LEVEL_TYPE": "1", "LEVEL_DBTYPE": "3"},
+            {"HIERARCHY_UNIQUE_NAME": "[Date].[Calendar]", "LEVEL_NUMBER": "2", "LEVEL_TYPE": "0", "LEVEL_DBTYPE": "3"},
+            {"HIERARCHY_UNIQUE_NAME": "[Date].[Calendar]", "LEVEL_NUMBER": "1", "LEVEL_TYPE": "0", "LEVEL_DBTYPE": "7"},
+            {"HIERARCHY_UNIQUE_NAME": "[Geo].[City]", "LEVEL_NUMBER": "0", "LEVEL_TYPE": "1", "LEVEL_DBTYPE": "130"},
+            {"HIERARCHY_UNIQUE_NAME": "[Geo].[City]", "LEVEL_NUMBER": "1", "LEVEL_TYPE": "0", "LEVEL_DBTYPE": "130"},
+            {"HIERARCHY_UNIQUE_NAME": "[Date].[Scenario]", "LEVEL_NUMBER": "0", "LEVEL_TYPE": "516", "LEVEL_DBTYPE": "3"},
+        ]
+    ),
+    "MDSCHEMA_KPIS": x.rowset(
+        [
+            {
+                "KPI_NAME": "Ride Growth", "KPI_CAPTION": "Ride Growth", "KPI_DISPLAY_FOLDER": "Targets",
+                "KPI_VALUE": "[Measures].[Rides]", "KPI_GOAL": "[Measures].[Rides Goal]", "KPI_STATUS": "",
+                "KPI_TREND": "[Measures].[Rides Trend]",
+            },
+            {"KPI_NAME": "Broken", "KPI_VALUE": "not a name"},
+        ]
+    ),
+    "MDSCHEMA_SETS": x.rowset(
+        [
+            {"SET_NAME": "Top Cities", "SET_CAPTION": "Top Cities", "SET_DISPLAY_FOLDER": "", "DIMENSIONS": "[Geo].[City]"},
+            {"SET_NAME": "Mixed", "SET_CAPTION": "", "SET_DISPLAY_FOLDER": "F", "DIMENSIONS": "[Geo].[City],[Date].[Calendar]"},
+        ]
+    ),
     "MDSCHEMA_HIERARCHIES": x.rowset(
         [
             {
@@ -169,14 +195,33 @@ def test_fields_are_grouped_filtered_and_typed(backend):
     assert [d["caption"] for d in fields["dimensions"]] == ["Date", "Geography"]
     date, geo = fields["dimensions"]
     assert date["hierarchies"] == [
-        {"uniqueName": "[Date].[Calendar]", "caption": "Calendar", "folder": "", "kind": "user", "allMember": "[Date].[Calendar].[All Periods]"},
-        {"uniqueName": "[Date].[Scenario]", "caption": "Scenario", "folder": "", "kind": "attribute", "allMember": None},
+        {"uniqueName": "[Date].[Calendar]", "caption": "Calendar", "folder": "", "kind": "user",
+         "allMember": "[Date].[Calendar].[All Periods]", "isDate": True},
+        {"uniqueName": "[Date].[Scenario]", "caption": "Scenario", "folder": "", "kind": "attribute", "allMember": None,
+         "isDate": True},
     ]
     assert geo["hierarchies"] == [
         {"uniqueName": "[Geo].[City]", "caption": "City", "folder": "Places", "kind": "attribute", "allMember": "[Geo].[City].[All]"},
     ]
     restricted = [r for r in backend.server.requests if "MDSCHEMA_HIERARCHIES" in r][0]
     assert "<CUBE_NAME>Sales</CUBE_NAME>" in restricted
+    assert fields["kpis"] == [
+        {"name": "Ride Growth", "caption": "Ride Growth", "folder": "Targets", "measure": "[Measures].[Rides]",
+         "parts": ["value", "goal", "trend"]},
+    ]
+    assert fields["sets"] == [
+        {"uniqueName": "[Mixed]", "caption": "Mixed", "folder": "F", "dimension": "[Geo]", "hierarchy": None, "allMember": None},
+        {"uniqueName": "[Top Cities]", "caption": "Top Cities", "folder": "", "dimension": "[Geo]",
+         "hierarchy": "[Geo].[City]", "allMember": "[Geo].[City].[All]"},
+    ]
+
+
+def test_fields_go_without_what_a_server_refuses_to_list(backend):
+    for kind in ("MDSCHEMA_LEVELS", "MDSCHEMA_KPIS", "MDSCHEMA_SETS"):
+        backend.server.responses.pop(kind, None)
+    fields = backend.fields("Sales", "Sales")
+    assert fields["kpis"] == [] and fields["sets"] == []
+    assert not any(h.get("isDate") for d in fields["dimensions"] for h in d["hierarchies"])
 
 
 def test_members_drop_the_all_member_and_report_truncation(backend):

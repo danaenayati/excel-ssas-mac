@@ -300,8 +300,8 @@ def test_page_filters_ignore_sorting_and_filters_other_than_item_selection():
 def test_same_measure_may_appear_twice_when_shown_two_ways():
     layout = Layout.from_json({"values": [RIDES, dict(RIDES, showAs="percentOfGrandTotal")]})
     assert [v.show_as for v in layout.values] == ["normal", "percentOfGrandTotal"]
-    with pytest.raises(CubeError):
-        Layout.from_json({"values": [RIDES, dict(RIDES)]})
+    twice = Layout.from_json({"values": [RIDES, dict(RIDES)]})
+    assert [v.measure for v in twice.values] == ["[Measures].[Rides]", "[Measures].[Rides]"]
     with pytest.raises(CubeError):
         Layout.from_json({"values": [dict(RIDES, showAs="percentOfEverything")]})
 
@@ -408,13 +408,13 @@ def test_show_values_as_defines_calculated_measures():
         "WITH "
         "MEMBER [Measures].[Rides (% of Grand Total)] AS "
         "IIF(([Measures].[Rides], [Geo].[City].[All], [Service].[Type].[All]) = 0, NULL, "
-        "[Measures].[Rides] / ([Measures].[Rides], [Geo].[City].[All], [Service].[Type].[All])), FORMAT_STRING = \"Percent\" "
+        "[Measures].[Rides] / ([Measures].[Rides], [Geo].[City].[All], [Service].[Type].[All])), FORMAT_STRING = \"Percent\", SOLVE_ORDER = 100 "
         "MEMBER [Measures].[Revenue (% of Column Total)] AS "
         "IIF(([Measures].[Revenue], [Geo].[City].[All]) = 0, NULL, [Measures].[Revenue] / ([Measures].[Revenue], [Geo].[City].[All])), "
-        "FORMAT_STRING = \"Percent\" "
+        "FORMAT_STRING = \"Percent\", SOLVE_ORDER = 100 "
         "MEMBER [Measures].[Rides (% of Row Total)] AS "
         "IIF(([Measures].[Rides], [Service].[Type].[All]) = 0, NULL, [Measures].[Rides] / ([Measures].[Rides], [Service].[Type].[All])), "
-        "FORMAT_STRING = \"Percent\" "
+        "FORMAT_STRING = \"Percent\", SOLVE_ORDER = 100 "
         "SELECT "
     )
     assert ("{[Measures].[Rides], [Measures].[Rides (% of Grand Total)], [Measures].[Revenue (% of Column Total)], "
@@ -522,7 +522,7 @@ def test_percent_of_a_base_item_and_of_the_previous_one():
         "WITH MEMBER [Measures].[Rides (% Of Calendar, 2025)] AS "
         "IIF([Date].[Calendar].CurrentMember IS [Date].[Calendar].[All], NULL, "
         "IIF(([Measures].[Rides], [Date].[Calendar].[Year].&[2025]) = 0, NULL, "
-        "[Measures].[Rides] / ([Measures].[Rides], [Date].[Calendar].[Year].&[2025]))), FORMAT_STRING = \"Percent\""
+        "[Measures].[Rides] / ([Measures].[Rides], [Date].[Calendar].[Year].&[2025]))), FORMAT_STRING = \"Percent\", SOLVE_ORDER = 100"
     )
     text = shown("percentOf", rows=[field(DATE)], baseField=DATE, baseItem="previous")
     assert "([Measures].[Rides], [Date].[Calendar].CurrentMember.PrevMember)" in text
@@ -539,7 +539,7 @@ def test_percent_of_parent_row_total_checks_the_innermost_field_first():
         "IIF(NOT ([Geo].[City].CurrentMember IS [Geo].[City].[All]), "
         "IIF(([Measures].[Rides], [Geo].[City].CurrentMember.Parent) = 0, NULL, "
         "[Measures].[Rides] / ([Measures].[Rides], [Geo].[City].CurrentMember.Parent)), 1)), "
-        "FORMAT_STRING = \"Percent\""
+        "FORMAT_STRING = \"Percent\", SOLVE_ORDER = 100"
     )
     assert shown("percentOfParentColumnTotal", columns=[field(SERVICE)]).count("[Service].[Type].CurrentMember.Parent") == 2
 
@@ -555,7 +555,7 @@ def test_difference_from_previous_and_percent_difference_from_an_item():
         "WITH MEMBER [Measures].[Rides (Difference From Calendar, previous)] AS "
         "IIF([Date].[Calendar].CurrentMember IS [Date].[Calendar].[All] OR "
         "IsEmpty(([Measures].[Rides], [Date].[Calendar].CurrentMember.PrevMember)), NULL, "
-        "[Measures].[Rides] - ([Measures].[Rides], [Date].[Calendar].CurrentMember.PrevMember))"
+        "[Measures].[Rides] - ([Measures].[Rides], [Date].[Calendar].CurrentMember.PrevMember)), SOLVE_ORDER = 100"
     )
     text = shown("percentDifferenceFrom", rows=[field(DATE)], baseField=DATE, baseItem="[Date].[Calendar].[Year].&[2025]")
     assert ("IIF([Date].[Calendar].CurrentMember IS [Date].[Calendar].[All] OR "
@@ -571,7 +571,7 @@ def test_running_total_and_its_percentage():
     assert text == (
         "WITH MEMBER [Measures].[Rides (Running Total In Calendar)] AS "
         "IIF([Date].[Calendar].CurrentMember IS [Date].[Calendar].[All], [Measures].[Rides], "
-        "Sum({[Date].[Calendar].CurrentMember.Level.Members.Item(0) : [Date].[Calendar].CurrentMember}, [Measures].[Rides]))"
+        "Sum({[Date].[Calendar].CurrentMember.Level.Members.Item(0) : [Date].[Calendar].CurrentMember}, [Measures].[Rides])), SOLVE_ORDER = 100"
     )
     text = shown("percentRunningTotalIn", rows=[field(DATE)], baseField=DATE)
     assert "/ ([Measures].[Rides], [Date].[Calendar].[All])" in text and "FORMAT_STRING = \"Percent\"" in text
@@ -583,7 +583,7 @@ def test_rank_both_ways():
         "WITH MEMBER [Measures].[Rides (Rank Largest to Smallest Calendar)] AS ".replace("Calendar", "City")
         + "IIF([Geo].[City].CurrentMember IS [Geo].[City].[All] OR IsEmpty([Measures].[Rides]), NULL, "
         "Rank([Geo].[City].CurrentMember, Order(NonEmpty([Geo].[City].CurrentMember.Level.Members, {[Measures].[Rides]}), "
-        "[Measures].[Rides], BDESC), [Measures].[Rides])), FORMAT_STRING = \"#,##0\""
+        "[Measures].[Rides], BDESC), [Measures].[Rides])), FORMAT_STRING = \"#,##0\", SOLVE_ORDER = 100"
     )
     assert "BASC" in shown("rankAscending", rows=[field(CITY)], baseField=CITY)
 
@@ -594,7 +594,7 @@ def test_index():
         "WITH MEMBER [Measures].[Rides (Index)] AS "
         "IIF(([Measures].[Rides], [Service].[Type].[All]) = 0 OR ([Measures].[Rides], [Geo].[City].[All]) = 0, NULL, "
         "([Measures].[Rides] * ([Measures].[Rides], [Geo].[City].[All], [Service].[Type].[All])) / "
-        "(([Measures].[Rides], [Service].[Type].[All]) * ([Measures].[Rides], [Geo].[City].[All]))), FORMAT_STRING = \"0.00\""
+        "(([Measures].[Rides], [Service].[Type].[All]) * ([Measures].[Rides], [Geo].[City].[All]))), FORMAT_STRING = \"0.00\", SOLVE_ORDER = 100"
     )
 
 

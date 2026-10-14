@@ -12,9 +12,8 @@ import re
 
 from ..errors import CubeError
 from .formats import GENERAL, to_excel
-from .mdx import show_as_caption
+from .mdx import custom_item_name, value_members
 from .model import AxisMember, CellSet, Layout, PlacedField
-from .names import quote_identifier
 
 DEFAULT_CELL_LIMIT = 300_000
 MAX_SAFE_INT = 2**53
@@ -43,7 +42,7 @@ def build_grid(
             f"Add a filter or remove a field to bring it under {cell_limit:,}.",
         )
 
-    col_lines, col_kinds = _axis_lines(col_tuples, layout.columns)
+    col_lines, col_kinds = _axis_lines(col_tuples, layout.columns, _calculated_items(layout.columns))
     col_header_rows = [[line[i] for line in col_lines] for i in range(len(layout.columns))]
     col_header_rows.append(
         [_header(_measure_caption(tup, layout), 0, "measure") for tup in col_tuples]
@@ -52,15 +51,14 @@ def build_grid(
     # The value field each column shows. Read from the column's own measure member, not
     # from its position: NON EMPTY can drop single tuple × measure columns.
     by_name: dict[str, int] = {}
-    for index, value in enumerate(layout.values):
-        name = value.measure if value.show_as == "normal" else "[Measures]." + quote_identifier(show_as_caption(value))
-        by_name.setdefault(name.lower(), index)
+    for index, member in enumerate(value_members(layout)):
+        by_name.setdefault(member.name.lower(), index)
     col_value_index = [
         by_name.get(tup[-1].unique_name.lower(), -1) if len(tup) > len(layout.columns) else -1 for tup in col_tuples
     ]
 
     if has_row_axis and layout.rows:
-        row_headers, row_kinds = _axis_lines(row_tuples, layout.rows)
+        row_headers, row_kinds = _axis_lines(row_tuples, layout.rows, _calculated_items(layout.rows))
         row_captions = [f.caption for f in layout.rows]
     else:
         row_headers = [[_header("Total", 0, "grandTotal")] for _ in range(n_rows)]
@@ -108,19 +106,27 @@ def _header(text: str, indent: int, kind: str, member: dict | None = None) -> di
     return {"text": text, "indent": indent, "kind": kind, "member": member}
 
 
-def _member_ref(member: AxisMember, placed: PlacedField, expanded: frozenset[str]) -> dict:
-    return {
+def _member_ref(member: AxisMember, placed: PlacedField, expanded: frozenset[str], calculated: bool) -> dict:
+    ref = {
         "uniqueName": member.unique_name,
         "hierarchy": placed.hierarchy,
         "caption": member.caption,
         "level": member.level,
-        "hasChildren": member.child_count > 0,
+        "hasChildren": member.child_count > 0 and not calculated,
         "expanded": member.unique_name in expanded,
     }
+    if calculated:
+        ref["calculated"] = True
+    return ref
+
+
+def _calculated_items(fields: tuple[PlacedField, ...]) -> frozenset[str]:
+    """Unique names (lower case) of the groups and calculated items on one axis."""
+    return frozenset(custom_item_name(f, item).lower() for f in fields for item in f.custom_items)
 
 
 def _axis_lines(
-    tuples: list[tuple[AxisMember, ...]], fields: tuple[PlacedField, ...]
+    tuples: list[tuple[AxisMember, ...]], fields: tuple[PlacedField, ...], calculated: frozenset[str] = frozenset()
 ) -> tuple[list[list[dict]], list[str]]:
     """One line of header cells per tuple (one cell per field), plus each line's kind."""
     expanded = [frozenset(f.expanded) for f in fields]
@@ -155,7 +161,7 @@ def _axis_lines(
                         "" if suppressed else mem.caption,
                         indent,
                         "blank" if suppressed else "member",
-                        _member_ref(mem, placed, expanded[i]),
+                        _member_ref(mem, placed, expanded[i], mem.unique_name.lower() in calculated),
                     )
                 )
         lines.append(line)

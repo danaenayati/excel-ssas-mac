@@ -93,6 +93,8 @@ export interface Kpi {
   caption: string;
   /** Display folder, possibly nested with "\\"; "" for none. */
   folder: string;
+  /** Unique name of the KPI's value measure: the `measure` of its value fields. */
+  measure: string;
   /** The parts this KPI defines; "value" always. */
   parts: KpiPart[];
 }

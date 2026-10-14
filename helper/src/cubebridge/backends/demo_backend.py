@@ -3,20 +3,26 @@
 It answers the same `Layout` a real cube would and returns the same `CellSet` shape,
 following the rules in pivot/mdx.py (detail members, drill-down, sorting, All-member
 totals, selections and label/value filters as sub-selects with visual totals,
-"Show Values As", NON EMPTY, and DRILLTHROUGH refusals). It does not parse MDX: it
-evaluates the layout directly over a few thousand generated fact rows.
+"Show Values As", NON EMPTY, and DRILLTHROUGH refusals), plus Date Filters, a KPI,
+two named sets, the report's groups, calculated items and calculated measures. It
+does not parse MDX: it evaluates the layout directly over a few thousand generated
+fact rows. Formulas are the exception: it understands + - * / ( ), numbers and names,
+which is enough to try the feature without a server.
 """
 
 from __future__ import annotations
 
+import datetime
 import itertools
 import random
+import re
 from dataclasses import dataclass
 
 from ..errors import CubeError
-from ..pivot import mdx
-from ..pivot.names import quote_identifier
-from ..pivot.model import AxisMember, Cell, CellSet, LabelFilter, Layout, PlacedField, ValueField, ValueFilter
+from ..pivot import dates, mdx
+from ..pivot.model import (
+    AxisMember, Cell, CellSet, CustomItem, LabelFilter, Layout, PlacedField, ValueField, ValueFilter,
+)
 
 CATALOG = "Sample"
 CUBE = "Ride Sales"
@@ -52,7 +58,16 @@ _HIERARCHIES = (
     _Hierarchy("[Geography].[City]", "City", "[Geography]", "Geography", (("City", "city"),), "attribute"),
     _Hierarchy("[Service].[Service Type]", "Service Type", "[Service]", "Service", (("Service Type", "service"),), "attribute"),
     _Hierarchy("[Customer].[Segment]", "Segment", "[Customer]", "Customer", (("Segment", "segment"),), "attribute"),
+    _Hierarchy("[Date].[Month Start]", "Month Start", "[Date]", "Date", (("Month Start", "month_start"),), "attribute"),
 )
+_DATE_HIERARCHIES = frozenset({"[Date].[Month Start]"})
+CITY_HIERARCHY = "[Geography].[City]"
+# Named sets: unique name -> (caption, how its cities are chosen)
+_SETS = {"[Top 3 Cities]": "Top 3 Cities", "[Gulf Cities]": "Gulf Cities"}
+_KPI = "Average Fare"
+_KPI_GOAL = 4.0
+_KPI_FORMATS = {"value": "Currency", "goal": "Currency", "status": "0", "trend": "0"}
+_CUSTOM = "\x00"  # first element of the path of a group or calculated item
 
 # unique name -> (caption, group, format, kind)
 _MEASURES = {
@@ -90,6 +105,7 @@ def _generate_facts() -> list[dict]:
                                 "year": year,
                                 "quarter": f"Q{(month - 1) // 3 + 1}",
                                 "month": month,
+                                "month_start": datetime.date(year, month, 1),
                                 "country": country,
                                 "city": city,
                                 "service": service,
@@ -111,6 +127,17 @@ class DemoBackend:
         self._name_of: dict[_Key, str] = {}
         for h in _HIERARCHIES:
             self._index(h)
+        by_city: dict[tuple, int] = {}
+        for fact in self._facts:
+            by_city[(fact["city"],)] = by_city.get((fact["city"],), 0) + fact["rides"]
+        self._set_paths = {
+            "[Top 3 Cities]": sorted(by_city, key=lambda p: -by_city[p])[:3],
+            "[Gulf Cities]": [("Dubai",), ("Abu Dhabi",)],
+        }
+        everything = [0, 0.0, 0]
+        for fact in self._facts:
+            _add(everything, fact)
+        self._average_fare = everything[1] / everything[0]
 
     # -- metadata ----------------------------------------------------------------
     def catalogs(self) -> list[dict]:
@@ -127,15 +154,25 @@ class DemoBackend:
             dimension = dimensions.setdefault(
                 h.dimension, {"uniqueName": h.dimension, "caption": h.dimension_caption, "hierarchies": []}
             )
-            dimension["hierarchies"].append(
-                {"uniqueName": h.unique_name, "caption": h.caption, "folder": "", "kind": h.kind, "allMember": h.all_member}
-            )
+            entry = {"uniqueName": h.unique_name, "caption": h.caption, "folder": "", "kind": h.kind, "allMember": h.all_member}
+            if h.unique_name in _DATE_HIERARCHIES:
+                entry["isDate"] = True
+            dimension["hierarchies"].append(entry)
         return {
             "measures": [
                 {"uniqueName": name, "caption": caption, "group": group, "folder": ""}
                 for name, (caption, group, _fmt) in _MEASURES.items()
             ],
             "dimensions": list(dimensions.values()),
+            "kpis": [
+                {"name": _KPI, "caption": _KPI, "folder": "", "measure": "[Measures].[Avg Fare]",
+                 "parts": ["value", "goal", "status", "trend"]}
+            ],
+            "sets": [
+                {"uniqueName": name, "caption": caption, "folder": "", "dimension": "[Geography]",
+                 "hierarchy": CITY_HIERARCHY, "allMember": f"{CITY_HIERARCHY}.[All]"}
+                for name, caption in sorted(_SETS.items(), key=lambda item: item[1].lower())
+            ],
         }
 
     def members(self, catalog: str, cube: str, hierarchy: str, parent: str | None, search: str | None, limit: int) -> dict:
@@ -168,16 +205,24 @@ class DemoBackend:
     # -- query -------------------------------------------------------------------
     def query(self, catalog: str, cube: str, layout: Layout) -> tuple[CellSet, str]:
         self._check(catalog, cube)
-        text = mdx.build_query(cube, layout, {name: fmt for name, (_c, _g, fmt) in _MEASURES.items()})
+        formats = {name: fmt for name, (_c, _g, fmt) in _MEASURES.items()}
+        text = mdx.build_query(cube, layout, formats)
         values = list(layout.values) or [ValueField(_DEFAULT_MEASURE, _MEASURES[_DEFAULT_MEASURE][0])]
-        used = [v.measure for v in values] + [
+        self._calculations = {c.unique_name: c for c in layout.calculated_measures}
+        for value in values:
+            if value.kpi_part and value.kpi_name != _KPI:
+                raise CubeError("server", "The cube rejected the request.", f"The KPI {value.kpi_name} was not found.")
+        for placed in (*layout.rows, *layout.columns):
+            if placed.named_set and placed.named_set not in _SETS:
+                raise CubeError("server", "The cube rejected the request.", f"The set {placed.named_set} was not found.")
+        used = [v.measure for v in values if not v.kpi_part] + [
             m
             for placed in (*layout.rows, *layout.columns)
             for m in (placed.sort.measure if placed.sort else None, placed.value_filter.measure if placed.value_filter else None)
             if m
         ]
         for name in used:
-            if name not in _MEASURES:
+            if name not in _MEASURES and name not in self._calculations:
                 raise CubeError("server", "The cube rejected the request.", f"The measure {name} was not found in the cube.")
 
         facts = self._filtered_facts(layout)
@@ -192,6 +237,14 @@ class DemoBackend:
                     keep = {
                         p for p in self._items(placed, allowed)
                         if _label_match(self._caption((h, p)), placed.label_filter)
+                    }
+                    allowed[h] = keep
+                    facts = [f for f in facts if self._top_path(placed, f) in keep]
+                if placed.date_filter is not None:
+                    window = dates.window(placed.date_filter, datetime.date.today())
+                    keep = {
+                        p for p in self._items(placed, allowed)
+                        if isinstance(p[0], datetime.date) and window.contains(p[0])
                     }
                     allowed[h] = keep
                     facts = [f for f in facts if self._top_path(placed, f) in keep]
@@ -234,47 +287,150 @@ class DemoBackend:
                 for c in cols_hit:
                     _add(totals.setdefault((r, c), [0, 0.0, 0]), fact)
 
+        # Lines that show a calculated item get their numbers from its formula.
+        items = {(f.hierarchy, (_CUSTOM, i.name)): i for f in (*layout.rows, *layout.columns) for i in f.custom_items}
+        calculated: dict[tuple[int, int], list[object]] = {}
+        for r, row in enumerate(row_tuples):
+            for c, col in enumerate(col_tuples):
+                if any(items.get(k) and items[k].formula for k in (*row, *col)):
+                    context = dict((*row, *col))
+                    numbers = [self._formula_cell(v, context, items, facts) for v in values]
+                    if any(n is not None for n in numbers):
+                        calculated[(r, c)] = numbers
+
         if layout.options.non_empty:
-            keep_rows = sorted({r for r, _ in totals})
-            keep_cols = sorted({c for _, c in totals})
+            keep_rows = sorted({r for r, _ in totals} | {r for r, _ in calculated})
+            keep_cols = sorted({c for _, c in totals} | {c for _, c in calculated})
         else:
             keep_rows = list(range(len(row_tuples)))
             keep_cols = list(range(len(col_tuples)))
 
         cellset = CellSet()
+        names = mdx.value_members(Layout(values=tuple(values), rows=layout.rows, columns=layout.columns,
+                                          calculated_measures=layout.calculated_measures), formats)
+        measures = [
+            AxisMember(member.name, member.caption or self._measure_caption(value.measure), "[Measures]", 0, 0)
+            for member, value in zip(names, values)
+        ]
         columns_axis = []
         for c in keep_cols:
-            for value in values:
-                if value.show_as == "normal":
-                    measure = AxisMember(value.measure, _MEASURES[value.measure][0], "[Measures]", 0, 0)
-                else:
-                    caption = mdx.show_as_caption(value)
-                    measure = AxisMember("[Measures]." + quote_identifier(caption), caption, "[Measures]", 0, 0)
-                columns_axis.append(tuple(self._axis_member(k) for k in col_tuples[c]) + (measure,))
+            for measure in measures:
+                columns_axis.append(tuple(self._axis_member(k, layout) for k in col_tuples[c]) + (measure,))
         cellset.axes.append(columns_axis)
         if layout.rows:
-            cellset.axes.append([tuple(self._axis_member(k) for k in row_tuples[r]) for r in keep_rows])
+            cellset.axes.append([tuple(self._axis_member(k, layout) for k in row_tuples[r]) for r in keep_rows])
 
         width = len(columns_axis)
         cache: dict[tuple, object] = {}
         for out_r, r in enumerate(keep_rows):
             for out_c, c in enumerate(keep_cols):
                 slot = totals.get((r, c))
-                if slot is None:
+                numbers = calculated.get((r, c))
+                if slot is None and numbers is None:
                     continue
                 context = {h: path for h, path in (*row_tuples[r], *col_tuples[c])}
                 for m_index, value in enumerate(values):
-                    if value.show_as == "normal":
-                        number, fmt = _measure_value(value.measure, slot), _MEASURES[value.measure][2]
+                    fmt = self._format(value, names[m_index].format_string)
+                    if numbers is not None:
+                        number = numbers[m_index]
+                    elif value.kpi_part:
+                        number = self._kpi_value(value.kpi_part, slot)
+                    elif value.show_as == "normal":
+                        number = self._slot_value(value.measure, slot)
                     else:
                         number = self._shown_as(value, layout, context, facts, cache)
-                        fmt = _SHOWN_AS_FORMATS.get(value.show_as, "")
-                        if value.show_as in ("differenceFrom", "runningTotalIn"):
-                            fmt = _MEASURES[value.measure][2]
                     if number is not None:
                         ordinal = out_r * width + out_c * len(values) + m_index
                         cellset.cells[ordinal] = Cell(number, fmt, "")
         return cellset, text
+
+    # -- report calculations ----------------------------------------------------------
+    def _measure_caption(self, measure: str) -> str:
+        if measure in _MEASURES:
+            return _MEASURES[measure][0]
+        calculation = self._calculations.get(measure)
+        return calculation.name if calculation else measure
+
+    def _format(self, value: ValueField, member_format: str) -> str:
+        if value.kpi_part:
+            return _KPI_FORMATS[value.kpi_part]
+        if value.show_as != "normal":
+            if value.show_as in ("differenceFrom", "runningTotalIn"):
+                return self._measure_format(value.measure)
+            return _SHOWN_AS_FORMATS.get(value.show_as, "")
+        return member_format or self._measure_format(value.measure)
+
+    def _measure_format(self, measure: str) -> str:
+        if measure in _MEASURES:
+            return _MEASURES[measure][2]
+        calculation = self._calculations.get(measure)
+        return calculation.format_string if calculation else ""
+
+    def _slot_value(self, measure: str, slot: list[float], depth: int = 0) -> object:
+        """A measure's number for a set of facts; calculated measures by their formula."""
+        if measure in _MEASURES:
+            return _measure_value(measure, slot)
+        calculation = self._calculations.get(measure)
+        if calculation is None or depth > 8:
+            return None
+
+        def resolve(name: str) -> object:
+            if not name.startswith("[Measures]."):
+                raise _unsupported(calculation.name, "a calculated measure here can only use measures")
+            return self._slot_value(name, slot, depth + 1)
+
+        return _evaluate(calculation.formula, resolve, calculation.name)
+
+    def _kpi_value(self, part: str, slot: list[float]) -> object:
+        fare = _measure_value("[Measures].[Avg Fare]", slot)
+        if part == "goal":
+            return _KPI_GOAL
+        if fare is None:
+            return None
+        if part == "value":
+            return fare
+        if part == "status":
+            return 1 if fare >= _KPI_GOAL else 0 if fare >= 0.9 * _KPI_GOAL else -1
+        ratio = fare / self._average_fare  # trend: against the average over all rides
+        return 1 if ratio > 1.02 else -1 if ratio < 0.98 else 0
+
+    def _context_slot(self, context: dict, facts: list[dict], groups: dict) -> list[float] | None:
+        slot, found = [0, 0.0, 0], False
+        for fact in facts:
+            if all(self._fact_in(h, p, fact, groups) for h, p in context.items() if p):
+                _add(slot, fact)
+                found = True
+        return slot if found else None
+
+    def _fact_in(self, hierarchy: str, path: tuple, fact: dict, groups: dict) -> bool:
+        if path and path[0] == _CUSTOM:
+            item = groups.get((hierarchy, path))
+            return item is not None and self._top_path_of(hierarchy, fact) in item
+        return self._path_of(hierarchy, fact)[: len(path)] == path
+
+    def _formula_cell(self, value: ValueField, context: dict, items: dict, facts: list[dict], depth: int = 0) -> object:
+        """A cell on a calculated item's line: its formula over the field's other items."""
+        groups = {k: {self._by_name[m][1] for m in i.members if m in self._by_name} for k, i in items.items() if i.members}
+        for h, path in context.items():
+            item = items.get((h, path))
+            if item is None or not item.formula:
+                continue
+            if depth > 8:
+                return None
+
+            def resolve(name: str, h=h, item=item) -> object:
+                key = self._by_name.get(name)
+                if key is None or key[0] != h:
+                    raise _unsupported(item.name, "a calculated item here can only use items of its own field")
+                return self._formula_cell(value, {**context, h: key[1]}, items, facts, depth + 1)
+
+            return _evaluate(item.formula, resolve, item.name)
+        if value.show_as != "normal":
+            return None  # the sample cube does not combine the two
+        slot = self._context_slot(context, facts, groups)
+        if slot is None:
+            return None
+        return self._kpi_value(value.kpi_part, slot) if value.kpi_part else self._slot_value(value.measure, slot)
 
     def _shown_as(self, value: ValueField, layout: Layout, context: dict, facts: list[dict], cache: dict):
         """One "Show Values As" cell, by Excel's definitions, as pivot/mdx.py asks a cube for it."""
@@ -286,11 +442,13 @@ class DemoBackend:
             key = (m, tuple(sorted((h, p) for h, p in where.items() if p)))
             if key not in cache:
                 slot, found = [0, 0.0, 0], False
+                if any(p and p[0] == _CUSTOM for _, p in key[1]):
+                    return None  # the sample cube shows these blank on a group's line
                 for fact in facts:
                     if all(self._path_of(h, fact)[: len(p)] == p for h, p in key[1]):
                         _add(slot, fact)
                         found = True
-                cache[key] = _measure_value(m, slot) if found else None
+                cache[key] = self._slot_value(m, slot) if found else None
             return cache[key]
 
         def ratio(a: object, b: object) -> object:
@@ -438,6 +596,8 @@ class DemoBackend:
         path = key[1]
         if not path:
             return "All"
+        if path[0] == _CUSTOM:
+            return path[1]
         h = self._hierarchies[key[0]]
         if h.levels[len(path) - 1][1] == "month":
             return _MONTHS[path[-1] - 1]
@@ -448,7 +608,11 @@ class DemoBackend:
             yield (h.unique_name, child)
             yield from self._walk(h, child)
 
-    def _axis_member(self, key: _Key) -> AxisMember:
+    def _axis_member(self, key: _Key, layout: Layout | None = None) -> AxisMember:
+        if key[1] and key[1][0] == _CUSTOM:
+            h = self._hierarchies[key[0]]
+            name = mdx.custom_item_name(PlacedField(h.unique_name, h.caption, h.all_member), CustomItem(key[1][1]))
+            return AxisMember(unique_name=name, caption=key[1][1], hierarchy=key[0], level=1, child_count=0)
         return AxisMember(
             unique_name=self._name_of[key],
             caption=self._caption(key),
@@ -458,7 +622,10 @@ class DemoBackend:
         )
 
     def _selection(self, placed: PlacedField) -> list[tuple] | None:
-        """Selected member paths for a field, or None when nothing is selected."""
+        """Selected member paths for a field, or None when nothing is selected. A named
+        set selects its own items, which also limits the totals."""
+        if placed.named_set:
+            return list(self._set_paths.get(placed.named_set, []))
         if not placed.members:
             return None
         self._hierarchy(placed.hierarchy)
@@ -484,9 +651,14 @@ class DemoBackend:
 
     def _detail(self, placed: PlacedField, facts: list[dict], allowed: set[tuple] | None) -> list[_Key]:
         h = self._hierarchy(placed.hierarchy)
+        if placed.named_set:
+            # The set's items, in the set's order: nothing to expand or sort.
+            present = {self._top_path(placed, f) for f in facts}
+            return [(h.unique_name, p) for p in self._set_paths[placed.named_set] if p in present]
         expanded = {self._by_name[name][1] for name in placed.expanded if name in self._by_name}
         selected = self._selection(placed)
         sort_key = self._sort_key(placed, facts)
+        grouped = {self._by_name[m][1] for m in placed.grouped if m in self._by_name}
         out: list[_Key] = []
 
         def visit(parent: tuple) -> None:
@@ -494,7 +666,11 @@ class DemoBackend:
                 child
                 for child in self._children.get((h.unique_name, parent), [])
                 if self._in_space(child, selected) and (allowed is None or child[:1] in allowed)
+                and not (not parent and child in grouped)
             ]
+            if not parent:
+                # Groups and calculated items follow the items, and sort with them.
+                children += [(_CUSTOM, item.name) for item in placed.custom_items]
             if sort_key is not None:
                 children.sort(key=sort_key, reverse=placed.sort.order == "desc")
             for child in children:
@@ -514,20 +690,27 @@ class DemoBackend:
             return lambda path: self._caption((h.unique_name, path)).lower()
         attrs = [attr for _, attr in h.levels]
         slots: dict[tuple, list[float]] = {}
+        groups = {item.name: {self._by_name[m][1] for m in item.members if m in self._by_name} for item in placed.custom_items}
         for fact in facts:
             values = tuple(fact[a] for a in attrs)
             for depth in range(1, len(values) + 1):
                 _add(slots.setdefault(values[:depth], [0, 0.0, 0]), fact)
+            for name, members in groups.items():
+                if values[:1] in members:
+                    _add(slots.setdefault((_CUSTOM, name), [0, 0.0, 0]), fact)
         measure = placed.sort.measure
 
         def key(path: tuple) -> float:
-            number = _measure_value(measure, slots[path]) if path in slots else None
+            number = self._slot_value(measure, slots[path]) if path in slots else None
             return float("-inf") if number is None else number  # empty sorts lowest, as in MDX
 
         return key
 
     def _top_path(self, placed: PlacedField, fact: dict) -> tuple:
-        h = self._hierarchies[placed.hierarchy]
+        return self._top_path_of(placed.hierarchy, fact)
+
+    def _top_path_of(self, hierarchy: str, fact: dict) -> tuple:
+        h = self._hierarchies[hierarchy]
         return (fact[h.levels[0][1]],)
 
     def _items(self, placed: PlacedField, allowed: dict[str, set[tuple]]) -> list[tuple]:
@@ -548,7 +731,7 @@ class DemoBackend:
         for fact in facts:
             _add(slots.setdefault(self._top_path(placed, fact), [0, 0.0, 0]), fact)
         vf = placed.value_filter
-        numbers = {p: _measure_value(vf.measure, slots[p]) if p in slots else None for p in items}
+        numbers = {p: self._slot_value(vf.measure, slots[p]) if p in slots else None for p in items}
         return _apply_value_filter(items, numbers, vf)
 
     def _axis_tuples(
@@ -587,7 +770,7 @@ class DemoBackend:
         return build(0, facts)
 
     def _matching(self, fact: dict, fields: tuple[PlacedField, ...], shown: list[set[_Key]]):
-        """Every axis tuple this fact contributes to: itself, its ancestors, and totals."""
+        """Every axis tuple this fact contributes to: itself, its ancestors, its group, and totals."""
         if not fields:
             return [()]
         per_field = []
@@ -595,6 +778,9 @@ class DemoBackend:
             h = self._hierarchies[placed.hierarchy]
             values = tuple(fact[attr] for _, attr in h.levels)
             candidates = [(h.unique_name, values[:depth]) for depth in range(len(values) + 1)]
+            for item in placed.custom_items:
+                if item.members and any(self._by_name.get(m, (None, None))[1] == values[:1] for m in item.members):
+                    candidates.append((h.unique_name, (_CUSTOM, item.name)))
             per_field.append([k for k in candidates if k in visible])
         return itertools.product(*per_field)
 
@@ -696,3 +882,91 @@ def _measure_value(name: str, slot: list[float]) -> object:
     if name == "[Measures].[Cancel Rate]":
         return cancelled / (rides + cancelled) if rides + cancelled else None
     return None
+
+
+# -- formulas ------------------------------------------------------------------------------
+_TOKEN = re.compile(
+    r"\s*(?:(?P<number>\d+(?:\.\d+)?)|(?P<name>\[(?:[^\]]|\]\])*\](?:\.?&?\[(?:[^\]]|\]\])*\])*)|(?P<op>[-+*/()]))"
+)
+
+
+def _unsupported(what: str, reason: str) -> CubeError:
+    return CubeError(
+        "bad-request",
+        f"The sample cube cannot work out '{what}': {reason}. A real cube understands any MDX formula.",
+    )
+
+
+def _evaluate(formula: str, resolve, what: str) -> object:
+    """+ - * / ( ), numbers and names; an empty operand counts as 0, x / 0 is empty."""
+    tokens: list[tuple[str, str]] = []
+    pos = 0
+    while pos < len(formula):
+        match = _TOKEN.match(formula, pos)
+        if match is None or match.end() == pos:
+            if formula[pos:].strip() == "":
+                break
+            raise _unsupported(what, "it understands only + - * / ( ), numbers and names in a formula")
+        kind = match.lastgroup
+        tokens.append((kind, match.group(kind)))
+        pos = match.end()
+    position = 0
+
+    def peek() -> tuple[str, str] | None:
+        return tokens[position] if position < len(tokens) else None
+
+    def take() -> tuple[str, str]:
+        nonlocal position
+        if position >= len(tokens):
+            raise _unsupported(what, "the formula ends too early")
+        position += 1
+        return tokens[position - 1]
+
+    def number(value: object) -> float:
+        return 0.0 if value is None else float(value)
+
+    def factor() -> object:
+        kind, text = take()
+        if kind == "number":
+            return float(text)
+        if kind == "name":
+            return resolve(text)
+        if text == "-":
+            value = factor()
+            return None if value is None else -number(value)
+        if text == "(":
+            value = expression()
+            if take() != ("op", ")"):
+                raise _unsupported(what, "a '(' is not closed")
+            return value
+        raise _unsupported(what, f"'{text}' is out of place")
+
+    def term() -> object:
+        value = factor()
+        while peek() in (("op", "*"), ("op", "/")):
+            op = take()[1]
+            right = factor()
+            if value is None and right is None:
+                continue
+            if op == "*":
+                value = number(value) * number(right)
+            else:
+                value = None if not number(right) else number(value) / number(right)
+        return value
+
+    def expression() -> object:
+        value = term()
+        while peek() in (("op", "+"), ("op", "-")):
+            op = take()[1]
+            right = term()
+            if value is None and right is None:
+                continue
+            value = number(value) + number(right) if op == "+" else number(value) - number(right)
+        return value
+
+    result = expression()
+    if position != len(tokens):
+        raise _unsupported(what, "the formula does not end where expected")
+    if isinstance(result, float) and result.is_integer() and abs(result) < 2**53:
+        return int(result)
+    return result

@@ -14,17 +14,26 @@ Excel uses it for PivotTables too. The shape follows what Excel generates:
   measures the right current member, except when a value filter needs it inside the
   sub-selects to be evaluated against the right numbers.
 - "Show Values As" percentages are calculated members defined in the query.
+- The report's own calculated measures, and its groups and calculated items, are
+  calculated members too. Measures calculated in the query get a higher solve order
+  than the items, so that a ratio is worked out from a group's totals rather than
+  added up across the group.
+- Date Filters compare each item's MemberValue with dates worked out in pivot/dates.py.
 
-Every name comes through `Layout.from_json`, which has already validated it.
+Every name comes through `Layout.from_json`, which has already validated it, and so
+has every formula (`validate_expression`), which is placed in parentheses.
 """
 
 from __future__ import annotations
 
+import datetime
 import re
+from dataclasses import dataclass
 from decimal import Decimal
 
 from ..errors import CubeError
-from .model import Layout, LabelFilter, PlacedField, ValueField, ValueFilter
+from . import dates
+from .model import CustomItem, DateFilter, Layout, LabelFilter, PlacedField, ValueField, ValueFilter
 from .names import hierarchy_of, quote_identifier, quote_string, validate_unique_name
 
 CELL_PROPERTIES = "CELL PROPERTIES VALUE, FORMAT_STRING, FORMATTED_VALUE"
@@ -59,13 +68,42 @@ _FORMATS = {"index": "0.00", "rankAscending": "#,##0", "rankDescending": "#,##0"
 _MEASURE_FORMAT_KINDS = frozenset({"differenceFrom", "runningTotalIn"})
 
 _PART = re.compile(r"\[(?:[^\]]|\]\])*\]")
+_KPI_FUNCTIONS = {"value": "KPIValue", "goal": "KPIGoal", "status": "KPIStatus", "trend": "KPITrend"}
+# Measures calculated in the query are worked out after the report's items.
+MEASURE_SOLVE_ORDER = 100
 
 
-def build_query(cube: str, layout: Layout, measure_formats: dict[str, str] | None = None) -> str:
-    """`measure_formats` (measure unique name -> its FORMAT_STRING) lets a running total or
-    difference show in its measure's own format; without it they use General."""
+@dataclass(frozen=True)
+class ValueMember:
+    """What one field in Values puts on the columns axis."""
+
+    name: str  # its unique name there
+    caption: str  # "" for a measure used as it is: the cube supplies the caption
+    expression: str | None = None  # None: the measure itself, nothing to define
+    format_string: str = ""
+
+
+def build_query(
+    cube: str,
+    layout: Layout,
+    measure_formats: dict[str, str] | None = None,
+    today: datetime.date | None = None,
+) -> str:
+    """`measure_formats` (measure unique name -> its FORMAT_STRING) lets a running total,
+    a difference or a second copy of a measure show in the measure's own format; without
+    it they use General. `today` anchors relative Date Filters; default: the Mac's date."""
+    today = today or datetime.date.today()
     non_empty = "NON EMPTY " if layout.options.non_empty else ""
-    definitions, measure_names = _value_members(layout, measure_formats or {})
+    members = value_members(layout, measure_formats or {})
+    definitions = _calculation_definitions(layout)
+    for member in members:
+        if member.expression is None:
+            continue
+        definition = f"MEMBER {member.name} AS {member.expression}"
+        if member.format_string:
+            definition += f", FORMAT_STRING = {quote_string(member.format_string)}"
+        definitions.append(definition + f", SOLVE_ORDER = {MEASURE_SOLVE_ORDER}")
+    measure_names = [m.name for m in members]
     measures = "{" + ", ".join(measure_names) + "}" if measure_names else "{" + DEFAULT_MEASURE + "}"
 
     options = layout.options
@@ -83,6 +121,9 @@ def build_query(cube: str, layout: Layout, measure_formats: dict[str, str] | Non
     source = quote_identifier(cube)
     slicer: list[str] = []
     for placed in on_axes:
+        if placed.named_set:
+            # Totals count only the set's items, as Excel's visual totals do.
+            source = _subselect("{" + placed.named_set + "}", source)
         if placed.members:
             source = _subselect("(" + _set(placed.members) + ")", source)
     for placed in layout.filters:
@@ -96,7 +137,7 @@ def build_query(cube: str, layout: Layout, measure_formats: dict[str, str] | Non
             slicer.append(placed.all_member)
     for fields in (layout.rows, layout.columns):
         for depth, placed in enumerate(fields):
-            for narrowed in _narrowing(fields, depth):
+            for narrowed in _narrowing(fields, depth, today):
                 source = _subselect("{" + narrowed + "}", source)
 
     with_clause = "WITH " + " ".join(definitions) + " " if definitions else ""
@@ -142,17 +183,26 @@ def details_slicer(layout: Layout, members: list[str], measure: str) -> list[str
 
     A DRILLTHROUGH can only be sliced, not sub-selected, so a field narrowed to several
     items cannot be honoured unless the cell itself pins it to one member. Excel on
-    Windows refuses in the same situation.
+    Windows refuses in the same situation. Nor can it start from anything calculated.
     """
     measure = validate_unique_name(measure)
     if not measure.lower().startswith("[measures]."):
         raise CubeError("bad-request", "Show Details needs a measure.")
+    if measure.lower() in {c.unique_name.lower() for c in layout.calculated_measures}:
+        raise CubeError("bad-request", "Show Details is not available for a calculated measure.")
     if len(members) > MAX_DETAIL_MEMBERS:
         raise CubeError("bad-request", "Show Details was given too many members.")
+    calculated = {
+        custom_item_name(placed, item).lower()
+        for placed in (*layout.rows, *layout.columns)
+        for item in placed.custom_items
+    }
     pinned: set[str] = set()
     slicer = [measure]
     for name in members:
         name = validate_unique_name(name)
+        if name.lower() in calculated:
+            raise CubeError("bad-request", "Show Details is not available for a group or calculated item.")
         hierarchy = hierarchy_of(name)
         if hierarchy in pinned or hierarchy == "[measures]":
             raise CubeError("bad-request", "Show Details was given two members of one field.")
@@ -196,8 +246,36 @@ def _top_level(hierarchy: str, all_member: str | None) -> str:
     return f"{{{hierarchy}.Levels(0).Members}}"
 
 
+def custom_item_name(placed: PlacedField, item: CustomItem) -> str:
+    """A group's or calculated item's unique name: a child of the field's All member."""
+    parent = placed.all_member or placed.hierarchy
+    return f"{parent}.{quote_identifier(item.name)}"
+
+
+def _calculation_definitions(layout: Layout) -> list[str]:
+    """WITH MEMBER definitions of the report's calculated measures, groups and items."""
+    out = []
+    for measure in layout.calculated_measures:
+        definition = f"MEMBER {measure.unique_name} AS ({measure.formula})"
+        if measure.format_string:
+            definition += f", FORMAT_STRING = {quote_string(measure.format_string)}"
+        out.append(definition + f", SOLVE_ORDER = {MEASURE_SOLVE_ORDER}")
+    for placed in (*layout.rows, *layout.columns):
+        for item in placed.custom_items:
+            expression = f"Aggregate({_set(item.members)})" if item.members else f"({item.formula})"
+            out.append(f"MEMBER {custom_item_name(placed, item)} AS {expression}")
+    return out
+
+
 def _detail(placed: PlacedField) -> str:
+    if placed.named_set:
+        return "{" + placed.named_set + "}"
     detail = _top_level(placed.hierarchy, placed.all_member)
+    if placed.custom_items:
+        # Grouped items give way to their group; groups and calculated items follow.
+        grouped = placed.grouped
+        base = f"Except({detail}, {_set(grouped)})" if grouped else detail
+        detail = "{" + ", ".join([base, *(custom_item_name(placed, item) for item in placed.custom_items)]) + "}"
     if placed.expanded:
         detail = f"DrilldownMember({detail}, {_set(placed.expanded)}, RECURSIVE)"
     if placed.sort:
@@ -249,8 +327,9 @@ def _axis_set(fields: tuple[PlacedField, ...], grand_total: bool, subtotals: boo
     return build(0)
 
 
-def _narrowing(fields: tuple[PlacedField, ...], depth: int) -> list[str]:
-    """Sub-select sets for the field at `depth` on its axis: label filter, then value filter.
+def _narrowing(fields: tuple[PlacedField, ...], depth: int, today: datetime.date | None = None) -> list[str]:
+    """Sub-select sets for the field at `depth` on its axis: label filter, date filter,
+    then value filter.
 
     A value filter on a field inside other fields is evaluated for each combination of
     the outer fields' items (the top 3 cities in each country), as Excel does.
@@ -260,6 +339,9 @@ def _narrowing(fields: tuple[PlacedField, ...], depth: int) -> list[str]:
     sets = []
     if placed.label_filter is not None:
         sets.append(f"Filter({top}, {_label_condition(placed.hierarchy, placed.label_filter)})")
+    if placed.date_filter is not None:
+        condition = _date_condition(placed.hierarchy, placed.date_filter, today or datetime.date.today())
+        sets.append(f"Filter({top}, {condition})")
     if placed.value_filter is not None:
         if depth == 0:
             sets.append(_value_expression(top, placed.value_filter))
@@ -298,6 +380,29 @@ def _label_condition(hierarchy: str, label: LabelFilter) -> str:
     return f"({caption} < {value} OR {caption} > {upper})"  # notBetween
 
 
+def _date_literal(day: datetime.date) -> str:
+    # DateSerial reads the same whatever the server's locale is, unlike a date in quotes.
+    return f"DateSerial({day.year}, {day.month}, {day.day})"
+
+
+def _date_condition(hierarchy: str, date_filter: DateFilter, today: datetime.date) -> str:
+    value = f"{hierarchy}.CurrentMember.MemberValue"
+    window = dates.window(date_filter, today)
+    if window.quarter is not None:
+        test = f'DatePart("q", {value}) = {window.quarter}'
+    elif window.month is not None:
+        test = f"Month({value}) = {window.month}"
+    else:
+        parts = []
+        if window.start is not None:
+            parts.append(f"{value} >= {_date_literal(window.start)}")
+        if window.end is not None:
+            parts.append(f"{value} < {_date_literal(window.end)}")
+        test = " AND ".join(parts)
+    # An item without a date (a blank) would otherwise count as 30 December 1899.
+    return f"NOT IsEmpty({value}) AND {test}"
+
+
 def _value_expression(items: str, vf: ValueFilter) -> str:
     measure = vf.measure
     first = _number(vf.value)
@@ -319,25 +424,54 @@ def _value_expression(items: str, vf: ValueFilter) -> str:
     return f"Filter({items}, {measure} < {first} OR {measure} > {second})"  # notBetween
 
 
-def _value_members(layout: Layout, measure_formats: dict[str, str]) -> tuple[list[str], list[str]]:
-    """WITH MEMBER definitions for "Show Values As", and the measures to put on columns."""
-    definitions: list[str] = []
-    names: list[str] = []
+def value_members(layout: Layout, measure_formats: dict[str, str] | None = None) -> list[ValueMember]:
+    """For each field in Values, in order, the member that shows it on the columns axis.
+
+    A measure shown as it is uses its own name the first time; anything else (a second
+    copy, "Show Values As", a KPI part) is a calculated member named after its header
+    caption, with " 2", " 3" … added when that caption is taken. The grid builder reads
+    columns back by these names.
+    """
+    formats = dict(measure_formats or {})
+    formats.update({c.unique_name: c.format_string for c in layout.calculated_measures})
+    used: set[str] = set()
+    out: list[ValueMember] = []
+
+    def named(caption: str) -> tuple[str, str]:
+        candidate, n = caption, 1
+        while ("[Measures]." + quote_identifier(candidate)).lower() in used:
+            n += 1
+            candidate = f"{caption} {n}"
+        name = "[Measures]." + quote_identifier(candidate)
+        used.add(name.lower())
+        return name, candidate
+
     for value in layout.values:
-        if value.show_as == "normal":
-            names.append(value.measure)
+        if value.kpi_part:
+            caption = value.caption or f"{value.kpi_name} {value.kpi_part.title()}"
+            name, caption = named(caption)
+            expression = f"{_KPI_FUNCTIONS[value.kpi_part]}({quote_string(value.kpi_name)})"
+            out.append(ValueMember(name, caption, expression))
             continue
-        name = "[Measures]." + quote_identifier(show_as_caption(value))
-        definition = f"MEMBER {name} AS {_shown_as(value, layout)}"
+        if value.show_as == "normal":
+            if value.measure.lower() not in used:
+                used.add(value.measure.lower())
+                out.append(ValueMember(value.measure, ""))
+                continue
+            name, caption = named(value.caption or _last_part(value.measure))
+            out.append(ValueMember(name, caption, value.measure, formats.get(value.measure, "")))
+            continue
+        name, caption = named(show_as_caption(value))
         if value.show_as in _PERCENT_KINDS:
-            definition += f", FORMAT_STRING = {quote_string('Percent')}"
+            fmt = "Percent"
         elif value.show_as in _FORMATS:
-            definition += f", FORMAT_STRING = {quote_string(_FORMATS[value.show_as])}"
-        elif value.show_as in _MEASURE_FORMAT_KINDS and measure_formats.get(value.measure):
-            definition += f", FORMAT_STRING = {quote_string(measure_formats[value.measure])}"
-        definitions.append(definition)
-        names.append(name)
-    return definitions, names
+            fmt = _FORMATS[value.show_as]
+        elif value.show_as in _MEASURE_FORMAT_KINDS:
+            fmt = formats.get(value.measure, "")
+        else:
+            fmt = ""
+        out.append(ValueMember(name, caption, _shown_as(value, layout), fmt))
+    return out
 
 
 def _tuple(*parts: str) -> str:
