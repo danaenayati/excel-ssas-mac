@@ -153,7 +153,9 @@ textarea {
   gap: 4px;
   flex: none;
   min-height: 30px;
-  padding: 3px 6px 3px 8px;
+  /* Excel for Mac draws its own "i" button (Get Support, Reload, ...) over the pane's
+     top-right corner, about 32px wide; the bar's own buttons stay left of it. */
+  padding: 3px 40px 3px 8px;
   border-bottom: 1px solid var(--border-soft);
 }
 
