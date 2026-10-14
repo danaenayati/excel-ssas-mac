@@ -1,4 +1,4 @@
-# Cube Explorer: SSAS cubes in Excel for Mac
+# Cube Explorer: SSAS cubes in Excel for Mac (SQL Server Analysis Services For Mac)
 
 Excel for Windows can connect to a **SQL Server Analysis Services (SSAS)** cube and
 build PivotTables from it. Excel for Mac cannot: the option is simply not there.
