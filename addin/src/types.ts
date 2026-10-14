@@ -122,11 +122,88 @@ export interface PlacedField {
   members: string[];
   /** Captions for `members`, same order, for display. */
   memberCaptions: string[];
+  /** Order of this field's items. Absent or null: the cube's own order. Ignored in Filters. */
+  sort?: FieldSort | null;
+  /** Keep only items whose caption matches. Ignored in Filters. */
+  labelFilter?: LabelFilter | null;
+  /** Keep only items whose value for a measure matches. Ignored in Filters. */
+  valueFilter?: ValueFilter | null;
 }
+
+/**
+ * Item selection (`members`), label filter and value filter all apply together. Each
+ * one narrows the field's top-level items, and totals then count only the items that
+ * are left (Excel's default for cube PivotTables).
+ */
+export interface FieldSort {
+  /** Sort by the items' captions, or by a measure's values. */
+  by: "caption" | "measure";
+  /** Measure unique name; required when `by` is "measure". */
+  measure?: string;
+  order: "asc" | "desc";
+}
+
+export type LabelOperator =
+  | "equals"
+  | "notEquals"
+  | "beginsWith"
+  | "notBeginsWith"
+  | "endsWith"
+  | "notEndsWith"
+  | "contains"
+  | "notContains"
+  | "greaterThan"
+  | "greaterOrEqual"
+  | "lessThan"
+  | "lessOrEqual"
+  | "between"
+  | "notBetween";
+
+export interface LabelFilter {
+  operator: LabelOperator;
+  /** Compared without regard to case. At most 200 characters. */
+  value: string;
+  /** Upper bound; required for "between" and "notBetween". */
+  value2?: string;
+}
+
+export type ValueOperator =
+  | "equals"
+  | "notEquals"
+  | "greaterThan"
+  | "greaterOrEqual"
+  | "lessThan"
+  | "lessOrEqual"
+  | "between"
+  | "notBetween"
+  | "top"
+  | "bottom";
+
+export interface ValueFilter {
+  operator: ValueOperator;
+  /** Measure unique name the condition is evaluated on. Need not be in Values. */
+  measure: string;
+  /** The threshold; for "top" and "bottom", how many items, what percent, or what sum. */
+  value: number;
+  /** Upper bound; required for "between" and "notBetween". */
+  value2?: number;
+  /** For "top" and "bottom" only. Default "items". */
+  topBy?: "items" | "percent" | "sum";
+}
+
+export type ShowValuesAs = "normal" | "percentOfGrandTotal" | "percentOfColumnTotal" | "percentOfRowTotal";
 
 export interface ValueField {
   measure: string;
   caption: string;
+  /** Default "normal". The cube calculates the percentage; its header caption says which. */
+  showAs?: ShowValuesAs;
+  /**
+   * Excel number format chosen by the user for this field. Applied by the pane, which
+   * uses it instead of the cube's format; the helper ignores it. Absent or null: the
+   * cube's format.
+   */
+  numberFormat?: string | null;
 }
 
 export interface LayoutOptions {
@@ -148,6 +225,32 @@ export interface QueryRequest {
   catalog: string;
   cube: string;
   layout: Layout;
+}
+
+/**
+ * "Show Details" for one value cell, like double-clicking a number in a PivotTable on
+ * Windows: the fact rows behind it. `POST /connections/{id}/details`.
+ */
+export interface DetailsRequest {
+  catalog: string;
+  cube: string;
+  layout: Layout;
+  /**
+   * The members behind the cell: from its row header cells and column header cells,
+   * every `MemberRef.uniqueName` that is not a total. A total contributes nothing.
+   */
+  members: string[];
+  /** The value field's measure (its `measure`, not the shown-as caption). */
+  measure: string;
+  /** Default 1000, maximum 100000. */
+  maxRows?: number;
+}
+
+export interface DetailsResponse {
+  columns: string[];
+  rows: CellValue[][];
+  /** True when there are more rows than `maxRows`. */
+  truncated: boolean;
 }
 
 export interface MemberRef {

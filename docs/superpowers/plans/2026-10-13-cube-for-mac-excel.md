@@ -79,6 +79,7 @@ Routes (all under `/api`, header `X-Cube-Token`, JSON bodies):
 | POST | `/connections/{id}/members` | `MembersRequest` | `MembersResponse` |
 | POST | `/connections/{id}/query` | `QueryRequest` | `Grid` |
 | POST | `/connections/{id}/cancel` | | `{ok: true}` |
+| POST | `/connections/{id}/details` | `DetailsRequest` | `DetailsResponse` |
 
 Errors: non-2xx with `{"error": ApiError}`. Status codes: 400 bad-request, 401 auth /
 auth-mechanism, 403 missing token or wrong Host/Origin, 404 not-found, 413 too-large,
