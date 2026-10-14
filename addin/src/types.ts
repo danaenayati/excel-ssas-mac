@@ -191,13 +191,40 @@ export interface ValueFilter {
   topBy?: "items" | "percent" | "sum";
 }
 
-export type ShowValuesAs = "normal" | "percentOfGrandTotal" | "percentOfColumnTotal" | "percentOfRowTotal";
+/**
+ * Excel's "Show Values As" list. The cube calculates each one; the column's header
+ * caption says which. Kinds marked (B) need `baseField`, kinds marked (B, I) need
+ * `baseField` and `baseItem`.
+ */
+export type ShowValuesAs =
+  | "normal"
+  | "percentOfGrandTotal"
+  | "percentOfColumnTotal"
+  | "percentOfRowTotal"
+  | "percentOf" // (B, I) value / value of the base item
+  | "percentOfParentRowTotal" // value / value of its parent on rows (outer item or parent member)
+  | "percentOfParentColumnTotal" // the same on columns
+  | "percentOfParentTotal" // (B) value / value of the base field's item, everything inside it at All
+  | "differenceFrom" // (B, I) value - value of the base item; blank for totals and the base item
+  | "percentDifferenceFrom" // (B, I) (value - base) / base
+  | "runningTotalIn" // (B) sum from the first item of the base field to this one, in the cube's order
+  | "percentRunningTotalIn" // (B) running total / base field total
+  | "rankAscending" // (B) 1 = smallest, within the base field and the other fields' current items
+  | "rankDescending" // (B) 1 = largest
+  | "index"; // (value × grand total) / (row total × column total)
 
 export interface ValueField {
   measure: string;
   caption: string;
-  /** Default "normal". The cube calculates the percentage; its header caption says which. */
+  /** Default "normal". */
   showAs?: ShowValuesAs;
+  /** Hierarchy unique name of a field in Rows or Columns; required by the kinds marked (B). */
+  baseField?: string | null;
+  /**
+   * For the kinds marked (B, I): "previous", "next", or a member unique name of the
+   * base field. "previous" and "next" follow the cube's order of the items.
+   */
+  baseItem?: string | null;
   /**
    * Excel number format chosen by the user for this field. Applied by the pane, which
    * uses it instead of the cube's format; the helper ignores it. Absent or null: the
@@ -207,10 +234,19 @@ export interface ValueField {
 }
 
 export interface LayoutOptions {
+  /** Both grand totals at once; the two optional fields below override it per axis. */
   grandTotals: boolean;
+  /** The Grand Total row at the bottom (Excel: on for columns). Absent: `grandTotals`. */
+  grandTotalRow?: boolean;
+  /** The Grand Total column on the right (Excel: on for rows). Absent: `grandTotals`. */
+  grandTotalColumn?: boolean;
   subtotals: boolean;
   /** Hide rows and columns with no data. */
   nonEmpty: boolean;
+  /** Pane only, the helper ignores it: write outer row labels on every line. */
+  repeatLabels?: boolean;
+  /** Pane only: text written in value cells that have no value. Absent or "": empty. */
+  emptyCellText?: string;
 }
 
 export interface Layout {
