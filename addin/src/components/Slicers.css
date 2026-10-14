@@ -1,0 +1,175 @@
+/* Slicer cards (Slicers.tsx) and the Insert Slicers panel (InsertSlicer.tsx).
+   The buttons follow Excel's default slicer style: white items with a hairline border,
+   selected ones light blue. */
+
+:root {
+  --slicer-item: #ffffff;
+  --slicer-item-border: #d9d9d9;
+  --slicer-item-hover: #f2f2f2;
+  --slicer-selected: #bdd7ee;
+  --slicer-selected-border: #9bc2e6;
+  --slicer-selected-hover: #a9cbe9;
+  --slicer-cross: #c0392b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --slicer-item: #2a2a2b;
+    --slicer-item-border: #48484a;
+    --slicer-item-hover: #333335;
+    --slicer-selected: #2b4d6b;
+    --slicer-selected-border: #3f6d96;
+    --slicer-selected-hover: #335a7d;
+    --slicer-cross: #ff8d82;
+  }
+}
+
+.slicers {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px 0;
+}
+
+.slicers-title {
+  padding: 0;
+}
+
+.slicer {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 4px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+.slicer-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding-left: 2px;
+}
+
+.slicer-caption {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slicer-tool {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  color: var(--text-2);
+  cursor: default;
+}
+
+.slicer-tool:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.slicer-tool:disabled {
+  opacity: 0.4;
+}
+
+/* Multi-Select on: the button stays pressed, as in Excel. */
+.slicer-tool.on {
+  border-color: var(--slicer-selected-border);
+  background: var(--slicer-selected);
+  color: var(--text);
+}
+
+.slicer-cross {
+  stroke: var(--slicer-cross);
+}
+
+.slicer-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 3px;
+  max-height: 116px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.slicer-item {
+  min-width: 0;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--slicer-item-border);
+  border-radius: 2px;
+  background: var(--slicer-item);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.slicer-item:hover {
+  background: var(--slicer-item-hover);
+}
+
+.slicer-item.selected {
+  border-color: var(--slicer-selected-border);
+  background: var(--slicer-selected);
+}
+
+.slicer-item.selected:hover {
+  background: var(--slicer-selected-hover);
+}
+
+.slicer-note {
+  grid-column: 1 / -1;
+  padding: 0 2px;
+  font-size: 11px;
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slicer-hint {
+  white-space: normal;
+}
+
+.slicer .note {
+  margin: 0;
+}
+
+/* ---- Insert Slicers ----------------------------------------------------- */
+
+.insert-slicer-list {
+  margin-top: 6px;
+}
+
+.insert-slicer-dimension {
+  padding: 4px 8px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.insert-slicer-row {
+  gap: 5px;
+  padding-left: 14px;
+}
+
+.insert-slicer-row.unavailable {
+  color: var(--text-2);
+}

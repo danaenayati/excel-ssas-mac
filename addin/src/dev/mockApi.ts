@@ -474,12 +474,13 @@ class SampleCube {
   }
 
   /**
-   * The facts a layout looks at: every field's item selection, then the label and value
-   * filters of the row and column fields (so totals count only the items left).
+   * The facts a layout looks at: every field's item selection (slicers' too, which filter
+   * as page filters do), then the label and value filters of the row and column fields
+   * (so totals count only the items left).
    */
   private restricted(layout: Layout): { base: Fact[]; keptRows: (Set<Node> | null)[]; keptCols: (Set<Node> | null)[] } {
     const restrictions: Node[][] = [];
-    for (const field of [...layout.rows, ...layout.columns, ...layout.filters]) {
+    for (const field of [...layout.rows, ...layout.columns, ...layout.filters, ...(layout.slicers ?? [])]) {
       const selected = this.selected(this.hier(field.hierarchy), field);
       if (selected.length > 0) restrictions.push(selected);
     }
@@ -919,7 +920,7 @@ class SampleCube {
     const nodes = request.members.map((name) => this.findNode(name));
     // As the helper does: a field filtered to several items must be pinned to one of
     // them by the cell itself, or there is no single slice of facts to show.
-    for (const field of [...layout.rows, ...layout.columns, ...layout.filters]) {
+    for (const field of [...layout.rows, ...layout.columns, ...layout.filters, ...(layout.slicers ?? [])]) {
       if (field.members.length < 2) continue;
       const h = this.hier(field.hierarchy);
       if (nodes.some((n) => h.nodes.get(n.uniqueName) === n)) continue;
@@ -1126,7 +1127,7 @@ function sampleMdx(layout: Layout): string {
   for (const field of [...layout.rows, ...layout.columns]) {
     if (field.members.length > 0) from = `(SELECT ({${field.members.join(", ")}}) ON COLUMNS FROM ${from})`;
   }
-  for (const field of layout.filters) {
+  for (const field of [...layout.filters, ...(layout.slicers ?? [])]) {
     if (field.members.length === 1) where.push(field.members[0]);
     else if (field.members.length > 1) {
       from = `(SELECT ({${field.members.join(", ")}}) ON COLUMNS FROM ${from})`;

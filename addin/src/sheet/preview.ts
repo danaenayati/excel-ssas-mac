@@ -25,6 +25,7 @@ import {
   type SheetSelection,
 } from "./host";
 import { detailsCells, type Block, type SheetValue } from "./layout";
+import type { BorderLine, Paint } from "./styles";
 import { parseReportDef, serializeReportDef } from "../state/report";
 import type { CellValue } from "../types";
 
@@ -32,7 +33,12 @@ export interface PreviewCell {
   value: SheetValue;
   format: string;
   bold?: boolean;
-  fill?: boolean;
+  /** The fill colour of the report's style. `true`: the light blue header fill (kept from earlier previews). */
+  fill?: string | boolean;
+  /** Font colour of the report's style. */
+  color?: string;
+  /** Lines of the report's style on the cell's own edges. */
+  borders?: Partial<Record<"top" | "bottom" | "left" | "right", BorderLine>>;
   muted?: boolean;
   indent?: number;
   /** A KPI Status or Trend cell: drawn as an icon, as Excel does. */
@@ -206,7 +212,8 @@ export class PreviewHost implements SheetHost {
         sheet.cells.set(key(anchor.row + r, anchor.col + c), { value, format });
       }
     }
-    const each = (rects: Rect[], apply: (cell: PreviewCell) => void) => {
+    /** `apply` gets each cell of the rects, and where it is in its rect. */
+    const each = (rects: Rect[], apply: (cell: PreviewCell, rect: Rect, row: number, col: number) => void) => {
       for (const rect of rects) {
         for (let r = rect.row; r < rect.row + rect.rows; r++) {
           for (let c = rect.col; c < rect.col + rect.cols; c++) {
@@ -216,13 +223,14 @@ export class PreviewHost implements SheetHost {
               cell = { value: "", format: "General" };
               sheet.cells.set(at, cell);
             }
-            apply(cell);
+            apply(cell, rect, r, c);
           }
         }
       }
     };
+    // The style's layers in order, as Excel applies them: a later one wins.
+    for (const layer of block.paint) each(layer.rects, (cell, rect, r, c) => paintCell(cell, layer.paint, rect, r, c));
     each(block.bold, (cell) => (cell.bold = true));
-    each(block.fill, (cell) => (cell.fill = true));
     each(block.muted, (cell) => (cell.muted = true));
     for (const group of block.indents) each(group.rects, (cell) => (cell.indent = group.level));
     for (const icon of block.icons ?? []) each([icon.rect], (cell) => (cell.icon = icon.kind));
@@ -661,6 +669,24 @@ export class PreviewHost implements SheetHost {
       // Unreadable: start empty.
     }
   }
+}
+
+/**
+ * One layer of a style on cell (row, col) of `rect`, as Excel draws a range's format: the
+ * outer edges on the cells along them, the inside lines between neighbouring cells.
+ */
+function paintCell(cell: PreviewCell, paint: Paint, rect: Rect, row: number, col: number): void {
+  if (paint.fill) cell.fill = paint.fill;
+  if (paint.color) cell.color = paint.color;
+  const lines = paint.borders;
+  if (!lines) return;
+  const set = (edge: "top" | "bottom" | "left" | "right", line: BorderLine | undefined) => {
+    if (line) cell.borders = { ...cell.borders, [edge]: line };
+  };
+  set("top", row === rect.row ? lines.top : lines.insideH);
+  set("bottom", row === rect.row + rect.rows - 1 ? lines.bottom : undefined);
+  set("left", col === rect.col ? lines.left : lines.insideV);
+  set("right", col === rect.col + rect.cols - 1 ? lines.right : undefined);
 }
 
 function clearRect(cells: Map<string, PreviewCell>, rect: Rect): void {

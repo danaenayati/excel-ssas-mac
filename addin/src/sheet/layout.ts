@@ -21,8 +21,10 @@
 // `Block.lines` says which grid line each one shows, if any.
 
 import { isFiltered, reportForm, subtotalsChoice, type ReportForm } from "../state/layout";
+import { customNameOf } from "../state/valueNames";
 import type { CellValue, Grid, HeaderCell, Layout, LayoutOptions, LineKind, MemberRef } from "../types";
 import { chunkRect, runs, type Rect } from "./geometry";
+import { paintBlock, styleChoice, type BodyLine, type PaintLayer, type StyleChoice } from "./styles";
 
 /** Excel's "Text" number format: stops Excel from reading "2024" or "March 2025" as a number or date. */
 export const TEXT_FORMAT = "@";
@@ -146,6 +148,13 @@ export interface BlockFields {
    * outline form only). Absent: subtotals, if any, follow their group.
    */
   subtotalsAt?: "top";
+  /** The PivotTable style and Style Options. Absent: Excel's defaults (Light 16, headers on, no bands). */
+  style?: StyleChoice;
+  /**
+   * Each value field's custom name, in Values order; null keeps the header the grid has.
+   * Written in the field's header cells (the last header row).
+   */
+  valueNames?: (string | null)[];
 }
 
 export function blockFields(
@@ -167,10 +176,13 @@ export function blockFields(
     repeatLabels: Boolean(layout.options && layout.options.repeatLabels),
     emptyCellText: (layout.options && layout.options.emptyCellText) || "",
   };
+  const names = (layout.values ?? []).map(customNameOf);
+  if (names.some((name) => name !== null)) fields.valueNames = names;
   if (layout.options) {
     const form = reportForm(layout.options);
     if (form !== "tabular") fields.form = form;
     if (subtotalsChoice(layout.options) === "top") fields.subtotalsAt = "top";
+    fields.style = styleChoice(layout.options);
   }
   return fields;
 }
@@ -201,8 +213,13 @@ export interface Block {
   values: SheetValue[][];
   /** rows x cols Excel number formats. */
   numberFormats: string[][];
+  /** Cells in bold, as the report's style says (header, totals, outer items…). */
   bold: Rect[];
-  fill: Rect[];
+  /**
+   * Fills, font colours and borders of the report's style, applied in order: a later
+   * layer wins where two set the same thing. See sheet/styles.ts.
+   */
+  paint: PaintLayer[];
   /** Cells drawn as a quiet note (grey italic): the placeholder of an empty report. */
   muted: Rect[];
   /** Cells to indent, grouped by level (1 or more). */
@@ -312,8 +329,6 @@ export function buildBlock(input: Grid, fields: BlockFields = { filters: 0, rows
   }
 
   const members = new Map<string, MemberHit>();
-  const bold: Rect[] = [];
-  const fill: Rect[] = [];
   const indentRects = new Map<number, Rect[]>();
   const addIndent = (level: number, rect: Rect) => {
     const list = indentRects.get(level);
@@ -347,11 +362,6 @@ export function buildBlock(input: Grid, fields: BlockFields = { filters: 0, rows
       setFilterCell(f, 1, { area: "filters", index: f }, true);
     }
   }
-  if (F > 0) {
-    const captions: Rect = { row: 0, col: 0, rows: F, cols: 1 };
-    bold.push(captions);
-    fill.push(captions);
-  }
 
   // Compact form: "Column Labels" right above the first column item.
   if (labelsRow) {
@@ -361,6 +371,11 @@ export function buildBlock(input: Grid, fields: BlockFields = { filters: 0, rows
   }
 
   // Column header rows: RS corner cells, then C header cells.
+  const valueNames = fields.valueNames ?? [];
+  const customName = (c: number): string | null => {
+    const index = valueFieldIndex(grid.colValueIndex, c, valueNames.length);
+    return index === null ? null : valueNames[index] ?? null;
+  };
   for (let h = 0; h < H; h++) {
     const row = headerTop + h;
     const cells = grid.colHeaderRows[h] ?? [];
@@ -388,7 +403,9 @@ export function buildBlock(input: Grid, fields: BlockFields = { filters: 0, rows
     }
     for (let c = 0; c < C; c++) {
       const cell = cells[c];
-      setText(row, RS + c, cell ? cell.text : "");
+      // The last header row names the value fields: a custom name replaces the cube's.
+      const renamed = last ? customName(c) : null;
+      setText(row, RS + c, renamed ?? (cell ? cell.text : ""));
       if (cell && cell.member) {
         members.set(memberKey(row, RS + c), { member: cell.member, axis: "columns" });
       }
@@ -399,11 +416,6 @@ export function buildBlock(input: Grid, fields: BlockFields = { filters: 0, rows
       (level, start, length) =>
         addIndent(level, { row, col: RS + start, rows: 1, cols: length }),
     );
-  }
-  if (H > 0) {
-    const header: Rect = { row: top, col: 0, rows: dataTop - top, cols };
-    bold.push(header);
-    fill.push(header);
   }
 
   // Data rows: RS row-header cells, then C values.
@@ -458,12 +470,19 @@ export function buildBlock(input: Grid, fields: BlockFields = { filters: 0, rows
         addIndent(level, { row: dataTop + start, col: r, rows: length, cols: 1 }),
     );
   }
-  // Total rows, and in outline and compact form the outer items' own lines, are bold
-  // across the whole width.
-  runs(
-    N,
-    (n) => (sheet.kinds[n] && sheet.kinds[n] !== "data" ? true : null),
-    (_key, start, length) => bold.push({ row: dataTop + start, col: 0, rows: length, cols }),
+  // The look of the parts, in the report's style: header, totals, outer items' own lines
+  // (outline and compact form), stripes.
+  const { bold, paint } = paintBlock(
+    {
+      cols,
+      filterRows: F,
+      headerTop: top,
+      dataTop,
+      headerCols: RS,
+      lines: sheet.kinds.map((kind, n) => bodyLine(kind, sheet.headers[n])),
+      columns: grid.colKinds.slice(0, C),
+    },
+    fields.style ?? styleChoice(),
   );
 
   const indents: IndentGroup[] = Array.from(indentRects.entries())
@@ -487,7 +506,7 @@ export function buildBlock(input: Grid, fields: BlockFields = { filters: 0, rows
     values,
     numberFormats,
     bold,
-    fill,
+    paint,
     muted: [],
     indents,
     icons,
@@ -711,6 +730,17 @@ function columnsInSheetOrder(grid: Grid, K: number): Grid {
 // Row lines by report form.
 // ---------------------------------------------------------------------------
 
+/**
+ * What a sheet line is, for the report's style. A non-data line whose header names a
+ * total ("Tehran Total") is a subtotal line; one that names an item is that outer item's
+ * own line, which may show its subtotal's values.
+ */
+function bodyLine(kind: LineKind | undefined, headers: HeaderCell[] | undefined): BodyLine {
+  if (kind === "grandTotal") return "grandTotal";
+  if (kind !== "subtotal") return "data";
+  return (headers ?? []).some((cell) => cell !== undefined && cell.kind === "subtotal") ? "subtotal" : "subheading";
+}
+
 interface SheetRows {
   /** Header cells of each data line: one per row field, or one in compact form. */
   headers: HeaderCell[][];
@@ -838,7 +868,7 @@ export function placeholderBlock(): Block {
     values: [[PLACEHOLDER_TEXT]],
     numberFormats: [[TEXT_FORMAT]],
     bold: [],
-    fill: [],
+    paint: [],
     muted: [cell],
     indents: [],
     fieldCells: new Map(),

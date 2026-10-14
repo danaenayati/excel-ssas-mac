@@ -22,16 +22,17 @@ import {
   locate,
   selectionSummary,
   valueKey,
-  valueLabels,
   type Area,
   type FieldArea,
   type LayoutAction,
 } from "../state/layout";
+import { valueFieldNames } from "../state/valueNames";
 import type { Layout, PlacedField, ShowValuesAs, ValueField } from "../types";
 import { cx } from "../util";
 import { Icon } from "./common";
 import { dragged, endDrag, startDrag } from "./drag";
 import { Menu, type MenuEntry } from "./Menu";
+import { ValueFieldSettings } from "./ValueFieldSettings";
 
 interface Props {
   layout: Layout;
@@ -74,8 +75,9 @@ const SHOW_AS_MARKS: Record<ShowValuesAs, string> = {
 
 function chipsOf(layout: Layout, area: Area): ChipInfo[] {
   if (area === "values") {
-    // Copies of one measure are told apart by their key, and by "Rides 2" on the chip.
-    const labels = valueLabels(layout.values);
+    // Copies of one measure are told apart by their key, and by "Rides 2" on the chip;
+    // a field with a custom name shows that.
+    const labels = valueFieldNames(layout.values);
     return layout.values.map((v, i) => ({ name: valueKey(layout.values, i), caption: labels[i], field: null, value: v }));
   }
   return layout[area].map((f) => ({ name: f.hierarchy, caption: f.caption, field: f, value: null }));
@@ -84,6 +86,8 @@ function chipsOf(layout: Layout, area: Area): ChipInfo[] {
 export function Areas({ layout, dispatch, onFilter, onCustomFormat, onShowAsForm }: Props) {
   const [menu, setMenu] = useState<{ area: Area; name: string; anchor: HTMLElement } | null>(null);
   const [hover, setHover] = useState<{ area: Area; index: number | null } | null>(null);
+  /** The value field whose Value Field Settings are open, by key. */
+  const [settings, setSettings] = useState<string | null>(null);
 
   const accepts = (area: Area): boolean => {
     const item = dragged();
@@ -209,6 +213,8 @@ export function Areas({ layout, dispatch, onFilter, onCustomFormat, onShowAsForm
             },
           ],
         },
+        // Windows' name for where a value field is renamed (Custom Name).
+        { label: "Value Field Settings…", run: () => setSettings(name) },
       );
     }
     items.push("separator", {
@@ -244,6 +250,7 @@ export function Areas({ layout, dispatch, onFilter, onCustomFormat, onShowAsForm
                 const sorted = field !== null && Boolean(field.sort);
                 const percent = chip.value !== null && (chip.value.showAs ?? "normal") !== "normal";
                 const marks = [
+                  chip.value && chip.value.customName ? `Source Name: ${chip.value.caption}` : "",
                   field && field.members.length > 0 ? `items: ${field.memberCaptions.join(", ")}` : "",
                   field && field.labelFilter ? "label filter" : "",
                   field && field.valueFilter ? "value filter" : "",
@@ -349,6 +356,17 @@ export function Areas({ layout, dispatch, onFilter, onCustomFormat, onShowAsForm
           label={`${AREA_LABELS[menu.area]} field`}
           items={menuItems(menu.area, menu.name)}
           onClose={() => setMenu(null)}
+        />
+      )}
+      {settings !== null && (
+        <ValueFieldSettings
+          layout={layout}
+          valueKey={settings}
+          onCancel={() => setSettings(null)}
+          onApply={(name) => {
+            setSettings(null);
+            dispatch({ type: "setCustomName", measure: settings, name });
+          }}
         />
       )}
     </section>

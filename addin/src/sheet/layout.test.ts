@@ -24,8 +24,13 @@ import {
   placeholderBlock,
   sliceMatrix,
   valueFieldIndex,
+  type Block,
   type BlockFields,
 } from "./layout";
+
+/** The cells the default style (Light 16) fills with its light blue: filter captions and header rows. */
+const headerFilled = (block: Block) =>
+  block.paint.filter((layer) => layer.paint.fill === "#DDEBF7").flatMap((layer) => layer.rects);
 
 const CAL = "[Date].[Calendar]";
 const CITY = "[Geography].[City]";
@@ -206,7 +211,7 @@ describe("filter rows and the blank row", () => {
   it("makes the filter captions bold and filled, not the values", () => {
     const captions = { row: 0, col: 0, rows: 2, cols: 1 };
     expect(block.bold).toContainEqual(captions);
-    expect(block.fill).toContainEqual(captions);
+    expect(headerFilled(block)).toContainEqual(captions);
   });
 });
 
@@ -241,7 +246,7 @@ describe("corner captions and headers", () => {
     const block = buildBlock(sampleGrid());
     const header = { row: 3, col: 0, rows: 2, cols: 7 };
     expect(block.bold).toContainEqual(header);
-    expect(block.fill).toContainEqual(header);
+    expect(headerFilled(block)).toContainEqual(header);
   });
 });
 
@@ -300,7 +305,7 @@ describe("data rows", () => {
   });
 
   it("does not fill data rows", () => {
-    expect(block.fill).toHaveLength(2);
+    expect(headerFilled(block)).toHaveLength(2);
   });
 
   it("tolerates ragged rows from a faulty grid instead of throwing", () => {
@@ -388,7 +393,7 @@ describe("no data (N = 0)", () => {
 
   it("has header formatting and nothing else", () => {
     expect(block.bold).toEqual([{ row: 0, col: 0, rows: 2, cols: 5 }]);
-    expect(block.fill).toEqual([{ row: 0, col: 0, rows: 2, cols: 5 }]);
+    expect(headerFilled(block)).toEqual([{ row: 0, col: 0, rows: 2, cols: 5 }]);
     expect(block.indents).toEqual([]);
     expect(block.members.size).toBe(0);
   });
@@ -697,7 +702,7 @@ describe("filter cells: column-field captions", () => {
   it("keeps the header bold and filled across the caption cells", () => {
     const block = buildBlock(sampleGrid(), { filters: 2, rows: 1, columns: ["City"] });
     expect(block.bold).toContainEqual({ row: 3, col: 0, rows: 2, cols: 7 });
-    expect(block.fill).toContainEqual({ row: 3, col: 0, rows: 2, cols: 7 });
+    expect(headerFilled(block)).toContainEqual({ row: 3, col: 0, rows: 2, cols: 7 });
   });
 });
 
@@ -791,7 +796,7 @@ describe("placeholder block", () => {
     expect(block.numberFormats).toEqual([[TEXT_FORMAT]]);
     expect(block.muted).toEqual([{ row: 0, col: 0, rows: 1, cols: 1 }]);
     expect(block.bold).toEqual([]);
-    expect(block.fill).toEqual([]);
+    expect(headerFilled(block)).toEqual([]);
   });
 
   it("has no filter cells, no members, and leaves the column width alone", () => {

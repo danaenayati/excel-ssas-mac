@@ -392,3 +392,31 @@ describe("PreviewHost.writeFormulas", () => {
     await expect(host.writeFormulas("nope", formulas, numberFormats)).rejects.toThrow(/no longer on a sheet/);
   });
 });
+
+describe("slicers", () => {
+  it("slice every value by a slicer's one item, which has no cell of its own", async () => {
+    const service = hierarchy("Service Type");
+    const runtime = await run([
+      { type: "addMeasure", measure: measure("Rides") },
+      { type: "addHierarchy", hierarchy: hierarchy("Year") },
+      { type: "addSlicer", hierarchy: service },
+      { type: "setMembers", hierarchy: service.uniqueName, members: ["[Service].[Service Type].&[2]"], captions: ["Bike"] },
+    ]);
+    const { formulas } = converted(runtime);
+    const shape = runtime.shape;
+    expect(shape.filterRows).toBe(0);
+    const year = runtime.headers.rowHeaders[0][0].member!.uniqueName;
+    expect(formulas[shape.dataTop][shape.headerCols]).toBe(value(year, "[Measures].[Rides]", "[Service].[Service Type].&[2]"));
+  });
+
+  it("refuses a slicer with several items, and allows one with none", () => {
+    const field = (members: string[]) => ({ hierarchy: "[D].[Y]", caption: "Year", allMember: null, expanded: [], members, memberCaptions: [] });
+    const layout: Layout = {
+      ...emptyLayout(),
+      rows: [{ hierarchy: "[G].[C]", caption: "City", allMember: "[G].[C].[All]", expanded: [], members: [], memberCaptions: [] }],
+      values: [{ measure: "[Measures].[Rides]", caption: "Rides" }],
+    };
+    expect(conversionBlocker({ ...layout, slicers: [field(["[D].[Y].&[1]", "[D].[Y].&[2]"])] })).toContain("slicer");
+    expect(conversionBlocker({ ...layout, slicers: [field([])] })).toBeNull();
+  });
+});

@@ -5,7 +5,7 @@
 // the pane has to cope with: typing into a cell, inserting rows, deleting the sheet,
 // starting a new workbook.
 
-import { memo, useState, useSyncExternalStore, type KeyboardEvent } from "react";
+import { memo, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent } from "react";
 import { cellA1, columnLetters, containsCell } from "../sheet/geometry";
 import { isFilterFormat } from "../sheet/layout";
 import { formatForPreview, type PreviewCell, type PreviewHost, type PreviewSnapshot } from "../sheet/preview";
@@ -16,6 +16,34 @@ const MIN_ROWS = 40;
 const MIN_COLS = 12;
 const MAX_ROWS = 400;
 const MAX_COLS = 40;
+
+/**
+ * A cell's indent and the colours and lines of its report's style. Lines are drawn as
+ * inset shadows, which the grid's own hairlines cannot cover; a double line is two.
+ */
+function cellStyle(cell: PreviewCell): CSSProperties | undefined {
+  const style: CSSProperties = {};
+  if (cell.indent) style.paddingLeft = 4 + cell.indent * 10;
+  if (typeof cell.fill === "string") style.background = cell.fill;
+  if (cell.color) style.color = cell.color;
+  const shadows: string[] = [];
+  const borders = cell.borders ?? {};
+  const sides: [keyof typeof borders, (width: number) => string][] = [
+    ["top", (w) => `0 ${w}px 0`],
+    ["bottom", (w) => `0 -${w}px 0`],
+    ["left", (w) => `${w}px 0 0`],
+    ["right", (w) => `-${w}px 0 0`],
+  ];
+  for (const [side, offset] of sides) {
+    const line = borders[side];
+    if (!line) continue;
+    const gap = typeof cell.fill === "string" ? cell.fill : "#ffffff";
+    shadows.push(`inset ${offset(1)} ${line.color}`);
+    if (line.style === "double") shadows.push(`inset ${offset(2)} ${gap}`, `inset ${offset(3)} ${line.color}`);
+  }
+  if (shadows.length > 0) style.boxShadow = shadows.join(", ");
+  return Object.keys(style).length > 0 ? style : undefined;
+}
 
 interface RowProps {
   row: number;
@@ -46,7 +74,7 @@ const Row = memo(
           className={cx(
             "pv-cell",
             cell && cell.bold && "bold",
-            cell && cell.fill && "fill",
+            cell && cell.fill === true && "fill",
             cell && cell.muted && "muted",
             cell && isFilterFormat(cell.format) && "filter",
             row < frozen && "frozen",
@@ -54,7 +82,7 @@ const Row = memo(
             inReport && "in-report",
             selected === col && "selected",
           )}
-          style={cell && cell.indent ? { paddingLeft: 4 + cell.indent * 10 } : undefined}
+          style={cell ? cellStyle(cell) : undefined}
           onMouseDown={() => onSelect(row, col)}
         >
           {cell && cell.icon && typeof cell.value === "number" ? (

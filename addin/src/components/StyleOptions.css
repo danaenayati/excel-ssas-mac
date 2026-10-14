@@ -1,0 +1,10 @@
+/* The Style row of the options (StyleOptions.tsx). */
+
+/* A sample of the chosen PivotTable style, the size of a checkbox: header band, line, body. */
+.style-swatch {
+  flex: none;
+  width: 18px;
+  height: 14px;
+  border: 1px solid;
+  border-radius: 2px;
+}

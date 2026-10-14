@@ -25,6 +25,10 @@ import {
   type BlockFields,
 } from "./layout";
 
+/** The cells the default style (Light 16) fills with its light blue: filter captions and header rows. */
+const headerFilled = (block: Block) =>
+  block.paint.filter((layer) => layer.paint.fill === "#DDEBF7").flatMap((layer) => layer.rects);
+
 const CITY = "[Geography].[City]";
 const SERVICE = "[Service].[Service Type]";
 const YEAR = "[Date].[Year]";
@@ -234,7 +238,7 @@ describe("compact form", () => {
     const { block } = cityByYear("compact", "top");
     expect([3, 4, 5, 6, 7, 8, 9].map((row) => isBold(block, row, 2))).toEqual([true, false, false, true, false, false, true]);
     expect(block.bold).toContainEqual({ row: 0, col: 0, rows: 3, cols: 4 });
-    expect(block.fill).toContainEqual({ row: 0, col: 0, rows: 3, cols: 4 });
+    expect(headerFilled(block)).toContainEqual({ row: 0, col: 0, rows: 3, cols: 4 });
   });
 
   it("subtotals at the bottom: the outer item's line is empty and '<item> Total' follows the group", () => {

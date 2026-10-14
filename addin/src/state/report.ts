@@ -20,16 +20,22 @@ import type {
   ValueFilter,
   ValueOperator,
 } from "../types";
+import { isStyleName } from "../sheet/styles";
 import {
   DEFAULT_OPTIONS,
+  MAX_CUSTOM_NAME,
   MAX_EMPTY_CELL_TEXT,
+  MAX_SLICERS,
   REPORT_FORMS,
+  STYLE_OPTION_DEFAULTS,
   emptyLayout,
   layoutReducer,
   needsBaseField,
   needsBaseItem,
   newLayout,
+  slicerField,
   type LayoutAction,
+  type StyleOption,
 } from "./layout";
 
 export interface Current {
@@ -215,7 +221,8 @@ export function reportForSheet(
     if (current.persisted && (where === null || where.sheetId === sheetId)) return { kind: "keep" };
     const layout = current.def.layout;
     const untouched =
-      layout.rows.length + layout.columns.length + layout.values.length + layout.filters.length === 0;
+      layout.rows.length + layout.columns.length + layout.values.length + layout.filters.length === 0 &&
+      (layout.slicers ?? []).length === 0;
     if (!current.persisted && !untouched) return { kind: "keep" };
   }
   const here = reports.find((d) => {
@@ -447,6 +454,10 @@ function valueFields(value: unknown): ValueField[] {
       measure: item.measure,
       caption: typeof item.caption === "string" ? item.caption : item.measure,
     };
+    // Value Field Settings > Custom Name (pane only).
+    if (typeof item.customName === "string" && item.customName.trim() !== "") {
+      field.customName = item.customName.trim().slice(0, MAX_CUSTOM_NAME);
+    }
     if (isRecord(item.kpi) && typeof item.kpi.name === "string" && item.kpi.name !== "" && isOneOf(KPI_PARTS, item.kpi.part)) {
       if (out.some((o) => o.kpi && o.kpi.name === (item.kpi as { name: string }).name && o.kpi.part === (item.kpi as { part: string }).part)) continue;
       field.kpi = { name: item.kpi.name, part: item.kpi.part };
@@ -486,6 +497,10 @@ export function parseLayout(value: unknown): Layout {
   const rows = unique(placedFields(value.rows));
   const columns = unique(placedFields(value.columns));
   const filters = unique(placedFields(value.filters));
+  // Slicers last: a field also found in an area stays there. A named set cannot be one.
+  const slicers = unique(placedFields(value.slicers).filter((f) => !f.set))
+    .slice(0, MAX_SLICERS)
+    .map(slicerField);
 
   // The same measure may be in Values any number of times, each copy shown its own way.
   const values = valueFields(value.values);
@@ -499,6 +514,7 @@ export function parseLayout(value: unknown): Layout {
     options: parsedOptions(options, flag),
   };
   if (calculatedMeasures.length > 0) layout.calculatedMeasures = calculatedMeasures;
+  if (slicers.length > 0) layout.slicers = slicers;
   return layout;
 }
 
@@ -522,8 +538,16 @@ function parsedOptions(
   if (typeof options.emptyCellText === "string" && options.emptyCellText !== "") {
     out.emptyCellText = options.emptyCellText.slice(0, MAX_EMPTY_CELL_TEXT);
   }
+  // The look (pane only). A style this pane does not know reads as the default.
+  if (isStyleName(options.style)) out.style = options.style;
+  for (const option of STYLE_OPTIONS) {
+    const value = options[option];
+    if (typeof value === "boolean") out[option] = value;
+  }
   return out;
 }
+
+const STYLE_OPTIONS = Object.keys(STYLE_OPTION_DEFAULTS) as StyleOption[];
 
 const ID_PATTERN = /^[A-Za-z0-9]{1,40}$/;
 

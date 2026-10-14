@@ -34,9 +34,8 @@ import {
   sliceMatrix,
   type Block,
 } from "./layout";
+import { EDGES, type Edge, type Paint } from "./styles";
 
-/** Fill of header cells: the light blue of Excel's default PivotTable style. */
-export const HEADER_FILL = "#DDEBF7";
 /** Font colour of the placeholder of an empty report. */
 export const MUTED_COLOR = "#7F7F7F";
 
@@ -154,6 +153,36 @@ function applyFormat(
   }
 }
 
+// Plain strings rather than Excel.BorderIndex: this module is loaded outside Excel too,
+// where the Excel global does not exist.
+const EXCEL_EDGES: Record<Edge, "EdgeTop" | "EdgeBottom" | "EdgeLeft" | "EdgeRight" | "InsideHorizontal" | "InsideVertical"> = {
+  top: "EdgeTop",
+  bottom: "EdgeBottom",
+  left: "EdgeLeft",
+  right: "EdgeRight",
+  insideH: "InsideHorizontal",
+  insideV: "InsideVertical",
+};
+
+/** One layer of the report's style: fill, font colour and lines (ExcelApi 1.1). */
+function applyPaint(format: Excel.RangeFormat, paint: Paint): void {
+  if (paint.fill) format.fill.color = paint.fill;
+  if (paint.color) format.font.color = paint.color;
+  if (!paint.borders) return;
+  for (const edge of EDGES) {
+    const line = paint.borders[edge];
+    if (!line) continue;
+    const border = format.borders.getItem(EXCEL_EDGES[edge]);
+    border.color = line.color;
+    if (line.style === "double") {
+      border.style = "Double";
+    } else {
+      border.style = "Continuous";
+      border.weight = "Thin";
+    }
+  }
+}
+
 /** Excel's KPI icons: -1 red / down, 0 yellow / level, 1 green / up; the icon only. */
 function addKpiIcons(range: Excel.Range, kind: "status" | "trend"): void {
   const format = range.conditionalFormats.add(Excel.ConditionalFormatType.iconSet);
@@ -229,28 +258,42 @@ export async function writeBlock(
     }
   }
 
-  // 3. Formatting, column widths and the name, in one request.
-  suspend();
-  applyFormat(sheet, anchor, block.fill, modern, (format) => {
-    format.fill.color = HEADER_FILL;
-  });
-  applyFormat(sheet, anchor, block.bold, modern, (format) => {
-    format.font.bold = true;
-  });
-  applyFormat(sheet, anchor, block.muted, modern, (format) => {
-    format.font.color = MUTED_COLOR;
-    format.font.italic = true;
-  });
-  if (modern) {
-    for (const group of block.indents) {
-      applyFormat(sheet, anchor, group.rects, true, (format) => {
-        format.indentLevel = group.level;
-      });
+  // 3. Formatting, column widths and the name, in one request. The style's layers go
+  //    first, in order, each one batched over all its cells.
+  const format = (withStyle: boolean) => {
+    suspend();
+    if (withStyle) {
+      for (const layer of block.paint) {
+        applyFormat(sheet, anchor, layer.rects, modern, (f) => applyPaint(f, layer.paint));
+      }
     }
+    applyFormat(sheet, anchor, block.bold, modern, (f) => {
+      f.font.bold = true;
+    });
+    applyFormat(sheet, anchor, block.muted, modern, (f) => {
+      f.font.color = MUTED_COLOR;
+      f.font.italic = true;
+    });
+    if (modern) {
+      for (const group of block.indents) {
+        applyFormat(sheet, anchor, group.rects, true, (f) => {
+          f.indentLevel = group.level;
+        });
+      }
+    }
+    if (block.autofit) targetRange.format.autofitColumns();
+    setName(context, reportId, targetRange);
+  };
+  try {
+    format(true);
+    await context.sync();
+  } catch (error) {
+    // Only a look: should Excel refuse a colour or a line, the report keeps its numbers,
+    // its bold and its name. Without a style to drop, the error is real.
+    if (block.paint.length === 0) throw error;
+    format(false);
+    await context.sync();
   }
-  if (block.autofit) targetRange.format.autofitColumns();
-  setName(context, reportId, targetRange);
-  await context.sync();
 
   // 4. KPI Status and Trend as icons, as Excel shows them. Only a look: a refusal leaves
   //    the numbers (-1, 0, 1) in place.

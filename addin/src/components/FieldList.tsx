@@ -11,6 +11,7 @@ import {
   calculatedMeasureName,
   fieldUsing,
   locate,
+  slicerIndex,
   valueIndex,
 } from "../state/layout";
 import type { UiError } from "../state/runner";
@@ -195,7 +196,13 @@ function leafState(entry: Leaf, layout: Layout): { placed: string | null; checke
       const place = locate(layout, entry.hierarchy.uniqueName);
       // With one of its levels placed, the whole hierarchy is not: ticking it shows it all.
       const whole = place !== null && !(field && field.level);
-      return { placed: whole && place ? AREA_LABELS[place.area] : null, checked: whole, disabled: null };
+      // A slicer's field is not ticked, as in Excel; ticking it moves it to Rows.
+      const slicer = !place && slicerIndex(layout, entry.hierarchy.uniqueName) >= 0;
+      return {
+        placed: whole && place ? AREA_LABELS[place.area] : slicer ? "Slicer" : null,
+        checked: whole,
+        disabled: null,
+      };
     }
     case "set": {
       if (!entry.set.hierarchy) {

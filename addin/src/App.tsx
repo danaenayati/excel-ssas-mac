@@ -19,6 +19,9 @@ import { NumberFormatDialog } from "./components/NumberFormatDialog";
 import { ShowAsDialog } from "./components/ShowAsDialog";
 import { refreshEveryMenu, refreshEveryNote } from "./components/refreshEvery";
 import { chartMenuItems, type ChartActions } from "./components/chartMenu";
+import { StyleOptions } from "./components/StyleOptions";
+import { InsertSlicer } from "./components/InsertSlicer";
+import { Slicers } from "./components/Slicers";
 import { conversionBlocker, convertReport, formulaConnection } from "./sheet/convert";
 import { rectA1 } from "./sheet/geometry";
 import {
@@ -203,6 +206,8 @@ export function App({ api, host, mock }: Props) {
   }, [picker]);
   const [search, setSearch] = useState("");
   const [reportMenu, setReportMenu] = useState<HTMLElement | null>(null);
+  /** The Insert Slicers panel is open. */
+  const [insertSlicer, setInsertSlicer] = useState(false);
   const [generation, setGeneration] = useState(0);
   const [refreshOnOpen, setRefreshOnOpen] = useState(false);
   /** "Refresh Every": the workbook's interval in minutes, 0 when off. */
@@ -667,7 +672,8 @@ export function App({ api, host, mock }: Props) {
     if (!cur) return;
     const apply = () =>
       dispatch(what === "database" ? { type: "setCatalog", catalog: value } : { type: "setCube", cube: value });
-    const hasFields = !isEmptyLayout(cur.def.layout) || cur.def.layout.filters.length > 0;
+    const hasFields =
+      !isEmptyLayout(cur.def.layout) || cur.def.layout.filters.length > 0 || (cur.def.layout.slicers ?? []).length > 0;
     if (hasFields) setQuestion({ kind: "reset", what, apply });
     else apply();
   };
@@ -1187,6 +1193,10 @@ export function App({ api, host, mock }: Props) {
       });
       items.push("separator");
     }
+    items.push(
+      { label: "Insert Slicer…", disabled: !fields.data || !connection, run: () => setInsertSlicer(true) },
+      "separator",
+    );
     items.push({
       label: "Reload field list",
       run: () => {
@@ -1479,6 +1489,10 @@ export function App({ api, host, mock }: Props) {
           }}
         />
 
+        {def.layout.slicers && def.layout.slicers.length > 0 && (
+          <Slicers api={api} connectionId={connectionId} catalog={catalog} cube={cube} slicers={def.layout.slicers} dispatch={act} />
+        )}
+
         <div className="options">
           <label className="row-field options-wide">
             <span className="row-label">Subtotals</span>
@@ -1526,6 +1540,11 @@ export function App({ api, host, mock }: Props) {
               ))}
             </select>
           </label>
+          <StyleOptions
+            options={def.layout.options}
+            onStyle={(style) => act({ type: "setStyle", style })}
+            onOption={(option, value) => act({ type: "setStyleOption", option, value })}
+          />
           {OPTION_LABELS.map(([option, label]) => {
             // Compact form writes every row field in one column: nothing to repeat (Excel greys it out).
             const off = option === "repeatLabels" && form === "compact";
@@ -1610,6 +1629,19 @@ export function App({ api, host, mock }: Props) {
       <div className="pane">
         {mock && <p className="strip">Sample data only. Not connected to the helper.</p>}
         {body}
+
+        {insertSlicer && def && fields.data && (
+          <InsertSlicer
+            key={def.id}
+            fields={fields.data}
+            layout={def.layout}
+            onCancel={() => setInsertSlicer(false)}
+            onApply={(hierarchies) => {
+              setInsertSlicer(false);
+              act({ type: "setSlicers", hierarchies });
+            }}
+          />
+        )}
 
         {pickerField && pickerField.set && (
           <Dialog title={pickerField.caption} onCancel={() => setPicker(null)} buttons={[{ label: "OK", primary: true, run: () => setPicker(null) }]}>

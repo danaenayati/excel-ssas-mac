@@ -2,6 +2,7 @@
 // object when it changes nothing, so callers can tell "no change" by identity and
 // skip a re-query.
 
+import { DEFAULT_STYLE, isStyleName } from "../sheet/styles";
 import type {
   CalculatedMeasure,
   CustomItem,
@@ -128,7 +129,39 @@ export type LayoutAction =
   | { type: "setShowAs"; measure: string; showAs: ShowValuesAs; baseField?: string | null; baseItem?: string | null }
   /** A value field's number format; null for the cube's own. `measure` is the field's key. */
   | { type: "setNumberFormat"; measure: string; format: string | null }
+  /**
+   * Value Field Settings > Custom Name; "" or null gives back the cube's caption.
+   * `measure` is the field's key. The pane refuses a name in use first (state/valueNames.ts).
+   */
+  | { type: "setCustomName"; measure: string; name: string | null }
+  /** Excel's PivotTable Styles: a name from sheet/styles.ts; null for the default (Light 16). */
+  | { type: "setStyle"; style: string | null }
+  /** Excel's Style Options: Row Headers, Column Headers, Banded Rows, Banded Columns. */
+  | { type: "setStyleOption"; option: StyleOption; value: boolean }
+  /**
+   * Insert Slicer: the field gets a slicer, at the end. A field in Rows, Columns or
+   * Filters moves there, keeping its chosen items. No-op for a named set, a field that
+   * already has a slicer, or a 17th. Its items are chosen with `setMembers`.
+   */
+  | { type: "addSlicer"; hierarchy: HierarchyInput }
+  | { type: "removeSlicer"; hierarchy: string }
+  /** The Insert Slicers dialog: exactly these fields have slicers, in this order (as `addSlicer`). */
+  | { type: "setSlicers"; hierarchies: HierarchyInput[] }
   | { type: "replace"; layout: Layout };
+
+/** Most slicers a report has, as the helper allows. */
+export const MAX_SLICERS = 16;
+
+/** Excel's four Style Options (Design tab). */
+export type StyleOption = "rowHeaders" | "columnHeaders" | "bandedRows" | "bandedColumns";
+
+/** What each Style Option is when a report does not say: Excel's defaults. */
+export const STYLE_OPTION_DEFAULTS: Record<StyleOption, boolean> = {
+  rowHeaders: true,
+  columnHeaders: true,
+  bandedRows: false,
+  bandedColumns: false,
+};
 
 /** The on/off options that `setOption` toggles. */
 export type BooleanOption =
@@ -142,6 +175,9 @@ export type BooleanOption =
 
 /** Longest "For empty cells show" text. */
 export const MAX_EMPTY_CELL_TEXT = 20;
+
+/** Longest custom name of a value field, as Excel allows for a PivotTable field name. */
+export const MAX_CUSTOM_NAME = 255;
 
 /** Show Values As kinds that need a base field, and those that need a base item too. */
 const NEEDS_BASE_FIELD: readonly ShowValuesAs[] = [
@@ -336,13 +372,96 @@ function removeAt<T>(list: T[], index: number): T[] {
   return [...list.slice(0, index), ...list.slice(index + 1)];
 }
 
+// -- slicers ------------------------------------------------------------------
+// A slicer filters like a page filter and has no cell: what matters is its field's
+// chosen items. A hierarchy is in one place only: Rows, Columns, Filters or a slicer.
+
+/** Where a hierarchy is among the report's slicers, or -1. */
+export function slicerIndex(layout: Layout, hierarchy: string): number {
+  return (layout.slicers ?? []).findIndex((field) => field.hierarchy === hierarchy);
+}
+
+/** A field as a slicer keeps it: which field, and which of its items are chosen. */
+export function slicerField(field: PlacedField): PlacedField {
+  return {
+    hierarchy: field.hierarchy,
+    caption: field.caption,
+    allMember: field.allMember,
+    expanded: [],
+    members: field.members.slice(),
+    memberCaptions: field.memberCaptions.slice(),
+  };
+}
+
+/** The layout with these slicers; without the key when there are none, as before slicers existed. */
+function withSlicers(layout: Layout, slicers: PlacedField[]): Layout {
+  const next = { ...layout };
+  if (slicers.length > 0) next.slicers = slicers;
+  else delete next.slicers;
+  return next;
+}
+
+function setSlicers(layout: Layout, wanted: readonly HierarchyInput[]): Layout {
+  const current = layout.slicers ?? [];
+  let out = layout;
+  const slicers: PlacedField[] = [];
+  for (const input of wanted) {
+    if (slicers.length >= MAX_SLICERS) break;
+    if (slicers.some((s) => s.hierarchy === input.uniqueName)) continue;
+    const existing = current.find((s) => s.hierarchy === input.uniqueName);
+    if (existing) {
+      slicers.push(existing);
+      continue;
+    }
+    const place = locate(out, input.uniqueName);
+    if (place && place.area !== "values") {
+      const field = out[place.area][place.index];
+      if (field.set) continue; // a named set's items are its own: it cannot be a slicer
+      out = { ...out, [place.area]: removeAt(out[place.area], place.index) };
+      slicers.push(slicerField(field));
+    } else {
+      slicers.push({
+        hierarchy: input.uniqueName,
+        caption: input.caption,
+        allMember: input.allMember,
+        expanded: [],
+        members: [],
+        memberCaptions: [],
+      });
+    }
+  }
+  const same = out === layout && slicers.length === current.length && slicers.every((s, i) => s === current[i]);
+  return same ? layout : withSlicers(out, slicers);
+}
+
+const slicerInputs = (layout: Layout): HierarchyInput[] =>
+  (layout.slicers ?? []).map((s) => ({ uniqueName: s.hierarchy, caption: s.caption, allMember: s.allMember }));
+
+/** Take a slicer's field out of the slicers, to be placed in an area. */
+function takeSlicer(layout: Layout, hierarchy: string): { layout: Layout; field: PlacedField } | null {
+  const index = slicerIndex(layout, hierarchy);
+  if (index < 0) return null;
+  const slicers = layout.slicers as PlacedField[];
+  return { layout: withSlicers(layout, removeAt(slicers, index)), field: slicers[index] };
+}
+
 function updateField(
   layout: Layout,
   hierarchy: string,
   change: (field: PlacedField) => PlacedField,
 ): Layout {
   const place = locate(layout, hierarchy);
-  if (!place || place.area === "values") return layout;
+  if (!place || place.area === "values") {
+    // A slicer's field: its chosen items change like a page filter's.
+    const index = slicerIndex(layout, hierarchy);
+    if (index < 0) return layout;
+    const slicers = layout.slicers as PlacedField[];
+    const after = change(slicers[index]);
+    if (after === slicers[index]) return layout;
+    const next = slicers.slice();
+    next[index] = after;
+    return { ...layout, slicers: next };
+  }
   const list = layout[place.area];
   const before = list[place.index];
   const after = change(before);
@@ -381,7 +500,11 @@ function updateValue(layout: Layout, key: string, change: (field: ValueField) =>
 
 function moveTo(layout: Layout, name: string, area: Area, index: number | undefined): Layout {
   const place = locate(layout, name);
-  if (!place) return layout;
+  if (!place) {
+    // From a slicer into an area, with its chosen items.
+    const taken = area === "values" ? null : takeSlicer(layout, name);
+    return taken ? { ...taken.layout, [area]: insertAt(taken.layout[area as FieldArea], taken.field, index) } : layout;
+  }
   // A measure lives only in Values; a hierarchy never does.
   if ((place.area === "values") !== (area === "values")) return layout;
 
@@ -466,6 +589,9 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
     case "addSet": {
       const spans = action.set.hierarchies && action.set.hierarchies.length > 1 ? action.set.hierarchies : null;
       if ((spans ?? [action.set.hierarchy]).some((h) => fieldUsing(layout, h))) return layout;
+      // The set takes its fields' places: a slicer of any of them goes.
+      let base = layout;
+      for (const h of spans ?? [action.set.hierarchy]) base = takeSlicer(base, h)?.layout ?? base;
       const area = action.area ?? "rows";
       const field: PlacedField = {
         hierarchy: action.set.hierarchy,
@@ -480,7 +606,7 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
         field.setHierarchies = spans;
         field.setAllMembers = spans.map((_, i) => (action.set.allMembers ?? [])[i] ?? null);
       }
-      return { ...layout, [area]: insertAt(layout[area], field, action.index) };
+      return { ...base, [area]: insertAt(base[area], field, action.index) };
     }
 
     case "setDateFilter":
@@ -523,6 +649,8 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
         return action.area ? moveTo(layout, name, action.area, action.index) : layout;
       }
       if (fieldUsing(layout, name)) return layout; // a named set already shows it
+      // Ticked or dropped while it is a slicer: it moves, keeping its chosen items.
+      if (slicerIndex(layout, name) >= 0) return moveTo(layout, name, action.area ?? "rows", action.index);
       const area: FieldArea = action.area ?? "rows";
       const field: PlacedField = {
         hierarchy: name,
@@ -538,7 +666,10 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
 
     case "remove": {
       const place = locate(layout, action.name);
-      if (!place) return layout;
+      if (!place) {
+        const taken = takeSlicer(layout, action.name);
+        return taken ? taken.layout : layout;
+      }
       if (place.area === "values") {
         return { ...layout, values: removeAt(layout.values, place.index) };
       }
@@ -679,6 +810,40 @@ function applyAction(layout: Layout, action: LayoutAction): Layout {
         if ((field.numberFormat ?? null) === format) return field;
         return withOptional(field, "numberFormat", format);
       });
+
+    case "setCustomName":
+      return updateValue(layout, action.measure, (field) => {
+        const name = (action.name ?? "").trim().slice(0, MAX_CUSTOM_NAME);
+        if ((field.customName ?? "").trim() === name) return field;
+        return withOptional(field, "customName", name === "" ? null : name);
+      });
+
+    // A report keeps a style or option only while it differs from the default, so one
+    // that never chose any stays as it was.
+    case "setStyle": {
+      const style = action.style === null || action.style === DEFAULT_STYLE ? null : action.style;
+      if (style !== null && !isStyleName(style)) return layout;
+      if ((layout.options.style ?? null) === style) return layout;
+      return { ...layout, options: withOptional(layout.options, "style", style) };
+    }
+
+    case "setStyleOption": {
+      const fallback = STYLE_OPTION_DEFAULTS[action.option];
+      if (fallback === undefined || (layout.options[action.option] ?? fallback) === action.value) return layout;
+      const value = action.value === fallback ? null : action.value;
+      return { ...layout, options: withOptional(layout.options, action.option, value) };
+    }
+
+    case "addSlicer":
+      return setSlicers(layout, [...slicerInputs(layout), action.hierarchy]);
+
+    case "removeSlicer": {
+      const taken = takeSlicer(layout, action.hierarchy);
+      return taken ? taken.layout : layout;
+    }
+
+    case "setSlicers":
+      return setSlicers(layout, action.hierarchies);
 
     case "replace":
       return action.layout;

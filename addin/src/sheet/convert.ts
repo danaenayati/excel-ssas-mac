@@ -111,6 +111,11 @@ export function conversionBlocker(layout: Layout): string | null {
       return `The filter ${quoted(field.caption)} has several items selected, and one cube formula takes one item of each field. Pick one item or All, then convert.`;
     }
   }
+  for (const field of layout.slicers ?? []) {
+    if (field.members.length > 1) {
+      return `The slicer ${quoted(field.caption)} has several items selected, and one cube formula takes one item of each field. Pick one item or clear the slicer, then convert.`;
+    }
+  }
   return null;
 }
 
@@ -223,6 +228,10 @@ export function convertReport(source: ConversionSource, connection: string): Con
     sliced.push(member);
     if (shape.filterRows === layout.filters.length) put(f, 1, `=CUBE.MEMBER(${conn},${excelString(member)})`);
   });
+  // A slicer's item slices every value too; a slicer has no cell of its own.
+  for (const field of layout.slicers ?? []) {
+    if (field.members.length === 1) sliced.push(field.members[0]);
+  }
 
   // Values. Row subtotals come before their group when the report puts them at the top
   // (compact and outline form only); column subtotals always follow their items.
