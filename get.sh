@@ -32,7 +32,8 @@ else
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   say "Downloading Cube Explorer"
-  if curl -fsSL "https://codeload.github.com/$SLUG/tar.gz/refs/heads/$BRANCH" -o "$tmp/source.tar.gz"; then
+  # While the repository is private this download is refused; the next ways sign in.
+  if curl -fsSL "https://codeload.github.com/$SLUG/tar.gz/refs/heads/$BRANCH" -o "$tmp/source.tar.gz" 2>/dev/null; then
     mkdir -p "$tmp/source"
     tar -xzf "$tmp/source.tar.gz" -C "$tmp/source" --strip-components 1
   elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
@@ -52,8 +53,8 @@ fi
 
 say "Installing"
 # Under `curl | bash` this script's input is the download; give the installer the terminal.
-if [ -t 0 ]; then
-  bash "$DEST/install.sh"
-else
+if [ ! -t 0 ] && (exec </dev/tty) 2>/dev/null; then
   bash "$DEST/install.sh" </dev/tty
+else
+  bash "$DEST/install.sh"
 fi
