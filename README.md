@@ -92,8 +92,14 @@ the same way Windows Excel does, with your Windows (domain) user name and passwo
 - **Cube formulas**: `CUBE.VALUE`, `CUBE.MEMBER`, `CUBE.MEMBERPROPERTY`,
   `CUBE.RANKEDMEMBER` and `CUBE.SETCOUNT` in any cell, and **Convert to Formulas**,
   which turns a report into such formulas (Windows: OLAP Tools > Convert to Formulas).
-- **Refresh**, **Refresh All**, **Refresh when the workbook opens**, and Cancel for a
-  slow query.
+- **Charts that follow a report**, the nearest thing to a PivotChart: **Insert Chart**
+  (Clustered Column, Stacked Column, Clustered Bar, Line, Pie, Area) puts an ordinary
+  Excel chart beside the report, built like a PivotChart (no totals), and every
+  refresh updates it.
+- **Right-click a report cell** for a **Cube Explorer** menu: Show Details, Refresh,
+  Refresh All, Expand, Collapse, Expand Entire Field, Collapse Entire Field.
+- **Refresh**, **Refresh All**, **Refresh when the workbook opens**, **Refresh Every**
+  1 to 60 minutes (while the panel is open), and Cancel for a slow query.
 - A built-in **Sample cube** to try everything without a server.
 
 ---
@@ -298,18 +304,20 @@ years; the panel warns before it expires, and running the installer renews it.
 on Windows greys out Group for cube PivotTables).
 
 **Different:**
-- It is not a native PivotTable object. Excel's PivotTable tabs, PivotTable Styles,
-  Slicers, Timelines and PivotCharts do not attach to it. Ordinary charts and formulas
-  that point at the report's cells work, and keep working after a refresh.
+- It is not a native PivotTable object, so Excel's own PivotTable tabs, Slicer and
+  Timeline objects and PivotCharts do not attach to it. Cube Explorer offers the same
+  things its own way: slicers are buttons in the panel, charts are ordinary Excel charts
+  that follow the report, and styles are applied by the panel.
 - Changes made through the panel cannot be undone with Cmd+Z; change them back in the
   panel instead.
-- Show Details is a button in the panel instead of a double-click.
+- Show Details is a button in the panel or the right-click menu instead of a
+  double-click. The right-click menu appears on every cell, not only report cells.
+- Refresh Every runs while the panel is open (it opens with the workbook).
 - Cube formulas take unique member names. On Windows a `CUBEVALUE` can point at a
   cell holding a `CUBEMEMBER`; here a cell can only hold text or a number, so the names
   go into the formula itself (Convert to Formulas does this for you). They read
   `CUBE.VALUE` rather than `CUBEVALUE`, because add-in functions always carry a name
   prefix.
-- Named sets are supported when their items come from one field.
 - Sign-in is NTLM with your user name and password. Kerberos-only servers and
   connections over HTTP (`msmdpump.dll`) are not supported yet.
 - PivotTables your colleagues built on Windows do not refresh on a Mac; build the
