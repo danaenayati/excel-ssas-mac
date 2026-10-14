@@ -131,6 +131,8 @@ class Options:
     non_empty: bool = True
     grand_total_row: bool = True  # the bottom row: the rows axis' All tuple
     grand_total_column: bool = True  # the right-hand column: the columns axis' All tuple
+    # Each subtotal before the items it adds up (compact and outline form only).
+    subtotals_at_top: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,6 +170,9 @@ class Layout:
             non_empty=bool(raw_options.get("nonEmpty", True)),
             grand_total_row=bool(raw_options.get("grandTotalRow", grand_totals)),
             grand_total_column=bool(raw_options.get("grandTotalColumn", grand_totals)),
+            # Excel's tabular form has no subtotals at the top of a group.
+            subtotals_at_top=raw_options.get("subtotalsAt") == "top"
+            and raw_options.get("form", "tabular") in ("compact", "outline"),
         )
         on_axes = {placed.hierarchy.lower() for placed in (*rows, *columns)}
         for value in values:

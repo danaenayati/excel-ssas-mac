@@ -69,13 +69,14 @@ def build_query(cube: str, layout: Layout, measure_formats: dict[str, str] | Non
     measures = "{" + ", ".join(measure_names) + "}" if measure_names else "{" + DEFAULT_MEASURE + "}"
 
     options = layout.options
+    at_top = options.subtotals_at_top
     if layout.columns:
-        columns = f"CrossJoin({_axis_set(layout.columns, options.grand_total_column, options.subtotals)}, {measures})"
+        columns = f"CrossJoin({_axis_set(layout.columns, options.grand_total_column, options.subtotals, at_top)}, {measures})"
     else:
         columns = measures
     axes = [f"{non_empty}{columns} ON COLUMNS"]
     if layout.rows:
-        axes.append(f"{non_empty}{_axis_set(layout.rows, options.grand_total_row, options.subtotals)} ON ROWS")
+        axes.append(f"{non_empty}{_axis_set(layout.rows, options.grand_total_row, options.subtotals, at_top)} ON ROWS")
 
     on_axes = (*layout.rows, *layout.columns)
     value_filtered = any(placed.value_filter for placed in on_axes)
@@ -210,15 +211,16 @@ def _detail(placed: PlacedField) -> str:
     return detail
 
 
-def _axis_set(fields: tuple[PlacedField, ...], grand_total: bool, subtotals: bool) -> str:
+def _axis_set(fields: tuple[PlacedField, ...], grand_total: bool, subtotals: bool, at_top: bool = False) -> str:
     """Detail tuples followed by their totals, outermost total last.
 
     T(n) = {D(n), {All(n)}}
     T(k) = {CrossJoin(D(k), T(k+1)), {(All(k), …, All(n))}}
 
     The All tuple at depth 0 is the grand total; deeper ones are subtotals of the
-    hierarchy just outside them. When a field further in sorts by a measure, the
-    CrossJoin becomes a Generate, so that the inner order is worked out separately
+    hierarchy just outside them. With `at_top` a subtotal comes before the items it
+    adds up; the grand total stays last. When a field further in sorts by a measure,
+    the CrossJoin becomes a Generate, so that the inner order is worked out separately
     for each outer item, as in Excel.
     """
     count = len(fields)
@@ -240,7 +242,9 @@ def _axis_set(fields: tuple[PlacedField, ...], grand_total: bool, subtotals: boo
             body = f"CrossJoin({detail}, {build(depth + 1)})"
         wanted = grand_total if depth == 0 else subtotals
         total = all_tuple(depth) if wanted else None
-        return f"{{{body}, {{{total}}}}}" if total else body
+        if not total:
+            return body
+        return f"{{{{{total}}}, {body}}}" if at_top and depth > 0 else f"{{{body}, {{{total}}}}}"
 
     return build(0)
 

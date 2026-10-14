@@ -577,7 +577,11 @@ class DemoBackend:
                 body = [(k,) + rest for k in detail for rest in inner]
             wanted = grand_total if depth == 0 else layout.options.subtotals
             if wanted:
-                body.append(tuple(alls[depth:]))
+                # The grand total always ends the axis; subtotals may head their group.
+                if depth > 0 and layout.options.subtotals_at_top:
+                    body.insert(0, tuple(alls[depth:]))
+                else:
+                    body.append(tuple(alls[depth:]))
             return body
 
         return build(0, facts)

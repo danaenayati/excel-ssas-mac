@@ -155,6 +155,20 @@ def test_three_row_hierarchies_with_subtotals_nest_the_all_tuples():
     ) in text
 
 
+def test_subtotals_at_top_head_their_group_and_the_grand_total_stays_last():
+    text = query(rows=[field(CITY), field(SERVICE)], subtotals=True, subtotalsAt="top", form="compact")
+    assert (
+        "NON EMPTY {CrossJoin({[Geo].[City].[All].Children}, {{[Service].[Type].[All]}, {[Service].[Type].[All].Children}}), "
+        "{([Geo].[City].[All], [Service].[Type].[All])}} ON ROWS"
+    ) in text
+
+
+def test_subtotals_at_top_are_ignored_in_tabular_form():
+    tabular = query(rows=[field(CITY), field(SERVICE)], subtotals=True, subtotalsAt="top", form="tabular")
+    assert tabular == query(rows=[field(CITY), field(SERVICE)], subtotals=True)
+    assert query(rows=[field(CITY), field(SERVICE)], subtotals=True, subtotalsAt="top") == tabular
+
+
 def test_hierarchy_without_all_member_has_no_total():
     text = query(rows=[field("[Scenario].[Scenario]", all_member=None)])
     assert "NON EMPTY {[Scenario].[Scenario].Levels(0).Members} ON ROWS" in text

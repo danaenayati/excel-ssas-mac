@@ -74,6 +74,8 @@ export interface Hierarchy {
   kind: "attribute" | "user";
   /** Unique name of the All member; null when the hierarchy has none. */
   allMember: string | null;
+  /** The field's top-level items are dates, so Date Filters apply to it. */
+  isDate?: boolean;
 }
 
 export interface Dimension {
@@ -82,9 +84,43 @@ export interface Dimension {
   hierarchies: Hierarchy[];
 }
 
+export type KpiPart = "value" | "goal" | "status" | "trend";
+
+/** A key performance indicator defined in the cube (Excel lists them under "KPIs"). */
+export interface Kpi {
+  /** KPI_NAME, as KPIValue("…") and its siblings take it. */
+  name: string;
+  caption: string;
+  /** Display folder, possibly nested with "\\"; "" for none. */
+  folder: string;
+  /** The parts this KPI defines; "value" always. */
+  parts: KpiPart[];
+}
+
+/** A named set defined in the cube (Excel lists them under their dimension, in "Sets"). */
+export interface NamedSet {
+  /** "[Set Name]", as MDX refers to it. */
+  uniqueName: string;
+  caption: string;
+  folder: string;
+  /** Dimension unique name it is listed under. */
+  dimension: string;
+  /**
+   * The one hierarchy its items come from. Null when its items span several
+   * hierarchies: such a set is listed but cannot be placed.
+   */
+  hierarchy: string | null;
+  /** That hierarchy's All member, for totals; null when none or unknown. */
+  allMember: string | null;
+}
+
 export interface Fields {
   measures: Measure[];
   dimensions: Dimension[];
+  /** Absent from helpers older than KPI support; treat as empty. */
+  kpis?: Kpi[];
+  /** Absent from helpers older than named-set support; treat as empty. */
+  sets?: NamedSet[];
 }
 
 export interface Member {
@@ -128,6 +164,98 @@ export interface PlacedField {
   labelFilter?: LabelFilter | null;
   /** Keep only items whose value for a measure matches. Ignored in Filters. */
   valueFilter?: ValueFilter | null;
+  /** Keep only items whose date matches; only for fields with `isDate`. Ignored in Filters. */
+  dateFilter?: DateFilter | null;
+  /**
+   * Groups and calculated items, shown after the field's own items. Rows and Columns
+   * only; at most 50 per field.
+   */
+  customItems?: CustomItem[] | null;
+  /**
+   * Set when this field is a named set: its `uniqueName`. `hierarchy`, `allMember` and
+   * `caption` are then the set's. A set's items are the set's tuples; `expanded`,
+   * `members`, `sort` and the filters do not apply. Rows and Columns only.
+   */
+  set?: string | null;
+}
+
+/**
+ * A group (`members`) or a calculated item (`formula`); exactly one of the two.
+ * Excel on Windows has neither for cube PivotTables (grouping is greyed out; OLAP
+ * Tools > MDX Calculated Member is the nearest), so this goes further than Windows.
+ */
+export interface CustomItem {
+  /** Caption of the new item: 1 to 100 characters, unique within the field. */
+  name: string;
+  /**
+   * Group: top-level items of the field (member unique names), shown as one item that
+   * adds them up. Each item may be in one group only; grouped items are not shown on
+   * their own. 2 to 5000 items.
+   */
+  members?: string[] | null;
+  /**
+   * Calculated item: an MDX expression, e.g. "[Geo].[City].&[1] - [Geo].[City].&[2]".
+   * At most 2000 characters; statements and ';' are refused.
+   */
+  formula?: string | null;
+}
+
+/** Excel's Date Filters. Dates are "yyyy-mm-dd" and refer to the Mac's local calendar. */
+export type DateOperator =
+  | "equals"
+  | "before"
+  | "after"
+  | "between"
+  | "tomorrow"
+  | "today"
+  | "yesterday"
+  | "nextWeek"
+  | "thisWeek"
+  | "lastWeek"
+  | "nextMonth"
+  | "thisMonth"
+  | "lastMonth"
+  | "nextQuarter"
+  | "thisQuarter"
+  | "lastQuarter"
+  | "nextYear"
+  | "thisYear"
+  | "lastYear"
+  | "yearToDate"
+  // "All Dates in the Period"
+  | "quarter1"
+  | "quarter2"
+  | "quarter3"
+  | "quarter4"
+  | "month1"
+  | "month2"
+  | "month3"
+  | "month4"
+  | "month5"
+  | "month6"
+  | "month7"
+  | "month8"
+  | "month9"
+  | "month10"
+  | "month11"
+  | "month12";
+
+export interface DateFilter {
+  operator: DateOperator;
+  /** Required for equals, before, after and between. */
+  value?: string | null;
+  /** Required for between: the last day, included. */
+  value2?: string | null;
+}
+
+/** A measure defined in the report with an MDX formula (Windows: OLAP Tools > MDX Calculated Measure). */
+export interface CalculatedMeasure {
+  /** 1 to 100 characters; must not be the name of one of the cube's measures. Its unique name is "[Measures].[name]". */
+  name: string;
+  /** MDX expression; at most 2000 characters; statements and ';' are refused. */
+  formula: string;
+  /** Format string as the cube takes it ("#,##0.00", "Percent", …). Absent or "": the cube's default. */
+  formatString?: string | null;
 }
 
 /**
@@ -213,9 +341,16 @@ export type ShowValuesAs =
   | "rankDescending" // (B) 1 = largest
   | "index"; // (value × grand total) / (row total × column total)
 
+/**
+ * A field in Values. The same measure may be placed more than once, each copy shown its
+ * own way (a second plain copy is headed "<caption> 2").
+ */
 export interface ValueField {
+  /** A measure's unique name, a calculated measure's ("[Measures].[name]"), or, for a KPI part, the KPI's value measure. */
   measure: string;
   caption: string;
+  /** Set for a KPI's Value, Goal, Status or Trend. Then `showAs` must be "normal". */
+  kpi?: { name: string; part: KpiPart } | null;
   /** Default "normal". */
   showAs?: ShowValuesAs;
   /** Hierarchy unique name of a field in Rows or Columns; required by the kinds marked (B). */
@@ -241,9 +376,21 @@ export interface LayoutOptions {
   /** The Grand Total column on the right (Excel: on for rows). Absent: `grandTotals`. */
   grandTotalColumn?: boolean;
   subtotals: boolean;
+  /**
+   * Excel's Report Layout. Absent: "tabular", the only form before compact and outline
+   * existed, so older reports keep their look. New reports start in "compact", Excel's
+   * default.
+   */
+  form?: "compact" | "outline" | "tabular";
+  /**
+   * Where subtotals go: "top" puts each subtotal line before the items it adds up
+   * (the helper orders the axis that way), "bottom" after them. Absent: "bottom".
+   * Tabular form always uses "bottom", as in Excel.
+   */
+  subtotalsAt?: "top" | "bottom";
   /** Hide rows and columns with no data. */
   nonEmpty: boolean;
-  /** Pane only, the helper ignores it: write outer row labels on every line. */
+  /** Pane only, the helper ignores it: write outer row labels on every line. Not in compact form. */
   repeatLabels?: boolean;
   /** Pane only: text written in value cells that have no value. Absent or "": empty. */
   emptyCellText?: string;
@@ -255,6 +402,8 @@ export interface Layout {
   values: ValueField[];
   filters: PlacedField[];
   options: LayoutOptions;
+  /** Measures defined in this report; usable in Values, sorts and value filters. At most 50. */
+  calculatedMeasures?: CalculatedMeasure[] | null;
 }
 
 export interface QueryRequest {
@@ -296,6 +445,8 @@ export interface MemberRef {
   level: number;
   hasChildren: boolean;
   expanded: boolean;
+  /** A group or calculated item of the report: no drill-down and no Show Details. */
+  calculated?: boolean;
 }
 
 export type HeaderKind = "member" | "subtotal" | "grandTotal" | "measure" | "blank";

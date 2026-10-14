@@ -124,6 +124,14 @@ def test_subtotals_for_two_row_fields(demo):
     assert grid["values"][i][0] == sum(v[0] for v in grid["values"][:i])
 
 
+def test_subtotals_at_top_come_before_their_items(demo):
+    grid = run(demo, rows=[placed(demo, CITY), placed(demo, SERVICE)], subtotals=True, subtotalsAt="top", form="outline")
+    kinds = grid["rowKinds"]
+    assert kinds[0] == "subtotal" and kinds[1] == "data" and kinds[-1] == "grandTotal"
+    first_group_end = kinds.index("subtotal", 1)
+    assert grid["values"][0][0] == sum(v[0] for v in grid["values"][1:first_group_end])
+
+
 def test_filter_reduces_totals_and_single_member_axis_selection_works(demo):
     everything = run(demo, rows=[placed(demo, CITY)])
     economy = next(m for m in demo.members(CATALOG, CUBE, SERVICE, None, None, 50)["members"] if m["caption"] == "Economy")
