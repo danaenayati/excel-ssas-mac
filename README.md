@@ -85,8 +85,11 @@ You can also add a connection from the panel itself with **Add connection**.
    **Refresh when the workbook opens** in the report's **⋯** menu.
    Below the areas: **Grand Totals** (Excel's four choices), **Subtotals**, **Hide
    empty**, **Repeat All Item Labels**, **For empty cells show**, and **Defer updates**.
-9. **New report here** starts another report at the selected cell. If a report's sheet
-   was deleted, select a cell and press **Place here** to put it back, fields included.
+9. **Each sheet has its own reports**, as on Windows. The panel edits the report on the
+   sheet you are looking at; on a new sheet, ticking fields starts a new report at the
+   selected cell. **New report here** starts another report on the same sheet. If a
+   report's sheet was deleted, the report keeps its fields and comes back at the selected
+   cell the next time you change a field or press Refresh.
 
 Your password is kept in the Mac's Keychain. It is never written into a workbook.
 

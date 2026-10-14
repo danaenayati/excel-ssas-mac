@@ -8,6 +8,7 @@ import {
   newReportDef,
   newReportId,
   parseReportDef,
+  reportForSheet,
   serializeReportDef,
   type Current,
 } from "./report";
@@ -227,6 +228,65 @@ describe("what the place button does", () => {
   it("words the button for the same two cases", () => {
     expect(placeLabel(null)).toBe("Place here");
     expect(placeLabel(extent)).toBe("New report here");
+  });
+});
+
+describe("which report the pane edits on the sheet in view", () => {
+  const on = (sheetId: string, row = 0) => ({ sheetId, sheetName: sheetId, row, col: 0, rows: 4, cols: 2 });
+  const withFields = () => {
+    const def = newReportDef("demo", "Sample", "Rides");
+    return { ...def, layout: { ...def.layout, values: [{ measure: rides.uniqueName, caption: rides.caption }] } };
+  };
+  const a = { ...withFields(), id: "a" };
+  const b = { ...withFields(), id: "b" };
+  const reports = [a, b];
+
+  it("keeps the report being edited while its sheet is in view", () => {
+    expect(reportForSheet(open(a, true), "s1", reports, { a: on("s1"), b: on("s2") })).toEqual({ kind: "keep" });
+  });
+
+  it("opens the report on the sheet the user went to", () => {
+    expect(reportForSheet(open(a, true), "s2", reports, { a: on("s1"), b: on("s2") })).toEqual({
+      kind: "open",
+      id: "b",
+    });
+  });
+
+  it("starts a new report on a sheet that has none, rather than change one out of view", () => {
+    expect(reportForSheet(open(a, true), "s3", reports, { a: on("s1"), b: on("s2") })).toEqual({ kind: "new" });
+  });
+
+  it("keeps a report whose sheet was deleted: its next update brings it to the selected cell", () => {
+    expect(reportForSheet(open(a, true), "s3", reports, { a: null, b: on("s2") })).toEqual({ kind: "keep" });
+    expect(reportForSheet(open(a, true), "s2", reports, { a: null, b: on("s2") })).toEqual({ kind: "keep" });
+  });
+
+  it("keeps a new report that has fields, and an empty one on a sheet without reports", () => {
+    expect(reportForSheet(open(withFields()), "s2", reports, { a: on("s1"), b: on("s2") })).toEqual({
+      kind: "keep",
+    });
+    expect(reportForSheet(open(), "s3", reports, { a: on("s1"), b: on("s2") })).toEqual({ kind: "keep" });
+  });
+
+  it("leaves an empty new report for the report on the sheet the user went to", () => {
+    expect(reportForSheet(open(), "s1", reports, { a: on("s1"), b: on("s2") })).toEqual({ kind: "open", id: "a" });
+  });
+
+  it("counts a filter as a field of a new report", () => {
+    const def = newReportDef("demo", "Sample", "Rides");
+    const filtered = {
+      ...def,
+      layout: {
+        ...def.layout,
+        filters: [{ hierarchy: calendar.uniqueName, caption: "Calendar", allMember: calendar.allMember, expanded: [], members: [], memberCaptions: [] }],
+      },
+    };
+    expect(reportForSheet(open(filtered), "s1", reports, { a: on("s1") })).toEqual({ kind: "keep" });
+  });
+
+  it("at start-up, opens a report on the sheet in view, or starts a new one", () => {
+    expect(reportForSheet(null, "s2", reports, { a: on("s1"), b: on("s2") })).toEqual({ kind: "open", id: "b" });
+    expect(reportForSheet(null, "s3", reports, { a: null, b: on("s2") })).toEqual({ kind: "new" });
   });
 });
 

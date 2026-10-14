@@ -167,6 +167,52 @@ export function placeLabel(extent: Extent | null): string {
 }
 
 // ---------------------------------------------------------------------------
+// Which report the pane edits on the sheet in view.
+// ---------------------------------------------------------------------------
+
+export type SheetChoice =
+  /** Go on with the report being edited. */
+  | { kind: "keep" }
+  /** Edit this report, which is on the sheet. */
+  | { kind: "open"; id: string }
+  /** Start a new report at the selected cell. */
+  | { kind: "new" };
+
+/**
+ * The report the pane should edit when the user is on `sheetId` and the selected cell
+ * is in no report. As in Excel, the field list belongs to the sheet in view: a field
+ * ticked there must never change a report on another sheet, where nothing would show.
+ *
+ * The report being edited stays when it is on this sheet, when it has no cells (its
+ * sheet was deleted; its next update puts it at the selected cell), or when it is a new
+ * report that already has fields. Otherwise the first report on this sheet is opened,
+ * and on a sheet without one a new report is started, unless an empty new one is
+ * already being edited. `current` is null at start-up. `locations` must be read from
+ * the workbook just now.
+ */
+export function reportForSheet(
+  current: Pick<Current, "def" | "persisted"> | null,
+  sheetId: string,
+  reports: ReportDef[],
+  locations: Record<string, Extent | null>,
+): SheetChoice {
+  if (current) {
+    const where = current.persisted ? locations[current.def.id] ?? null : null;
+    if (current.persisted && (where === null || where.sheetId === sheetId)) return { kind: "keep" };
+    const layout = current.def.layout;
+    const untouched =
+      layout.rows.length + layout.columns.length + layout.values.length + layout.filters.length === 0;
+    if (!current.persisted && !untouched) return { kind: "keep" };
+  }
+  const here = reports.find((d) => {
+    const where = locations[d.id];
+    return where !== null && where !== undefined && where.sheetId === sheetId;
+  });
+  if (here) return { kind: "open", id: here.id };
+  return current && !current.persisted ? { kind: "keep" } : { kind: "new" };
+}
+
+// ---------------------------------------------------------------------------
 // Reading a definition back from the workbook. The file may come from another Mac,
 // an older version, or be hand-edited, so nothing in it is trusted to have the right
 // shape. A definition that cannot be read is skipped, never thrown on.

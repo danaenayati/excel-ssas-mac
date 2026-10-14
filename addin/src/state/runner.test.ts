@@ -521,6 +521,23 @@ describe("a report that lost its cells, and moving a report", () => {
     expect(await host.loadReports()).toEqual([def]);
   });
 
+  it("goes to the selected cell when the pane updates it after its sheet was deleted", async () => {
+    host.select(1, 1);
+    const def = report(basic());
+    expectWritten(await runner.run(def, { anchor: null, useSelection: true }));
+    host.deleteSheet();
+    host.select(4, 3);
+
+    // A field is added in the pane: the report reappears where the user is, fields and all.
+    const added = { ...def, layout: layoutOf([{ type: "addMeasure", measure: measure("Fare") }], def.layout) };
+    const again = expectWritten(await runner.run(added, { anchor: null, useSelection: true }));
+    expect(again.extent).toMatchObject({ sheetName: "Sheet2", row: 4, col: 3, rows: 4, cols: 3 });
+    expect(cellText(4, 3)).toBe("Calendar");
+    expect(cellText(4, 5)).toBe("Fare");
+    expect(await host.getReportExtent(def.id)).toMatchObject({ sheetName: "Sheet2", row: 4, col: 3 });
+    expect(await host.loadReports()).toEqual([added]);
+  });
+
   it("relocate moves the block: old cells cleared, name at the new place", async () => {
     host.select(0, 0);
     const def = report(basic());

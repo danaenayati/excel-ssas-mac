@@ -40,7 +40,7 @@ import {
   type BooleanOption,
   type LayoutAction,
 } from "./state/layout";
-import { currentReducer, decidePlace, newReportDef, placeLabel } from "./state/report";
+import { currentReducer, decidePlace, newReportDef, placeLabel, reportForSheet } from "./state/report";
 import {
   ReportRunner,
   toUiError,
@@ -210,18 +210,21 @@ export function App({ api, host, mock }: Props) {
 
   /**
    * Read from the workbook where every report is now. What the pane remembers goes
-   * stale behind its back: a deleted sheet takes a report's cells with it.
+   * stale behind its back: a deleted sheet takes a report's cells with it. Resolves
+   * with what was read, or null when Excel was busy or a newer read took over.
    */
-  const refreshLocations = useCallback(async () => {
+  const refreshLocations = useCallback(async (): Promise<Record<string, Extent | null> | null> => {
     const seq = ++locationSeq.current;
     lastLocationRead.current = Date.now();
     const found: Record<string, Extent | null> = {};
     try {
       for (const def of reportsRef.current) found[def.id] = await host.getReportExtent(def.id);
     } catch {
-      return; // Excel is busy; the next selection change tries again.
+      return null; // Excel is busy; the next selection change tries again.
     }
-    if (seq === locationSeq.current) setLocations((map) => ({ ...map, ...found }));
+    if (seq !== locationSeq.current) return null;
+    setLocations((map) => ({ ...map, ...found }));
+    return found;
   }, [host, reportsRef]);
 
   /** One report's location, read now, and remembered. Null when it has no cells. */
@@ -266,13 +269,8 @@ export function App({ api, host, mock }: Props) {
           break;
         case "needs-anchor":
           setLocations((map) => ({ ...map, [def.id]: null }));
-          if (single && isCurrent()) {
-            setNote(
-              currentRef.current && currentRef.current.persisted
-                ? "The cells of this report can no longer be found. Select a cell and choose Place here."
-                : "Select an empty cell outside other reports, then choose Place here.",
-            );
-          }
+          // The selected cell is inside another report, the one place it could have gone.
+          if (single && isCurrent()) setNote("Select an empty cell outside other reports, then choose Place here.");
           break;
         case "error":
           if (single && isCurrent()) setError(outcome.error);
@@ -317,7 +315,9 @@ export function App({ api, host, mock }: Props) {
   const runCurrent = useCallback(async () => {
     const cur = currentRef.current;
     if (!cur) return;
-    await execute(cur.def, cur.revision, { anchor: cur.anchor, useSelection: !cur.persisted });
+    // The selected cell is used only when the report has no cells: it is new, or its
+    // sheet was deleted. Either way it appears where the user is, as in Excel.
+    await execute(cur.def, cur.revision, { anchor: cur.anchor, useSelection: true });
   }, [currentRef, execute]);
   const runCurrentRef = useLatest(runCurrent);
 
@@ -389,12 +389,20 @@ export function App({ api, host, mock }: Props) {
     setSelection(active);
     lastSheet.current = active ? active.cell.sheetId : null;
     lastLocationRead.current = Date.now();
-    const hit = active && active.report ? active.report.id : null;
-    const first = defs.find((d) => d.id === hit) ?? defs[0];
-    if (first) openReport(first);
+    // The report at the selected cell, else one on the sheet in view, else a new one
+    // there: never a report on another sheet, where ticked fields would not show.
+    const hit = active && active.report ? defs.find((d) => d.id === active.report?.id) : undefined;
+    const choice = hit
+      ? { kind: "open" as const, id: hit.id }
+      : active && defs.length > 0
+        ? reportForSheet(null, active.cell.sheetId, defs, where)
+        : null;
+    const first = choice && choice.kind === "open" ? defs.find((d) => d.id === choice.id) : defs[0];
+    if (choice && choice.kind === "new") startDraft(defs[0].connectionId, defs[0].catalog, defs[0].cube);
+    else if (first) openReport(first);
     else setScreen("connections");
     setPhase("ready");
-  }, [api, host, openReport]);
+  }, [api, host, openReport, startDraft]);
 
   useEffect(() => {
     void boot();
@@ -408,6 +416,29 @@ export function App({ api, host, mock }: Props) {
     void refreshAllRef.current();
   }, [phase, openingRefresh]);
 
+  /**
+   * The user arrived on another sheet, with the selected cell in no report: edit the
+   * report on that sheet, or a new one there (see `reportForSheet`). Notes stay, so that
+   * "rows on sheet Details1" survives Show Details moving to its new sheet.
+   */
+  const followSheet = useCallback(
+    (sheetId: string, found: Record<string, Extent | null>) => {
+      const cur = currentRef.current;
+      if (!cur || lastSheet.current !== sheetId) return;
+      const choice = reportForSheet(cur, sheetId, reportsRef.current, found);
+      if (choice.kind === "keep") return;
+      const def =
+        choice.kind === "open"
+          ? reportsRef.current.find((d) => d.id === choice.id)
+          : newReportDef(cur.def.connectionId, cur.def.catalog, cur.def.cube);
+      if (!def) return;
+      dispatch({ type: "open", def, persisted: choice.kind === "open" });
+      setError(null);
+      setPicker(null);
+    },
+    [currentRef, reportsRef],
+  );
+
   // Selecting a cell inside a report makes that report the one being edited. Arriving
   // on another sheet (or a sheet being deleted) is when report locations go stale.
   useEffect(() => {
@@ -417,7 +448,9 @@ export function App({ api, host, mock }: Props) {
       const sheetChanged = lastSheet.current !== next.cell.sheetId;
       lastSheet.current = next.cell.sheetId;
       if (sheetChanged || Date.now() - lastLocationRead.current > LOCATION_REFRESH_MS) {
-        void refreshLocations();
+        void refreshLocations().then((found) => {
+          if (found && sheetChanged && !next.report) followSheet(next.cell.sheetId, found);
+        });
       }
       if (!next.report) return;
       const cur = currentRef.current;
@@ -426,7 +459,7 @@ export function App({ api, host, mock }: Props) {
       const def = reportsRef.current.find((d) => d.id === id);
       if (def) openReport(def);
     });
-  }, [phase, host, currentRef, reportsRef, openReport, refreshLocations]);
+  }, [phase, host, currentRef, reportsRef, openReport, refreshLocations, followSheet]);
 
   const reloadConnections = useCallback(async () => {
     setConnections(await api.connections());
@@ -1015,8 +1048,8 @@ export function App({ api, host, mock }: Props) {
 
         {lost && (
           <p className="hint-line" role="status">
-            This report has no cells on a sheet (its sheet may have been deleted). Select a cell and
-            choose Place here to put it back with its fields.
+            This report has no cells on a sheet (its sheet may have been deleted). Change a field or
+            click Refresh to put it, with its fields, at the selected cell.
           </p>
         )}
 
